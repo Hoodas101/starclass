@@ -386,6 +386,7 @@ const props = defineProps({
 })
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useUserStore } from '@/store/user'
 import { Plus, Download, Printer, Upload } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import {
@@ -397,6 +398,7 @@ import {
   refundPreview as refundPreviewApi,
   updateOrder,
   cancelOrder,
+  payOrder,
   getStudents,
   getCardTypes,
   getSettings,
@@ -417,6 +419,7 @@ import { useSettingsStore } from '@/store/settings'
 const RECEIPT_AMOUNT_COLOR = '#C92A2A'
 
 const settingsStore = useSettingsStore()
+const userStore = useUserStore()
 const t = settingsStore.t
 
 const route = useRoute()
@@ -813,6 +816,29 @@ const handleCancelOrder = async (order) => {
     if (e === 'cancel') return
     // 真实 API / 网络错误：给出可见反馈
     ElMessage.error(e?.message || '取消订单失败')
+  }
+}
+
+// 确认收款：将 pending 订单标记为已收款（仅管理员；后端 POST /:id/pay 也强制 isAdminReq）
+const confirmingPay = ref(false)
+const handleConfirmPayment = async (order) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认收到订单「${order.order_no}」的款项，并将其标记为已收款？`,
+      '确认收款',
+      { type: 'warning', confirmButtonText: '确认收款', confirmButtonClass: 'el-button--success' }
+    )
+    confirmingPay.value = true
+    await payOrder(order.id)
+    ElMessage.success('已确认收款，订单状态更新为已收款')
+    orderDetailVisible.value = false
+    loadOrders()
+  } catch (e) {
+    // 用户主动取消（ElMessageBox 取消按钮 reject 值为 'cancel'）静默处理
+    if (e === 'cancel') return
+    // 真实 API / 网络错误：拦截器已提示业务/网络错误，无需重复弹 toast
+  } finally {
+    confirmingPay.value = false
   }
 }
 
