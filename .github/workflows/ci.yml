@@ -23,20 +23,12 @@ jobs:
         working-directory: backend
         run: npm ci
 
-      - name: 专项回归套件（全部自带隔离临时库，零环境依赖）
+      - name: 后端回归套件全量（与 npm test 共用同一份清单）
+        # 清单唯一来源：backend/tests/run-all.cjs。此前清单在本文件与 package.json 各写一份，
+        # 已经漂移：card-expiry / permission-keys 两个 P1 回归套件只在 npm test 里跑，CI 未执行。
+        # 每个套件自带隔离临时库（夹具或空库 schema），零环境依赖，不读仓库内的 db/data.db。
         working-directory: backend
-        run: |
-          node tests/class-module.test.js
-          node tests/audit-regression.cjs
-          node tests/lead-suggestions-regression.cjs
-          node tests/queue-regression.cjs
-          node tests/p2-fixes.test.js
-          node tests/finance-refund-regression.cjs
-          node tests/finance-payroll-regression.cjs
-      - name: 全功能套件（256 项：CI 上自动以 seed 夹具自举隔离库）
-        working-directory: backend
-        # 本地有 db/data.db 快照时自动用快照；CI 空库则先 init+seed 出夹具再跑
-        run: node tests/full-system.test.js
+        run: node tests/run-all.cjs
 
   web-build:
     name: 管理后台构建（Node 20）
@@ -71,6 +63,40 @@ jobs:
           docker exec ci-app node db/init.js
           docker exec ci-app node -e "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1))"
           docker rm -f ci-app
+
+  architecture-gates:
+    name: 架构门禁（重复实现 / 散落 DDL）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 禁止在路由中重复实现鉴权判定
+        # isAdminReq / isStaffReq / isCoachReq / canViewStudentData 必须从 backend/utils 统一引入。
+        # 历史上 isAdminReq 被复制了 6 份，其中一份语义已分叉（用 req.openid 自实现），
+        # 导致权限判定出现两个真相来源。本门禁锚定行首定义，注释中提及不受影响。
+        run: |
+          if git grep -nE '^function (isAdminReq|isStaffReq|isCoachReq|canViewStudentData)\(|^const (isAdminReq|isStaffReq|isCoachReq|canViewStudentData) *=' \
+               -- 'backend/routes/*' 'backend/utils/*' ':!backend/utils/index.js'; then
+            echo "检测到鉴权判定函数的重复实现 —— 请改为从 backend/utils 统一引入。"
+            exit 1
+          fi
+          echo "无重复鉴权实现。"
+
+      - name: 禁止在路由 / 服务入口散落 DDL
+        # 建表 / 改表 / 建索引必须走 backend/migrations/。散落在路由里的
+        # `CREATE TABLE IF NOT EXISTS` 对「表已存在但结构较旧」的库是静默空操作，
+        # 新列永远到不了老库，直到运行时才以 no such column 崩溃（P1-11）。
+        # 注释行（以 // 或 * 开头）不计入，便于在代码里说明迁移去向。
+        run: |
+          HITS=$(git grep -nE 'CREATE TABLE|ALTER TABLE|CREATE INDEX|CREATE UNIQUE|DROP TABLE' \
+                   -- 'backend/routes/*' 'backend/utils/*' 'backend/server.js' \
+                 | grep -vE ':[0-9]+:[[:space:]]*(//|\*)' || true)
+          if [ -n "$HITS" ]; then
+            echo "$HITS"
+            echo "检测到迁移目录之外的 DDL —— 请收编至 backend/migrations/。"
+            exit 1
+          fi
+          echo "无散落 DDL。"
 
   sensitive-values:
     name: 敏感信息门禁

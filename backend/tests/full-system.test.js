@@ -1,7 +1,7 @@
 /**
  * 星课教务系统 — 后端全功能系统测试
  *
- * 运行方式（隔离测试库，每次运行前自动从真实库快照复制，绝不污染真实数据）：
+ * 运行方式（隔离测试库，每次运行前重建 seed 夹具，绝不污染真实数据）：
  *   PORT=3099 NODE_ENV=test node tests/full-system.test.js
  *
  * 覆盖：
@@ -22,39 +22,17 @@ const crypto = require('crypto');
 
 // ---- 隔离环境（必须在 require('./server') 之前设置）----
 process.env.PORT = process.env.PORT || '3099';
-process.env.NODE_ENV = 'test'; // 避免生产密钥拒绝启动（开发默认密钥仍会告警）
-const SRC_DB = path.join(__dirname, '..', 'db', 'data.db');
-const TEST_DB_DIR = '/tmp/edu-test';
-process.env.DB_PATH = path.join(TEST_DB_DIR, 'data.db');
-
-// 每次运行前从真实库快照复制一份干净的测试库（含 WAL 文件），保证确定性；
-// CI 上没有本地快照时，自举一个 seed 夹具库（空库 init + seed），配合下方动态身份解析，
-// 让 256 项套件同样能在 CI 空环境运行。
-fs.mkdirSync(TEST_DB_DIR, { recursive: true });
-const SNAPSHOT = fs.existsSync(SRC_DB) && process.env.FULLSYSTEM_FORCE_FIXTURE !== '1';
-if (SNAPSHOT) {
-  for (const f of ['data.db', 'data.db-shm', 'data.db-wal']) {
-    const src = path.join(__dirname, '..', 'db', f);
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(TEST_DB_DIR, f));
-  }
-} else {
-  // 夹具库从零开始：清掉上次运行残留，避免旧快照混入
-  for (const f of ['data.db', 'data.db-shm', 'data.db-wal']) {
-    try { fs.unlinkSync(path.join(TEST_DB_DIR, f)); } catch (e) { /* 不存在则忽略 */ }
-  }
-  // 自举夹具：db/index.js 会自动建表 + 跑迁移，然后灌入种子数据（同进程单连接）
-  require('../db/seed')();
-}
+// 唯一引导路径：每次运行都重建 seed 夹具库，与 CI 完全一致。
+// 历史上此处有「本地有 data.db 则复制快照，否则自举夹具」双分支，导致本地与 CI
+// 跑的不是同一套代码路径（教练权限集、teacher_id 均不同）—— 已收敛为夹具单路径。
+const { bootstrap, resolveStaffIdentities } = require('./_bootstrap.cjs');
+bootstrap('/tmp/edu-test');
 
 const BASE = `http://localhost:${process.env.PORT}`;
 const { generateToken } = require('../utils');
 
-// ---- 种子身份（默认来自真实库快照；CI 夹具库在服务器启动后动态解析）----
-const IDS = {
-  admin: 'phone_13800000001',
-  coach: 'phone_13800000011',
-  sales: 'phone_13700000001',
-};
+// ---- 种子身份（夹具 openid 为 wx_ 前缀，服务器启动后从库中按角色解析）----
+let IDS;
 
 // ---- 测试结果收集 ----
 const results = [];
@@ -191,14 +169,8 @@ async function main() {
   // token_version 吊销校验：自签 Token 需携带与库中一致的 tv（服务器启动时已跑迁移 012）
   const Database = require('better-sqlite3');
   const tvdb = new Database(process.env.DB_PATH);
-  // 夹具库（CI 自举 seed）的身份 openid 是 wx_ 前缀而非 phone_ 前缀：无快照时按角色动态解析；
-  // 有本地快照时保持上方硬编码身份（历史行为不变，且 coach 权限集已按快照配置）
-  if (!SNAPSHOT) {
-    for (const role of ['admin', 'coach', 'sales']) {
-      const row = tvdb.prepare("SELECT openid FROM users WHERE role = ? AND status = 'active' ORDER BY created_at LIMIT 1").get(role);
-      if (row) IDS[role] = row.openid;
-    }
-  }
+  // 夹具身份 openid 是 wx_ 前缀，按角色动态解析；解析不到会直接失败（而非静默用不存在的身份）
+  IDS = resolveStaffIdentities(tvdb);
   const tvOf = (openid) => (tvdb.prepare('SELECT token_version FROM users WHERE openid = ?').get(openid) || {}).token_version || 0;
   const tokens = {
     admin: generateToken({ openid: IDS.admin, role: 'admin', tv: tvOf(IDS.admin) }),
@@ -235,6 +207,22 @@ async function main() {
     const r = await call(m, p);
     rec('A-public', `${m} ${p}`, r.status !== 401, `status=${r.status}（期望非 401）`);
   }
+
+  // ---------------- A2. P0-1：URL 大小写绕过鉴权 ----------------
+  console.log('\x1b[1m[A2] P0-1 URL 大小写绕过鉴权\x1b[0m');
+  // 受保护路由的大写形式，无 token 必须 401。修复前：Express 路由大小写不敏感会把
+  // /API/schedules/ID1 解析到 /api/schedules/ID1 处理器，而鉴权守卫用大小写敏感的
+  // startsWith('/api') 判定，导致大写路径跳过鉴权却仍命中受保护路由。
+  const upperProtected = ['/API/schedules/ID1', '/API/students', '/API/orders', '/API/admin/dashboard', '/API/membership/deduct'];
+  for (const p of upperProtected) {
+    const r = await call('POST', p);
+    rec('A2-case-bypass', `POST ${p}`, r.status === 401, `status=${r.status}（期望 401）`);
+  }
+  // 公开路由的大写形式仍应可达（非 401），证明大小写归一后公开路径未被误伤
+  const rLogin = await call('POST', '/API/auth/login');
+  rec('A2-case-public-login', 'POST /API/auth/login', rLogin.status !== 401, `status=${rLogin.status}（期望非 401）`);
+  const rHealth = await call('GET', '/API/health');
+  rec('A2-case-public-health', 'GET /API/health', rHealth.status !== 401, `status=${rHealth.status}（期望非 401）`);
 
   // ---------------- B. 角色越权 403 矩阵 ----------------
   console.log('\n\x1b[1m[B] 角色越权矩阵\x1b[0m');
@@ -480,7 +468,12 @@ async function main() {
   }
   {
     const res = await fetch(BASE + '/api/students', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tokens.admin }, body: '{bad json' });
-    rec('F-invalid-json', '非法 JSON body 不崩溃', res.status === 400 || res.status === 500 || res.status === 200, `status=${res.status}`);
+    // 断言精确到 400：body-parser 解析失败是**客户端**错误。
+    // 旧断言为 `400 || 500 || 200`，对任何结果恒真 —— 实测当时后端回的就是 500，
+    // 即「非法 JSON 被当作服务端故障」，用例却报 PASS（假绿）。
+    rec('F-invalid-json', '非法 JSON body → 400（非 500）', res.status === 400, `status=${res.status}`);
+    const alive = await call('GET', '/api/health');
+    rec('F-invalid-json', '非法 JSON 后进程仍存活', alive.status === 200, `status=${alive.status}`);
   }
   if (parentToken && bound) {
     const qdb = new Database(process.env.DB_PATH, { readonly: true });
@@ -495,6 +488,38 @@ async function main() {
     } else {
       recWarn('F-parent-cross-view', '无其他绑定学员可测', '跳过');
     }
+  }
+
+  // ---------------- G. 自助改密与会话连续性（P1-15） ----------------
+  // 后端 /auth/changePassword 一直支持 admin/coach/sales，但承载表单的系统设置页仅
+  // 管理员可进，教练/销售拿不到任何改密入口；且改密返回的新 Token 前端未落盘，
+  // 下一次请求即 401 被登出。此处锁定后端契约：改密成功返回的 Token 必须可直接使用，
+  // 旧 Token 必须立即失效 —— 这正是前端必须替换本地 Token 的依据。
+  // 注意：本段会 bump 该身份的 token_version，使其既有 Token 全部失效，故必须放在最后。
+  console.log('\x1b[1m[G] 自助改密（P1-15）\x1b[0m');
+  {
+    const OLD_PWD = '123456';        // seed 夹具的初始密码
+    const NEW_PWD = 'starclass-15';
+    const changePwd = (token, oldPassword, newPassword) =>
+      call('POST', '/api/auth/changePassword', { token, body: { oldPassword, newPassword } });
+
+    const wrong = await changePwd(tokens.sales, 'not-the-password', NEW_PWD);
+    rec('G-change-pwd-wrong-old', '原密码错误 → 403', wrong.status === 403, `status=${wrong.status}`);
+
+    const tooShort = await changePwd(tokens.sales, OLD_PWD, '123');
+    rec('G-change-pwd-too-short', '新密码过短 → 400', tooShort.status === 400, `status=${tooShort.status}`);
+
+    const ok = await changePwd(tokens.sales, OLD_PWD, NEW_PWD);
+    const fresh = ok.data?.data?.token;
+    // 销售此前被后端漏掉（只判 admin/coach），此处同时守住「销售也能改密」这一契约
+    rec('G-change-pwd-ok', '销售可自助改密（非管理员角色未被拦）', ok.status === 200 && !!fresh, `status=${ok.status} token=${!!fresh}`);
+
+    // 判别性核心：返回的新 Token 必须真的可用，否则前端即使落盘也无效
+    const withNew = await call('GET', '/api/auth/getProfile', { token: fresh });
+    rec('G-new-token-usable', '改密返回的新 Token 可直接访问受保护接口', withNew.status === 200, `status=${withNew.status}`);
+
+    const withOld = await call('GET', '/api/auth/getProfile', { token: tokens.sales });
+    rec('G-old-token-revoked', '改密后旧 Token 立即失效 → 401', withOld.status === 401, `status=${withOld.status}`);
   }
 
   // ---------------- 汇总 ----------------

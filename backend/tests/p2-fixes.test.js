@@ -1,7 +1,7 @@
 /**
  * 星课教务系统 — P2 修复回归测试（针对性验证本次修复的行为）
  *
- * 运行（隔离库，复制真实库快照，绝不污染真实数据）：
+ * 运行（隔离库，每次运行前重建 seed 夹具，绝不污染真实数据）：
  *   PORT=3098 NODE_ENV=test node tests/p2-fixes.test.js
  *
  * 覆盖：P2-1 请假↔考勤状态对齐+扣课幂等 / P2-4 私信已读归属 / P2-5 试听频控
@@ -11,40 +11,28 @@
  */
 'use strict';
 
-const path = require('path');
-const fs = require('fs');
 const Database = require('better-sqlite3');
 
 process.env.PORT = process.env.PORT || '3098';
-process.env.NODE_ENV = 'test';
-const SRC_DB = path.join(__dirname, '..', 'db', 'data.db');
-const TEST_DB_DIR = '/tmp/edu-test-p2';
-process.env.DB_PATH = path.join(TEST_DB_DIR, 'data.db');
-// 双模式（同 full-system）：本地有快照则复制快照；CI 空库则自举 seed 夹具。
-// 旧版只复制快照，CI 空库下身份解析不到 → 403 + 外键崩溃（对抗审查实测复现）。
-fs.mkdirSync(TEST_DB_DIR, { recursive: true });
-const SNAPSHOT = fs.existsSync(SRC_DB) && process.env.P2_FORCE_FIXTURE !== '1';
-if (SNAPSHOT) {
-  for (const f of ['data.db', 'data.db-shm', 'data.db-wal']) {
-    const src = path.join(__dirname, '..', 'db', f);
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(TEST_DB_DIR, f));
-  }
-} else {
-  for (const f of ['data.db', 'data.db-shm', 'data.db-wal']) {
-    try { fs.unlinkSync(path.join(TEST_DB_DIR, f)); } catch (e) { /* 不存在则忽略 */ }
-  }
-  require('../db/seed')();
-}
+// 唯一引导路径：每次运行都重建 seed 夹具库，与 CI 完全一致（详见 _bootstrap.cjs 说明）。
+const { bootstrap, resolveStaffIdentities } = require('./_bootstrap.cjs');
+bootstrap('/tmp/edu-test-p2');
 
 const BASE = `http://localhost:${process.env.PORT}`;
 const { generateToken } = require('../utils');
-const IDS = { admin: 'phone_13800000001', coach: 'phone_13800000011', sales: 'phone_13700000001' };
+let IDS;
 
-let passed = 0, failed = 0;
+let passed = 0, failed = 0, warned = 0;
 function rec(name, ok, detail) {
   if (ok) passed++; else failed++;
   const tag = ok ? '\x1b[32mPASS\x1b[0m' : '\x1b[31mFAIL\x1b[0m';
   console.log(`  [${tag}] ${name}${ok ? '' : '  -> ' + detail}`);
+}
+// 「样本不足、跳过」必须与「通过」区分：旧实现遇到无样本分支直接记 true，
+// 于是该用例在空库上恒 PASS —— 属于假绿（测试通过不代表被测行为被验证过）。
+function recWarn(name, detail) {
+  warned++;
+  console.log(`  [\x1b[33mWARN\x1b[0m] ${name}  -> ${detail}`);
 }
 
 async function call(method, p, { token, body, query } = {}) {
@@ -76,16 +64,13 @@ async function main() {
 
   // token_version 吊销校验：自签 Token 需携带与库中一致的 tv（服务器启动时已跑迁移 012）
   const db = new Database(process.env.DB_PATH);
-  // 夹具库（CI 自举 seed）身份为 wx_ 前缀且 schedules.teacher_id 外键指向 teachers：
-  // 无快照时按角色动态解析 openid，并把 coach 覆盖为有排课资格的 teacher_id
-  if (!SNAPSHOT) {
-    for (const role of ['admin', 'coach', 'sales']) {
-      const row = db.prepare("SELECT openid FROM users WHERE role = ? AND status = 'active' ORDER BY created_at LIMIT 1").get(role);
-      if (row) IDS[role] = row.openid;
-    }
-  }
-  // schedules.teacher_id 外键指向 teachers.id：夹具库没有 phone_* 教师行，改用 seed 的教练教师
-  const coachTeacherId = SNAPSHOT ? IDS.coach : ((db.prepare("SELECT id FROM teachers WHERE status = 'active' ORDER BY id LIMIT 1").get() || {}).id || 'teacher_001');
+  // 夹具身份为 wx_ 前缀，按角色动态解析；解析不到会直接失败（而非静默用不存在的身份）
+  IDS = resolveStaffIdentities(db);
+  // schedules.teacher_id 指向 teachers.id：夹具无 phone_* 教师行，取 seed 的教练教师档案。
+  // 旧快照路径曾把 IDS.coach（phone_13800000011）当作 teacher_id 写入，而 teachers 表
+  // 中并无该 id —— 同一断言在两条路径上验证的是不同数据完整性条件，已随收敛消除。
+  const coachTeacherId = (db.prepare("SELECT id FROM teachers WHERE status = 'active' ORDER BY id LIMIT 1").get() || {}).id;
+  if (!coachTeacherId) { console.error('[p2-fixes] 夹具缺少可用教师档案，无法继续。'); process.exit(2); }
   const tvOf = (openid) => (db.prepare('SELECT token_version FROM users WHERE openid = ?').get(openid) || {}).token_version || 0;
   const tokens = {
     admin: generateToken({ openid: IDS.admin, role: 'admin', tv: tvOf(IDS.admin) }),
@@ -236,21 +221,77 @@ async function main() {
   }
 
   // ============================================================
-  // P2-7 退卡按订单实付（取真实购卡订单验证退款金额合理）
+  // P2-7 退卡按订单实付（而非卡类型标价）
   // ============================================================
   {
-    const card = db.prepare(`SELECT id, student_id, order_id, card_type_id, billing_mode, total_classes, remaining_classes, expires_at, activated_at, status
-      FROM member_cards WHERE order_id IS NOT NULL AND order_id != '' AND status='active' LIMIT 1`).get();
-    if (card && card.order_id) {
-      const order = db.prepare('SELECT payable_amount, items FROM orders WHERE id = ?').get(card.order_id);
-      let itemPrice = 0;
-      try { const it = (JSON.parse(order.items || '[]')).find(i => i.itemId === card.card_type_id) || (JSON.parse(order.items||'[]'))[0]; if (it) itemPrice = Number(it.price) || 0; } catch (e) {}
-      const r = await call('POST', '/api/membership/refund', { token: tokens.admin, body: { cardId: card.id, studentId: card.student_id, reason: '测试退卡' } });
-      const amt = r.data && r.data.data && Number(r.data.data.refundAmount);
-      const reasonable = r.status === 200 && Number.isFinite(amt) && amt >= 0;
-      rec('P2-7 退卡按实付计退（金额合理且>=0）', reasonable, `status=${r.status} amt=${amt} orderPayable=${order && order.payable_amount} itemPrice=${itemPrice}`);
+    // 构造确定性场景：真实库里的购卡订单普遍无折扣（实测样本 实付=199、卡类型标价=199），
+    // 用真实样本无法判别「按实付退」与「按标价退」—— 用例会恒过而毫无约束力。
+    // 因此自建「标价全额、实付五折」的订单：两者相差一倍，任何退到标价的实现都会立刻暴露。
+    const stu = db.prepare('SELECT id, name FROM students ORDER BY id LIMIT 1').get();
+    const ct = db.prepare('SELECT id, name, price FROM membership_cards ORDER BY id LIMIT 1').get();
+    const listPrice = Number(ct && ct.price) || 0;
+    if (!stu || !ct || listPrice <= 0) {
+      recWarn('P2-7 退卡按实付计退', '缺少学员或卡类型样本，跳过（不计入通过）');
     } else {
-      rec('P2-7 退卡按实付计退（无购卡订单样本，跳过）', true, 'skip');
+      const TOTAL = 10;
+      const PAID = Math.round(listPrice * 0.5); // 五折成交
+
+      /**
+       * 建一张「已支付、可退」的次数卡，返回按 membership.js 声明口径推导的期望退款额。
+       * 口径：实付价 × 剩余比例，且不超过订单剩余可退额（payable − 已退）。
+       * 注意订单明细字段名是 unitPrice（orders.js 写入）；旧测试读 it.price 并回退 items[0]，
+       * 两者都不会命中，导致其诊断输出恒为 0、断言退化为 `amt >= 0`。
+       */
+      const seedCard = (remaining, refundedSoFar) => {
+        const ts = t();
+        const orderId = gen('ORD_P27_');
+        db.prepare(`INSERT INTO orders (id, order_no, student_id, student_name, order_type, items,
+            total_amount, discount_amount, payable_amount, status, paid_at, refunded_amount, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 'membership', ?, ?, ?, ?, 'paid', ?, ?, ?, ?)`)
+          .run(orderId, gen('P27'), stu.id, stu.name,
+            JSON.stringify([{ itemType: 'membershipCard', itemId: ct.id, itemName: ct.name, quantity: 1, unitPrice: listPrice, totalPrice: listPrice }]),
+            listPrice, listPrice - PAID, PAID, ts, refundedSoFar, ts, ts);
+        const cardId = gen('CARD_P27_');
+        db.prepare(`INSERT INTO member_cards (id, card_type_id, card_type_name, student_id, student_name,
+            total_classes, remaining_classes, used_classes, activated_at, expires_at, status, order_id,
+            billing_mode, pause_total_ms, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 'count', 0, ?, ?)`)
+          .run(cardId, ct.id, ct.name, stu.id, stu.name, TOTAL, remaining, TOTAL - remaining,
+            ts, ts + 365 * 86400000, orderId, ts, ts);
+        return {
+          cardId,
+          expected: Math.min(Math.round(remaining * PAID / TOTAL), Math.max(0, PAID - refundedSoFar)),
+        };
+      };
+
+      const refund = async (cardId) => {
+        const r = await call('POST', '/api/membership/refund', { token: tokens.admin, body: { cardId, studentId: stu.id, reason: '测试退卡' } });
+        const amt = r.data && r.data.data && Number(r.data.data.refundAmount);
+        const rfnd = db.prepare('SELECT payable_amount FROM orders WHERE id = ?').get((r.data && r.data.data && r.data.data.orderId) || '');
+        return { r, amt, rfnd };
+      };
+
+      // —— 场景 A：剩余 6/10、订单无已退 → 期望 = round(6 × 实付 ÷ 10) ——
+      const a = seedCard(6, 0);
+      // 先自证场景可判别：按标价退会得到不同答案，否则本用例形同虚设
+      const byListPrice = Math.round(6 * listPrice / TOTAL);
+      rec('P2-7 场景可判别（按实付 ≠ 按标价）', a.expected !== byListPrice,
+        `expectedByPaid=${a.expected} expectedByListPrice=${byListPrice} listPrice=${listPrice} paid=${PAID}`);
+
+      const ra = await refund(a.cardId);
+      rec('P2-7 退款额 = 实付价×剩余比例（非标价）',
+        ra.r.status === 200 && ra.amt === a.expected,
+        `status=${ra.r.status} amt=${ra.amt} expected=${a.expected}（按标价会退 ${byListPrice}）`);
+      rec('P2-7 退款流水落账金额与返回值一致',
+        !!ra.rfnd && Number(ra.rfnd.payable_amount) === ra.amt,
+        `rfnd=${ra.rfnd && ra.rfnd.payable_amount} amt=${ra.amt}`);
+
+      // —— 场景 B：剩余 6/10 但订单仅剩 10 可退 → 必须被硬上限截断 ——
+      const b = seedCard(6, PAID - 10);
+      const rb = await refund(b.cardId);
+      rec('P2-7 退款额受订单剩余可退额硬上限约束',
+        rb.r.status === 200 && rb.amt === b.expected && rb.amt < Math.round(6 * PAID / TOTAL),
+        `amt=${rb.amt} expected=${b.expected}（未截断会退 ${Math.round(6 * PAID / TOTAL)}）`);
     }
   }
 
@@ -266,7 +307,7 @@ async function main() {
   }
 
   db.close();
-  console.log(`\n\x1b[1m结果汇总：PASS ${passed}  FAIL ${failed}\x1b[0m`);
+  console.log(`\n\x1b[1m结果汇总：PASS ${passed}  FAIL ${failed}  WARN ${warned}\x1b[0m`);
   process.exit(failed > 0 ? 1 : 0);
 }
 
