@@ -420,6 +420,40 @@
               </div>
             </div>
           </div>
+
+          <!-- 方式四：服务器端自动备份管理 -->
+          <div class="backup-card">
+            <div class="backup-card__head">
+              <el-icon :size="18" class="backup-card__icon"><FolderOpened /></el-icon>
+              <div>
+                <div class="backup-card__title">服务器自动备份管理</div>
+                <div class="backup-card__desc">由系统定时生成的数据库备份，可在此查看、立即创建或删除（存储位置独立于「下载备份」）</div>
+              </div>
+            </div>
+            <div class="backup-box">
+              <div class="backup-actions">
+                <el-button type="primary" :icon="Refresh" :loading="creatingBackup" @click="handleCreateBackup">立即备份</el-button>
+                <el-button :icon="Download" :loading="backupLoading" @click="loadBackups">刷新列表</el-button>
+              </div>
+              <p class="backup-tip" v-if="backupConfig">
+                保留策略：保留最近 {{ backupConfig.retention }} 个备份；备份目录（本地）：{{ backupDir }}
+              </p>
+              <el-table v-loading="backupLoading" :data="backupList" empty-text="暂无服务器备份" style="margin-top: 12px">
+                <el-table-column prop="filename" label="文件名" min-width="220" show-overflow-tooltip />
+                <el-table-column label="大小" width="120">
+                  <template #default="{ row }">{{ formatSize(row.size) }}</template>
+                </el-table-column>
+                <el-table-column label="创建时间" width="180">
+                  <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
+                </el-table-column>
+                <el-table-column label="操作" width="110" align="right">
+                  <template #default="{ row }">
+                    <el-button type="danger" link :icon="Delete" :loading="deletingFile === row.filename" @click="handleDeleteBackup(row.filename)">删除</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </div>
         </div>
 
         <!-- 确认弹窗：下载完整数据库 -->
@@ -571,10 +605,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed } from 'vue'
-import { Upload, Picture, Download, Bell, Plus, Delete, Document, QuestionFilled, WarningFilled, Refresh } from '@element-plus/icons-vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
+import { Upload, Picture, Download, Bell, Plus, Delete, Document, QuestionFilled, WarningFilled, Refresh, FolderOpened } from '@element-plus/icons-vue'
 import request from '@/api/request'
-import { getSettings, saveSettings, generateRenewalNotices, getDataModules, exportData, importData } from '@/api/modules'
+import { getSettings, saveSettings, generateRenewalNotices, getDataModules, exportData, importData, getBackups, createBackup, deleteBackup } from '@/api/modules'
 import { useSettingsStore } from '@/store/settings'
 import { useUserStore } from '@/store/user'
 import { SCHEMES, CONCEPTS } from '@/constants/terms'
@@ -655,6 +689,82 @@ const confirmDownloadBackup = async () => {
     backingUp.value = false
   }
 }
+
+// ============================================
+// 服务器自动备份管理（list / create / delete）—— 仅管理员可见（备份 tab 已 adminOnly）
+// ============================================
+const backupList = ref([])
+const backupLoading = ref(false)
+const creatingBackup = ref(false)
+const deletingFile = ref('')
+const backupConfig = ref(null)
+const backupDir = ref('')
+
+const loadBackups = async () => {
+  backupLoading.value = true
+  try {
+    const res = await getBackups()
+    backupList.value = (res && res.list) || []
+    backupConfig.value = (res && res.config) || null
+    backupDir.value = (res && res.backupDir) || ''
+  } catch (e) {
+    // 拦截器已提示业务/网络错误；列表留空，避免重复 toast
+    backupList.value = []
+  } finally {
+    backupLoading.value = false
+  }
+}
+
+const handleCreateBackup = async () => {
+  creatingBackup.value = true
+  try {
+    await createBackup()
+    ElMessage.success('备份已创建')
+    await loadBackups()
+  } catch (e) {
+    // 拦截器已提示
+  } finally {
+    creatingBackup.value = false
+  }
+}
+
+const handleDeleteBackup = async (filename) => {
+  try {
+    await ElMessageBox.confirm(`确定删除备份「${filename}」？删除后不可恢复。`, '删除备份', {
+      type: 'warning',
+      confirmButtonText: '确认删除',
+      confirmButtonClass: 'el-button--danger',
+    })
+    deletingFile.value = filename
+    await deleteBackup(filename)
+    ElMessage.success('已删除')
+    await loadBackups()
+  } catch (e) {
+    if (e === 'cancel') return
+    // 拦截器已提示
+  } finally {
+    deletingFile.value = ''
+  }
+}
+
+const formatSize = (b) => {
+  if (b == null) return '-'
+  if (b < 1024) return `${b} B`
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`
+  return `${(b / 1024 / 1024).toFixed(2)} MB`
+}
+
+const formatTime = (ts) => {
+  if (!ts) return '-'
+  const d = new Date(ts)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+// 切换到「数据备份」标签页时拉取服务器备份列表（仅管理员可见）
+watch(activeTab, (t) => {
+  if (t === 'backup') loadBackups()
+})
 
 // ============================================
 // 数据导出 / 导入（JSON，按模块）
