@@ -21,6 +21,16 @@ const backendDir = path.join(__dirname, '..');
 
 // 顺序有意为之：先跑「离线直调处理器 + 自带隔离库」的轻套件（快、失败定位准），
 // 再跑「启动 HTTP 服务」的重套件（full-system 最慢，放最后）。
+//
+// 未纳入本清单的套件（有意为之，非遗漏）：
+//   · smoke-test.mjs / tests/live-smoke-3role.mjs —— 二者都针对**已运行的线上后端**
+//     （默认 http://localhost:3001/api，可用 API_BASE 覆盖），依赖真实部署的库与
+//     手机号登录（13800000001 等）。CI 的 backend-tests 作业不启动常驻服务，
+//     本地 3001 又被实际运行的服务占用，纳入清单会让 run-all 必然失败而非发现回归。
+//     其等价的**进程内**覆盖已由 batch9-authz-concurrency.test.cjs（支付/退款幂等、
+//     扣课幂等、跨教练签到 403、>1mb 请求体 413、角色边界 403）与
+//     full-system.test.js 的 A/A3 段（401 扫描 + 伪造 x-openid 头）承接。
+//     如需保留线上冒烟，请在部署流水线（.github/workflows/deploy.yml）中单独调用。
 const SUITES = [
   ['class-module.test.js', '课程模块'],
   ['p2-infra-regression.cjs', 'P2 基础设施（唯一约束/索引/TRUST_PROXY）'],
@@ -35,6 +45,7 @@ const SUITES = [
   ['p2-fixes.test.js', 'P2 修复回归'],
   ['finance-refund-regression.cjs', '财务口径 + 退卡金额'],
   ['finance-payroll-regression.cjs', '薪资计算回归'],
+  ['batch9-authz-concurrency.test.cjs', '支付/退款幂等 + 跨教练签到鉴权 + 请求边界'],
   ['full-system.test.js', '全功能系统'],
 ];
 

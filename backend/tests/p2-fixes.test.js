@@ -299,11 +299,70 @@ async function main() {
   // P2-8 财务 by-product 口径（退款按比例分摊 + 收入用实付）
   // ============================================================
   {
+    // 旧断言是双重假绿：
+    //   · `list.every(p => Number.isFinite(...))` 在空数组上恒真（接口返回 [] 也算过）
+    //   · 只校验「是有限数」，属常量下界 —— 金额算错 10 倍、退款没冲减都照样 PASS
+    // 这里改为自建「已知金额」订单，断言每个产品的 revenue / refunded / net 精确值。
+    const uniq = Math.random().toString(36).slice(2, 8);
+    const nameA = `B9单A_${uniq}`;   // 单明细：全额按实付分摊
+    const nameB = `B9单B_${uniq}`;   // 双明细：按 unitPrice×qty 占比分摊
+    const nameC = `B9单C_${uniq}`;
+    const nameGhost = `B9不存在_${uniq}`;
+    const probeOrderIds = [];
+    const stuForFinance = db.prepare('SELECT id, name FROM students ORDER BY id LIMIT 1').get();
+    const insProbeOrder = (items, payable, refunded) => {
+      const oid = gen('ORD_P28_');
+      const ts = t();
+      db.prepare(`INSERT INTO orders (id, order_no, student_id, student_name, order_type, items,
+          total_amount, discount_amount, payable_amount, status, paid_at, refunded_amount, created_at, updated_at)
+        VALUES (?, ?, ?, '财务口径学员', 'membership', ?, ?, 0, ?, 'paid', ?, ?, ?, ?)`)
+        .run(oid, gen('P28'), stuForFinance.id, JSON.stringify(items), payable, payable, ts, refunded, ts, ts);
+      probeOrderIds.push(oid);
+      return oid;
+    };
+    if (!stuForFinance) {
+      rec('P2-8 财务口径可判别（存在学员夹具）', false, '夹具缺少 students 行，无法构造已知金额订单');
+    } else {
+      // 订单 A：单明细 500×2=1000，实付 900，已退 100 → revenue=900 refunded=100 net=800
+      insProbeOrder([{ itemType: 'membershipCard', itemName: nameA, quantity: 2, unitPrice: 500 }], 900, 100);
+      // 订单 B：300 + 100 = gross 400，实付 400，未退 → B=300/0/300，C=100/0/100
+      insProbeOrder([
+        { itemType: 'membershipCard', itemName: nameB, quantity: 1, unitPrice: 300 },
+        { itemType: 'membershipCard', itemName: nameC, quantity: 1, unitPrice: 100 },
+      ], 400, 0);
+    }
+
     const start = '2000-01-01', end = '2099-12-31';
     const r = await call('GET', '/api/finance/by-product', { token: tokens.admin, query: { startDate: start, endDate: end } });
     const list = (r.data && r.data.data && r.data.data.list) || [];
-    const numeric = list.every(p => Number.isFinite(p.revenue) && Number.isFinite(p.refunded) && Number.isFinite(p.net));
-    rec('P2-8 by-product 返回数值合理聚合', r.status === 200 && Array.isArray(list) && numeric, `status=${r.status} count=${list.length}`);
+    const rowOf = (n) => list.find((p) => p.name === n);
+
+    // 非空自证：空数组时下面的 every/查找断言会全部退化为恒真
+    rec('P2-8 by-product 返回非空聚合列表', r.status === 200 && list.length > 0,
+      `status=${r.status} count=${list.length}`);
+
+    const a = rowOf(nameA);
+    rec('P2-8 单明细收入 = 订单实付（900，非标价 1000）',
+      !!a && a.revenue === 900 && a.refunded === 100 && a.net === 800,
+      `得到=${JSON.stringify(a)} 期望 revenue=900 refunded=100 net=800`);
+    const b = rowOf(nameB);
+    rec('P2-8 多明细按 unitPrice×qty 占比分摊（300/400）',
+      !!b && b.revenue === 300 && b.refunded === 0 && b.net === 300,
+      `得到=${JSON.stringify(b)} 期望 revenue=300 net=300`);
+    const c = rowOf(nameC);
+    rec('P2-8 多明细按 unitPrice×qty 占比分摊（100/400）',
+      !!c && c.revenue === 100 && c.refunded === 0 && c.net === 100,
+      `得到=${JSON.stringify(c)} 期望 revenue=100 net=100`);
+    // 负向对照：不存在的产品名不得凭空出现（防止接口把未匹配项也塞进列表）
+    rec('P2-8 未售出的产品名不出现在聚合结果中', !rowOf(nameGhost),
+      `不应出现 ${nameGhost}`);
+    // 口径恒等：net 必须恰好等于 revenue − refunded（财务口径的核心不变式）
+    const caliberOk = list.every((p) => p.net === p.revenue - p.refunded);
+    const bad = list.find((p) => p.net !== p.revenue - p.refunded);
+    rec('P2-8 全部行满足 net = revenue − refunded', caliberOk,
+      bad ? `违反行=${JSON.stringify(bad)}` : '');
+
+    for (const oid of probeOrderIds) db.prepare('DELETE FROM orders WHERE id = ?').run(oid);
   }
 
   db.close();

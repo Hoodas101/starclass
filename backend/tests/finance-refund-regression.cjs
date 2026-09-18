@@ -74,6 +74,14 @@ const seed = db.transaction(() => {
   ins(`INSERT OR IGNORE INTO orders (id, order_no, student_id, order_type, payable_amount, total_amount, status, paid_at, created_at, updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?)`,
     'ord_rfnd_dirty', 'RF002', 'stu_r1', 'refund', 777, 777, 'refunded', t, t - 400 * 86400000, t - 400 * 86400000);
+  // 负向对照：未支付订单（status='pending'）绝不应计入收入。
+  // paid_at 刻意设为本月 —— 若实现只按时间窗过滤而漏掉 status 谓词，本行会立刻混入
+  // summary.gross 与 by-product（多出一个「未付产品」行），下面两条断言随即变红。
+  ins(`INSERT OR IGNORE INTO orders (id, order_no, student_id, order_type, items, payable_amount, discount_amount, refunded_amount, total_amount, status, paid_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'ord_pending', 'OPEND1', 'stu_r1', 'membership',
+    JSON.stringify([{ itemType: 'membershipCard', itemId: 'ct_addon', itemName: '未付产品', quantity: 1, unitPrice: 9999, totalPrice: 9999 }]),
+    9999, 0, 0, 9999, 'pending', t, t, t);
   ins(`INSERT INTO membership_cards (id, name, total_classes, valid_days, billing_mode, price, created_at)
        VALUES ('ct_disc', '折扣季卡', 0, 200, 'time', 600, ?)`, t);
   ins(`INSERT INTO membership_cards (id, name, total_classes, valid_days, billing_mode, price, created_at)
@@ -123,9 +131,16 @@ function expect(condition, label, detail) {
   if (body) {
     // gross = 1000(全额退单) + 500(在付) + 800(折扣单) + 100(额度单)；两条 RFND 不入收入
     expect(body.revenue.gross === 2400, 'gross=2400（全额退款单收入回归，RFND 行不入收入）', `got ${body.revenue.gross}`);
+    // 负向对照（判别性）：库中存在一张 paid_at 落在本月、金额 ¥9999 的 pending 订单。
+    // 收入聚合一旦漏掉 status 谓词，gross 会立刻变成 12399 —— 这条断言随即变红。
+    expect(body.revenue.gross === 2400 && body.revenue.gross !== 12399,
+      '未支付订单（pending ¥9999）不计入 gross', `got ${body.revenue.gross}（若含未付款应为 12399）`);
     // refunded = 1000(全额) + 90(额度单历史部分退)
     expect(body.revenue.refunded === 1090, 'refunded=1090', `got ${body.revenue.refunded}`);
     expect(body.revenue.net === 1310, 'net=1310（不再双扣为负）', `got ${body.revenue.net}`);
+    // 口径不变量：net 必须恒等于 gross - refunded（防止某个分支单独改了 net 而不改 gross）
+    expect(body.revenue.net === body.revenue.gross - body.revenue.refunded,
+      'net 恒等于 gross - refunded（口径自洽）', `${body.revenue.net} vs ${body.revenue.gross - body.revenue.refunded}`);
     expect(body.orders.paid === 3 && body.orders.refunded === 2, '订单数：在付 3 / 有退 2', JSON.stringify(body.orders));
     const member = (body.byType || []).find((x) => x.type === 'membership');
     expect(!!member && member.revenue === 2400, 'byType 不含 RFND 流水', member && String(member.revenue));
@@ -164,6 +179,24 @@ function expect(condition, label, detail) {
   const sum = list.reduce((s, x) => s + x.revenue, 0);
   // 仅两张多/单明细卡订单可解析 items：800 + 100
   expect(sum === 900, 'by-product 收入合计不含 RFND 脏行', `got ${sum}`);
+
+  // 逐产品具体值（判别性）：按「单项标价 / 订单标价合计」比例分摊实付额。
+  //   ord_disc：实付 800，标价合计 1000 → 折扣季卡 800×600/1000=480、搭售小课包 800×400/1000=320
+  //   ord_room：实付 100，标价合计 600 → 折扣季卡 100×600/600=100，且该单已退 90 全额落到折扣季卡
+  // 于是：折扣季卡 revenue=580 / refunded=90 / net=490 / count=2；搭售小课包 320 / 0 / 320 / 1
+  expect(list.length === 2, 'by-product 恰好 2 个产品行（未支付订单不产生产品行）', `got ${list.length}`);
+  const disc = list.find((x) => x.name === '折扣季卡');
+  const addon = list.find((x) => x.name === '搭售小课包');
+  expect(!!disc && disc.revenue === 580 && disc.refunded === 90 && disc.net === 490 && disc.count === 2,
+    '折扣季卡 revenue=580 / refunded=90 / net=490 / count=2', JSON.stringify(disc));
+  expect(!!addon && addon.revenue === 320 && addon.refunded === 0 && addon.net === 320 && addon.count === 1,
+    '搭售小课包 revenue=320 / refunded=0 / net=320 / count=1', JSON.stringify(addon));
+  // 负向对照：未支付订单的 items 里有一个标价 ¥9999 的「未付产品」，绝不应出现在报表中
+  expect(!list.some((x) => x.name === '未付产品'),
+    '未支付订单的产品不出现在 by-product', `names=${JSON.stringify(list.map((x) => x.name))}`);
+  // 行级不变量：每一行都必须满足 net = revenue - refunded
+  expect(list.every((x) => x.net === x.revenue - x.refunded),
+    'by-product 每行满足 net = revenue - refunded', JSON.stringify(list.map((x) => ({ n: x.name, net: x.net, r: x.revenue, f: x.refunded }))));
 
   const hs = getHandler(financeRouter, 'get', '/by-sales');
   const res2 = mockRes();

@@ -25,6 +25,9 @@ bootstrap('/tmp/edu-test-charts');
 
 const db = require('../db');
 const adminRouter = require('../routes/admin');
+// formatDate / attendanceRate 是「期望值」的独立来源：断言不引用被测接口的任何输出，
+// 而是用同一份夹具数据按声明口径重算，再与接口逐值比对。
+const { formatDate, attendanceRate } = require('../utils');
 
 function getHandler(router, method, path) {
   for (const layer of router.stack) {
@@ -54,12 +57,21 @@ const created = []; // 用例自建订单 id，收尾清理
 
 /** 插入一张已支付订单，items 由调用方给定原始文本（可为任意形态 / 非法值） */
 function mkPaidOrder(itemsRaw, payable = 100) {
+  return mkPaidOrderAt(itemsRaw, payable, Date.now());
+}
+
+/**
+ * 同上，但 paid_at / refunded_amount 可指定。
+ * 营收趋势按 paid_at 归日、且以 payable − refunded 计净额，要断言「某一日桶精确 +N」
+ * 与「退款确实被冲减」，就必须能把订单钉在指定日期并带上已退金额。
+ */
+function mkPaidOrderAt(itemsRaw, payable, paidAt, refunded = 0) {
   const ts = Date.now();
   const id = gen('ORD_CHART_');
   db.prepare(`INSERT INTO orders (id, order_no, student_id, student_name, order_type, items,
       total_amount, discount_amount, payable_amount, status, paid_at, refunded_amount, created_at, updated_at)
-    VALUES (?, ?, 'stu_chart_probe', '图表探针', 'membership', ?, ?, 0, ?, 'paid', ?, 0, ?, ?)`)
-    .run(id, gen('CHART'), itemsRaw, payable, payable, ts, ts, ts);
+    VALUES (?, ?, 'stu_chart_probe', '图表探针', 'membership', ?, ?, 0, ?, 'paid', ?, ?, ?, ?)`)
+    .run(id, gen('CHART'), itemsRaw, payable, payable, paidAt, refunded, ts, ts);
   created.push(id);
   return id;
 }
@@ -106,10 +118,104 @@ console.log('\n\x1b[1m[二] 响应结构与口径\x1b[0m');
     `labels=${att.labels.length} data=${att.data.length}`);
   rec('营收趋势双序列各 30 天', rev.labels.length === 30 && rev.current.length === 30 && rev.prev.length === 30,
     `labels=${rev.labels.length} cur=${rev.current.length} prev=${rev.prev.length}`);
-  rec('到场率均为 0-100 的整数', att.data.every((v) => Number.isInteger(v) && v >= 0 && v <= 100),
-    `样本=${JSON.stringify(att.data.slice(0, 5))}`);
-  rec('营收均为非负数字', [...rev.current, ...rev.prev].every((v) => typeof v === 'number' && v >= 0),
-    `样本=${JSON.stringify(rev.current.slice(-3))}`);
+
+  // ── 判别性断言 ────────────────────────────────────────────────
+  // 被替换掉的两条旧断言是「常量下界」，对任何形状正确的响应都恒真，证明不了数算对了：
+  //   · att.data.every(v => Number.isInteger(v) && 0 <= v <= 100)  → 任何 0..100 整数都过
+  //   · [...rev].every(v => typeof v === 'number' && v >= 0)       → 任何非负数都过
+  // 下面每条都锚定「用同一份夹具独立重算出的具体数值」，任一口径回归都会立刻变红。
+
+  const todayStr = formatDate(Date.now());
+  const firstStr = formatDate(Date.now() - 29 * 86400000);
+
+  // (1) 营收总量恒等：30 天逐日营收之和 = 按同一谓词独立重算的总和。
+  //     捕获：窗口偏移一天、漏算某日、状态过滤写错。
+  //     ⚠️ 要让「退款被冲减」这一条真的可判别，夹具里必须存在 refunded_amount > 0 的订单：
+  //        seed 订单已退金额全为 0，若只依赖 seed，把 payable−refunded 写成 payable 也照样绿。
+  //        故此处先插入一张「实付 1000、已退 300」的订单，使净额口径（700）真正参与比对。
+  mkPaidOrderAt(JSON.stringify([{ itemType: 'membershipCard', itemName: '退款冲减探针', quantity: 1 }]),
+    1000, Date.now(), 300);
+  const revFresh = callCharts('month').body.data.revenueTrend; // 必须重新取快照：上面刚插入了探针订单
+  const revTotal = db.prepare(`
+    SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) AS s
+    FROM orders
+    WHERE status IN ('paid', 'refunded')
+      AND date(paid_at / 1000, 'unixepoch', 'localtime') >= ?
+      AND date(paid_at / 1000, 'unixepoch', 'localtime') <= ?
+  `).get(firstStr, todayStr).s;
+  const revSum = revFresh.current.reduce((a, b) => a + b, 0);
+  rec('30 天逐日营收之和 = 独立重算总量（含退款冲减）', revSum === revTotal,
+    `sum(current)=${revSum} sqlTotal=${revTotal} 区间=[${firstStr}..${todayStr}]`);
+  // 非平凡性自证：夹具里确实存在已退金额 > 0 的订单，否则上面那条对「退款冲减」没有约束力。
+  const refundedOrders = db.prepare(
+    "SELECT COUNT(*) c FROM orders WHERE status IN ('paid','refunded') AND COALESCE(refunded_amount,0) > 0"
+  ).get().c;
+  rec('夹具存在已退款订单（退款冲减口径可判别）', refundedOrders > 0, `refunded_orders=${refundedOrders}`);
+
+  // (2) 今日营收桶精确增量：插入唯一金额的已付订单，今日桶必须恰好增加该金额。
+  //     捕获：把今日订单算到别的桶、或桶序整体错位一天。
+  const baseCurToday = revFresh.current[29];
+  const basePrevToday = revFresh.prev[29];
+  mkPaidOrderAt(JSON.stringify([{ itemType: 'membershipCard', itemName: '营收探针', quantity: 1 }]), 4321, Date.now());
+  const rev2 = callCharts('month').body.data.revenueTrend;
+  rec('今日营收桶精确 +4321（归日窗口未偏移）', rev2.current[29] === baseCurToday + 4321,
+    `before=${baseCurToday} after=${rev2.current[29]}`);
+  rec('插入今日订单不污染「30 天前」对照桶', rev2.prev[29] === basePrevToday,
+    `before=${basePrevToday} after=${rev2.prev[29]}`);
+
+  // (3) 30 天前对照桶精确增量：证明 prev 序列是真实上月数据，不是恒 0 的摆设。
+  mkPaidOrderAt(JSON.stringify([{ itemType: 'membershipCard', itemName: '对照探针', quantity: 1 }]), 777,
+    Date.now() - 30 * 86400000);
+  const rev3 = callCharts('month').body.data.revenueTrend;
+  rec('「30 天前」对照桶精确 +777', rev3.prev[29] === basePrevToday + 777,
+    `before=${basePrevToday} after=${rev3.prev[29]}`);
+
+  // (4) 到场率逐日序列 = 独立重算值。用测试自己的 SQL 统计每日 present/late/absent，
+  //     套 attendanceRate 公式算出整条期望序列，与接口逐值比对。
+  //     捕获：迟到被漏计、absent 未进分母、leave 被错误计入分母、按天聚合串行。
+  //     先插入探针考勤，确保 late / absent 两条分支真的被走到（seed 今日只有 present/late）。
+  //     attendances 对 schedules(id) / students(id) 有外键，且 UNIQUE(schedule_id, student_id)，
+  //     故建一条探针排期 + 复用夹具里 5 个真实学员，各写一行不同状态的考勤。
+  const probeSchId = gen('SCH_CHART_');
+  db.prepare(`INSERT INTO schedules (id, course_id, course_name, teacher_id, date, start_time, end_time, status, created_at, updated_at)
+    VALUES (?, 'course_001', '图表探针课', 'teacher_001', ?, '00:00', '00:01', 'scheduled', ?, ?)`)
+    .run(probeSchId, todayStr, Date.now(), Date.now());
+  const insProbeAtt = db.prepare(`INSERT INTO attendances
+      (id, schedule_id, student_id, student_name, course_id, course_name, status, checkin_method, date, created_at, updated_at)
+    VALUES (?, ?, ?, '图表探针', 'course_001', '图表探针课', ?, 'probe', ?, ?, ?)`);
+  const attProbeIds = [];
+  const probePlan = [['stu_001', 'present'], ['stu_002', 'present'], ['stu_003', 'present'],
+    ['stu_004', 'late'], ['stu_005', 'absent']];
+  for (const [stuId, status] of probePlan) {
+    const id = gen('ATT_CHART_');
+    insProbeAtt.run(id, probeSchId, stuId, status, todayStr, Date.now(), Date.now());
+    attProbeIds.push(id);
+  }
+  const dayRows = db.prepare(`
+    SELECT date,
+           COALESCE(SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END), 0) AS p,
+           COALESCE(SUM(CASE WHEN status = 'late'    THEN 1 ELSE 0 END), 0) AS l,
+           COALESCE(SUM(CASE WHEN status = 'absent'  THEN 1 ELSE 0 END), 0) AS a
+    FROM attendances WHERE date >= ? AND date <= ? GROUP BY date
+  `).all(firstStr, todayStr);
+  const dayMap = new Map(dayRows.map((r) => [r.date, r]));
+  const expectRates = [];
+  for (let i = 0; i < 30; i++) {
+    const ds = formatDate(Date.now() - (29 - i) * 86400000);
+    const r = dayMap.get(ds);
+    expectRates.push(r ? attendanceRate({ present: r.p, late: r.l, absent: r.a }) : 0);
+  }
+  const attNow = callCharts('month').body.data.attendanceTrend;
+  rec('30 天到场率逐日序列 = 独立重算（迟到计到场 / 请假不进分母）',
+    JSON.stringify(attNow.data) === JSON.stringify(expectRates),
+    `got=${JSON.stringify(attNow.data)} expected=${JSON.stringify(expectRates)}`);
+  // 非平凡性自证：若期望序列全 0，上面的逐值比对就退化成「全 0 = 全 0」的恒真断言。
+  const todayExpect = expectRates[29];
+  rec('到场率期望值非平凡（0 < 今日期望 < 100）', todayExpect > 0 && todayExpect < 100,
+    `todayExpect=${todayExpect}（探针含 3 present + 1 late + 1 absent）`);
+
+  for (const id of attProbeIds) db.prepare('DELETE FROM attendances WHERE id = ?').run(id);
+  db.prepare('DELETE FROM schedules WHERE id = ?').run(probeSchId);
 }
 
 // ============================================================

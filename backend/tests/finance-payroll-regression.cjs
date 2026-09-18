@@ -51,13 +51,21 @@ function mockReq(o) {
 
 const t = now();
 const today = formatDate(t);
-const d = new Date(t);
-const pad = (n) => String(n).padStart(2, '0');
-const month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
-const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
-const day1 = `${month}-01`;
-const endOfMonth = `${month}-${pad(lastDay)}`;
-const hasFuture = endOfMonth > today; // 今天已是月末时，本月不存在未来日期（见 T2 条件断言）
+
+// ── 日期无关的固定月份（C8）────────────────────────────────────────────
+// 旧用例把「真实当月」当作测试区间，再用 hasFuture 分支切换断言：
+//   今天不是月末 → 断言「剔除未来课节」；今天恰是月末 → 断言「全量计酬」。
+// 同一份代码在不同日子得到不同结论，月末当天更是直接跳过裁剪逻辑；
+// 而 settle 的 clamped 断言写成 `data && hasFuture ? data.clamped === true : true`，
+// 因运算符优先级在 hasFuture=false 时整体退化为 `true` —— 恒过（假绿）。
+// 现改为两个完全落在过去 / 未来的固定月份，断言不再读取真实日期：
+//   PAST_MONTH   整月已过 → effEnd = 月末，clamped=false，全部课节计酬
+//   FUTURE_MONTH 整月未到 → effEnd = 今天，clamped=true，全部课节被剔除
+// 二者合起来精确覆盖「只结算已发生课节」这一修复点，且与运行日无关。
+const PAST_MONTH = '2019-04';
+const PAST_MONTH_END = '2019-04-30';
+const FUTURE_MONTH = '2099-01';
+const FUTURE_MONTH_END = '2099-01-31';
 
 const ins = (sql, ...params) => db.prepare(sql).run(...params);
 
@@ -78,19 +86,20 @@ const seed = db.transaction(() => {
     'mc_p7', 'ct_p7', '次卡', 'count', 'stu_p7', '资金学员', 10, 5, 5,
     t - 30 * 86400000, t + 60 * 86400000, 'active', 'ord_p7', t, t);
 
-  // === T2：薪资月中结算剔除未来课节 ===
+  // === T2：薪资结算只计已发生课节（固定月份，日期无关）===
   ins("INSERT OR IGNORE INTO teachers (id, name, phone, status, class_fee, pay_rule, created_at) VALUES (?,?,?,?,?,?,?)",
     'tea_p7', '结算教练', '13700000007', 'active', 100, JSON.stringify({ type: 'fixed', baseRate: 100 }), t);
-  // 月初课节（已发生，attended=0 → fixed 规则仍发 100）
+  // 已过月份 PAST_MONTH 两节（月初 + 月末，均 ≤ 月末 → 都应计酬，每节 fixed 规则发 100）
   ins(`INSERT OR IGNORE INTO schedules (id, course_id, course_name, teacher_id, teacher_name, date, start_time, end_time, status, enrolled_count, created_at, updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-    'sch_past7', 'crs_p7', '体适能', 'tea_p7', '结算教练', day1, '09:00', '10:00', 'scheduled', 0, t, t);
-  if (hasFuture) {
-    // 月末课节（未发生：scheduled 且日期 > 今天），修复前按 baseRate 提前计酬
-    ins(`INSERT OR IGNORE INTO schedules (id, course_id, course_name, teacher_id, teacher_name, date, start_time, end_time, status, enrolled_count, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-      'sch_future7', 'crs_p7', '体适能', 'tea_p7', '结算教练', endOfMonth, '09:00', '10:00', 'scheduled', 0, t, t);
-  }
+    'sch_past7', 'crs_p7', '体适能', 'tea_p7', '结算教练', `${PAST_MONTH}-01`, '09:00', '10:00', 'scheduled', 0, t, t);
+  ins(`INSERT OR IGNORE INTO schedules (id, course_id, course_name, teacher_id, teacher_name, date, start_time, end_time, status, enrolled_count, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'sch_past7_end', 'crs_p7', '体适能', 'tea_p7', '结算教练', PAST_MONTH_END, '09:00', '10:00', 'scheduled', 0, t, t);
+  // 未来月份 FUTURE_MONTH 一节（日期 > 今天 → 必须被剔除，不得提前计酬）
+  ins(`INSERT OR IGNORE INTO schedules (id, course_id, course_name, teacher_id, teacher_name, date, start_time, end_time, status, enrolled_count, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'sch_future7', 'crs_p7', '体适能', 'tea_p7', '结算教练', `${FUTURE_MONTH}-15`, '09:00', '10:00', 'scheduled', 0, t, t);
 
   // === T4：课程级联删除回滚签到积分 ===
   ins("INSERT OR IGNORE INTO courses (id, name, category, created_at) VALUES (?,?,?,?)", 'crs_del7', '待删活动', 'training', t);
@@ -160,43 +169,48 @@ function expect(condition, label, detail) {
   expect(card.remaining_classes === 6, '协商退款后课时保持 6 次', `got ${card.remaining_classes}`);
 }
 
-// T2/T3. payroll：/coaches 预览与 /settle 同口径剔除未来课节；资金写入留痕
+// T2/T3. payroll：/coaches 预览与 /settle 同口径只计已发生课节；资金写入留痕
+// 两段断言全部使用固定月份，不读取真实日期（C8）。
 {
+  // ── 已过月份：整月已发生，应全额计酬且不裁剪 ──
   const hc = getHandler(payrollRouter, 'get', '/coaches');
   const resC = mockRes();
-  hc(mockReq({ userRole: 'admin', query: { month } }), resC);
+  hc(mockReq({ userRole: 'admin', query: { month: PAST_MONTH } }), resC);
   const listC = (resC.body && resC.body.data.list) || [];
   const rowC = listC.find((x) => x.teacherId === 'tea_p7');
   expect(!!rowC, '/coaches 返回教练行');
   if (rowC) {
-    expect(hasFuture ? rowC.classes === 1 : rowC.classes === 2, `预览课次只计已发生（${hasFuture ? '剔除未来' : '今日为月末全计'}）`, `got ${rowC.classes}`);
-    expect(hasFuture ? rowC.amount === 100 : rowC.amount === 200, '预览应付金额同口径', `got ${rowC.amount}`);
+    expect(rowC.classes === 2, `已过月份 ${PAST_MONTH}：2 节课节全部计酬`, `got ${rowC.classes}`);
+    expect(rowC.amount === 200, '已过月份应付 = 2 × 100 = 200', `got ${rowC.amount}`);
   }
   const effEnd = resC.body && resC.body.data.endDate;
-  expect(effEnd === (hasFuture ? today : endOfMonth), '响应回显实际计酬截止日', String(effEnd));
+  // 捕获「无脑裁剪到今天」的实现：已过月份必须回显月末，而不是今天
+  expect(effEnd === PAST_MONTH_END, '已过月份回显月末为计酬截止日（未被裁剪到今天）', String(effEnd));
 
   const hs = getHandler(payrollRouter, 'post', '/settle');
   const resS = mockRes();
-  hs(mockReq({ userRole: 'admin', openid: 'admin7_openid', body: { month } }), resS);
+  hs(mockReq({ userRole: 'admin', openid: 'admin7_openid', body: { month: PAST_MONTH } }), resS);
   const data = resS.body && resS.body.data;
   expect(!!data && data.ok === true, 'settle 成功', resS.body && resS.body.message);
   expect(data && data.settled === 1, '结算 1 位教练', data && String(data.settled));
-  expect(data && (hasFuture ? data.totalAmount === 100 : data.totalAmount === 200),
-    `结算总额${hasFuture ? '不含未来课节（=100）' : '（月末全量=200）'}`, data && String(data.totalAmount));
-  expect(data && hasFuture ? data.clamped === true : true, 'settle 返回 clamped 标记', data && String(data.clamped));
+  expect(data && data.totalAmount === 200, '结算总额 = 200（整月全额）', data && String(data.totalAmount));
+  // 旧断言 `data && hasFuture ? data.clamped === true : true` 因优先级在 hasFuture=false
+  // 时整体为 `true`，恒过。此处无条件精确断言：已过月份不裁剪 → clamped 必须为 false。
+  expect(!!data && data.clamped === false, '已过月份 clamped=false（未发生裁剪）', data && String(data.clamped));
   const log = db.prepare("SELECT * FROM payroll_logs WHERE teacher_id = 'tea_p7' AND status = 'settled'").get();
-  expect(!!log && log.lesson_count === (hasFuture ? 1 : 2) && log.amount === (hasFuture ? 100 : 200),
-    'payroll_logs 落库口径正确', log && `${log.lesson_count}/${log.amount}`);
-  const auditS = db.prepare("SELECT * FROM audit_log WHERE entity = 'payroll' AND action = 'settle' AND entity_id = ?").get(month);
+  expect(!!log && log.lesson_count === 2 && log.amount === 200,
+    'payroll_logs 落库口径正确（2 节 / 200）', log && `${log.lesson_count}/${log.amount}`);
+  expect(!!log && log.month === PAST_MONTH, 'payroll_logs 月份为固定测试月份', log && log.month);
+  const auditS = db.prepare("SELECT * FROM audit_log WHERE entity = 'payroll' AND action = 'settle' AND entity_id = ?").get(PAST_MONTH);
   expect(!!auditS, 'settle 写入 audit_log');
   if (auditS) {
     const after = JSON.parse(auditS.after_state || '{}');
-    expect(after.endDateUsed === (hasFuture ? today : endOfMonth), '审计记录实际计酬截止日', auditS.after_state);
+    expect(after.endDateUsed === PAST_MONTH_END, '审计记录实际计酬截止日 = 月末', auditS.after_state);
   }
 
   // 幂等：重复结算被拒
   const resS2 = mockRes();
-  hs(mockReq({ userRole: 'admin', openid: 'admin7_openid', body: { month } }), resS2);
+  hs(mockReq({ userRole: 'admin', openid: 'admin7_openid', body: { month: PAST_MONTH } }), resS2);
   expect(resS2.body && resS2.body.code !== 0, '重复结算拒绝', JSON.stringify(resS2.body));
 
   // 作废 + 留痕
@@ -208,6 +222,34 @@ function expect(condition, label, detail) {
   expect(voided.status === 'voided' && !voided.paid_at, '记录置 voided 且清空 paid_at', `${voided.status}/${voided.paid_at}`);
   const auditV = db.prepare("SELECT * FROM audit_log WHERE entity = 'payroll' AND action = 'void_settle' AND entity_id = ?").get(log.id);
   expect(!!auditV && JSON.parse(auditV.before_state || '{}').amount === log.amount, 'void 审计含作废前快照', auditV && auditV.before_state);
+}
+
+// T2b. 未来月份：整月未发生 → 必须全部剔除，且 clamped=true。日期无关。
+{
+  const hc = getHandler(payrollRouter, 'get', '/coaches');
+  const resC = mockRes();
+  hc(mockReq({ userRole: 'admin', query: { month: FUTURE_MONTH } }), resC);
+  const rowC = ((resC.body && resC.body.data.list) || []).find((x) => x.teacherId === 'tea_p7');
+  expect(!!rowC, '未来月份 /coaches 返回教练行');
+  if (rowC) {
+    // 捕获修复前的缺陷：未来课节被按 baseRate 提前计酬（此处会得到 1 / 100）
+    expect(rowC.classes === 0, `未来月份 ${FUTURE_MONTH}：未发生课节不计应付`, `got ${rowC.classes}`);
+    expect(rowC.amount === 0, '未来月份应付 = 0', `got ${rowC.amount}`);
+  }
+  const effEndF = resC.body && resC.body.data.endDate;
+  expect(effEndF === today, '未来月份计酬截止日被裁剪到今天', String(effEndF));
+  expect(effEndF < FUTURE_MONTH_END, '未来月份截止日严格早于月末（裁剪确实发生）', `${effEndF} < ${FUTURE_MONTH_END}`);
+
+  const hs = getHandler(payrollRouter, 'post', '/settle');
+  const resS = mockRes();
+  hs(mockReq({ userRole: 'admin', openid: 'admin7_openid', body: { month: FUTURE_MONTH } }), resS);
+  const data = resS.body && resS.body.data;
+  expect(!!data && data.ok === true, '未来月份 settle 成功（无应付）', resS.body && resS.body.message);
+  expect(data && data.settled === 0, '未来月份不产生任何结算记录', data && String(data.settled));
+  expect(data && data.totalAmount === 0, '未来月份结算总额 = 0', data && String(data.totalAmount));
+  expect(!!data && data.clamped === true, '未来月份 clamped=true（裁剪已发生）', data && String(data.clamped));
+  const futureLogs = db.prepare('SELECT COUNT(*) c FROM payroll_logs WHERE month = ?').get(FUTURE_MONTH).c;
+  expect(futureLogs === 0, '未来月份 payroll_logs 零落库', String(futureLogs));
 }
 
 // T4. 删除活动级联回滚签到积分（含撤销行净额）

@@ -15,7 +15,16 @@ const failures = [];
 const tokens = {}; // role -> token
 const openids = {}; // role -> openid
 
-async function api(name, method, path, body, role, allow = []) {
+/**
+ * @param {string[]} allow      预期成功、但消息可能非 `code:0` 时的可接受消息
+ *                              （如幂等重复提交「已报名该活动」）
+ * @param {boolean} expectFail  该用例预期**被拒绝**（越权类）。置 true 时只有
+ *                              `code !== 0` 才算通过；若同时给出 `allow`，拒绝消息
+ *                              还必须命中该列表。
+ *                              旧实现只有 `code === 0 || allow.includes(message)` 一种语义，
+ *                              于是「越权」用例在**真的越权成功**时反而记为 PASS —— 假绿。
+ */
+async function api(name, method, path, body, role, allow = [], expectFail = false) {
   const headers = { 'Content-Type': 'application/json' };
   const token = role ? tokens[role] : undefined;
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -27,9 +36,16 @@ async function api(name, method, path, body, role, allow = []) {
       body: body ? JSON.stringify(body) : undefined,
     });
     const json = await res.json().catch(() => ({ code: 1, message: '非JSON响应' }));
-    const ok = json.code === 0 || allow.includes(json.message);
+    const ok = expectFail
+      ? json.code !== 0 && (allow.length === 0 || allow.includes(json.message))
+      : (json.code === 0 || allow.includes(json.message));
     if (ok) pass++;
-    else { fail++; failures.push(`${name}: ${json.message || res.status}`); }
+    else {
+      fail++;
+      failures.push(expectFail
+        ? `${name}: 预期被拒绝但请求成功（code=${json.code}）`
+        : `${name}: ${json.message || res.status}`);
+    }
     return json;
   } catch (err) {
     fail++; failures.push(`${name}: 网络错误 ${err.message}`);
@@ -71,8 +87,10 @@ await api('家长-订单', 'GET', '/orders/my', null, 'parent');
 await api('家长-通知', 'GET', '/notifications/list?limit=5', null, 'parent');
 
 console.log('== 越权隔离 ==');
-await api('家长访问管理看板(应拒绝)', 'GET', '/admin/dashboard', null, 'parent', ['仅管理员可访问管理接口']);
-await api('教练访问管理看板(应拒绝)', 'GET', '/admin/dashboard', null, 'coach', ['仅管理员可访问管理接口']);
+// 越权用例必须声明 expectFail=true：旧写法只要求「code===0 或消息命中白名单」，
+// 于是家长/教练**真的拿到管理看板数据**时反而被记为 PASS（假绿）。
+await api('家长访问管理看板(应拒绝)', 'GET', '/admin/dashboard', null, 'parent', ['仅管理员可访问管理接口'], true);
+await api('教练访问管理看板(应拒绝)', 'GET', '/admin/dashboard', null, 'coach', ['仅管理员可访问管理接口'], true);
 
 console.log('== 请假业务链路（P2-1 approve 主路径）==');
 let sid = null, lid = null;

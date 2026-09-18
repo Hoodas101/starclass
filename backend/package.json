@@ -7,7 +7,9 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "init-db": "node db/init.js",
-    "seed": "node db/seed.js"
+    "seed": "node db/seed.js",
+    "test": "node tests/run-all.cjs",
+    "lint": "find . \\( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \\) -not -path './node_modules/*' -print0 | xargs -0 -n1 node --check"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

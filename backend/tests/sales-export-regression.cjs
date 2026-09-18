@@ -80,6 +80,25 @@ const doubleEncodedItems = JSON.stringify([
 mkPaidOrder(normalItems);
 mkPaidOrder(doubleEncodedItems);
 
+// 负向对照：一张**未支付**订单，items 里是一个极易辨认的单品名。
+// 关键：paid_at 刻意写入真实时间戳（而非 NULL）。导出统计同时带
+// `paid_at >= ? AND paid_at < ?` 与 `o.status = 'paid'` 两个谓词；若 paid_at 留空，
+// NULL 在 SQL 比较中恒为假，会把该行挡在时间窗之外 —— 那样即使 status 谓词被删掉
+// 本用例也照样绿，负向对照就失去判别力。写入真实时间戳后，**只有** status 谓词
+// 能把它排除；该谓词一旦被去掉，这个单品会带着 ¥7777 出现在 itemStats 里。
+const pendingName = `QA未付品_${uniq}`;
+{
+  const ts = Date.now();
+  const pid = gen('ORD_PEND_');
+  db.prepare(`INSERT INTO orders (id, order_no, student_id, student_name, order_type, items,
+      total_amount, discount_amount, payable_amount, status, paid_at, refunded_amount, created_at, updated_at)
+    VALUES (?, ?, 'stu_sales_probe', '导出探针', 'membership', ?, 7777, 0, 7777, 'pending', ?, 0, ?, ?)`)
+    .run(pid, gen('PEND'), JSON.stringify([
+      { itemName: pendingName, quantity: 1, unitPrice: 7777, totalPrice: 7777 },
+    ]), ts, ts, ts);
+  created.push(pid);
+}
+
 function callExport() {
   const res = mockRes();
   const today = new Date();
@@ -113,6 +132,22 @@ rec(`年卡(${dblName}) amount === 9999`, byName[dblName] && byName[dblName].amo
   `got=${byName[dblName] && byName[dblName].amount}`);
 rec(`年卡(${dblName}) count === 1`, byName[dblName] && byName[dblName].count === 1,
   `got=${byName[dblName] && byName[dblName].count}`);
+
+// 判别核心 3：受控两行的金额合计必须精确等于 5998 + 9999 —— 这条把「按单品合计」整体钉死，
+// 单看某一行的 amount 无法发现「另一行被漏算/重复计」。
+rec('受控单品金额合计 = 5998 + 9999 = 15997',
+  ((byName[stdName] && byName[stdName].amount) || 0) + ((byName[dblName] && byName[dblName].amount) || 0) === 15997,
+  `got=${((byName[stdName] && byName[stdName].amount) || 0) + ((byName[dblName] && byName[dblName].amount) || 0)}`);
+
+// 判别核心 4：同一单品不得被拆成多行（按名归类必须真的 GROUP BY 到一行）
+rec('受控单品各占且仅占一行',
+  Array.isArray(itemStats) && itemStats.filter((x) => x.itemName === stdName).length === 1
+    && itemStats.filter((x) => x.itemName === dblName).length === 1,
+  `std=${itemStats && itemStats.filter((x) => x.itemName === stdName).length} dbl=${itemStats && itemStats.filter((x) => x.itemName === dblName).length}`);
+
+// 负向对照：未支付订单的单品绝不应出现在统计里（SQL 谓词 o.status = 'paid'）
+rec('未支付订单的产品不出现在导出统计中',
+  !byName[pendingName], `names=${Object.keys(byName).join(',')}`);
 
 // 自证：旧口径（Number(i.price||0)）对同样的受控数据恒为 0 —— 证明本断言能甄别回归
 const oldSum = (() => {

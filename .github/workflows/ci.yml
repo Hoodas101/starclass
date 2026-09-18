@@ -30,8 +30,55 @@ jobs:
         working-directory: backend
         run: node tests/run-all.cjs
 
+  backend-lint:
+    name: 后端语法检查（node --check）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 本仓库目前**没有** eslint 配置（无 .eslintrc* / eslint.config.*，node_modules 里也没有
+      # eslint）也没有 tsconfig，因此这里落地的是可立即生效的语法门禁：`node --check`
+      # 逐个解析文件，任何语法错误（漏括号、误用保留字、文件被截断）都会让 CI 变红。
+      # 它不需要 npm ci —— 用的是 Node 自带解析器。
+      #
+      # 明确deferred（本次不做，避免半成品门禁）：
+      #   · eslint 规则门禁 —— 需要先选定配置与规则集，属独立批次；
+      #   · 前端（web-admin）lint / 单测 —— 仓库内无 eslint / vitest / tsconfig，
+      #     从零搭建前端测试体系超出本次范围，见 TEST-GUIDE.md。
+      - name: node --check 全量后端源码与测试
+        working-directory: backend
+        run: |
+          find . \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) \
+            -not -path './node_modules/*' -print0 \
+            | xargs -0 -n1 node --check
+          echo "后端语法检查通过。"
+
+      - name: 套件清单可被安全 require（单一事实来源自检）
+        # run-all.cjs 被定位为「哪些套件要跑」的单一事实来源，必须能被工具安全 import：
+        # 作为模块加载时只导出 SUITES、不得执行套件或 process.exit。此处钉死该契约。
+        working-directory: backend
+        run: |
+          node -e "
+            const { SUITES } = require('./tests/run-all.cjs');
+            if (!Array.isArray(SUITES) || SUITES.length === 0) { console.error('SUITES 为空'); process.exit(1); }
+            const fs = require('fs');
+            for (const [file] of SUITES) {
+              if (!fs.existsSync(require('path').join('tests', file))) { console.error('清单中的套件文件不存在: ' + file); process.exit(1); }
+            }
+            console.log('套件清单有效，共 ' + SUITES.length + ' 个。');
+          "
+
   web-build:
     name: 管理后台构建（Node 20）
+    # 前端范围如实说明：本作业只做「能不能构建」的门禁。
+    # 前端目前**零测试、零 lint**（web-admin/package.json 无 test / lint 脚本，
+    # 仓库内无 vitest / eslint 依赖与配置，web-admin 下也无 tsconfig.json）。
+    # 搭建前端测试与 lint 体系属于独立批次，本批次明确延后，不在此处假装覆盖。
+    # 因此前端侧当前的实际保护只有：Vite 构建通过 + 下面的 Docker 健康检查。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

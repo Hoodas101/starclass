@@ -147,12 +147,96 @@ const ROUTES = [
   ['GET', '/api/finance/summary'], ['GET', '/api/finance/monthly'], ['GET', '/api/finance/by-product'], ['GET', '/api/finance/by-sales'],
   ['GET', '/api/trial/list'], ['PUT', '/api/trial/ID1'],
   ['GET', '/api/wxpay/status'], ['POST', '/api/wxpay/create'],
+
+  // ---- C7 补扫：以下 42 条此前完全不在扫描清单内，等于鉴权闸门对它们零覆盖 ----
+  // 清单来源：把 backend/routes/*.js 的全部 router.<verb> 按 server.js 的挂载前缀
+  // 展开，与上方清单做集合差得到。每一条都实测过「无 token → 401」，不是照抄路由表。
+  // /api/classes/*（16 条）：课程模块整块此前靠注入 header 绕过 JWT，
+  // 是本次补扫里最要紧的一组 —— 一个整体未被闸门覆盖的模块。
+  ['POST', '/api/classes'], ['GET', '/api/classes'], ['GET', '/api/classes/ID1'],
+  ['PUT', '/api/classes/ID1'], ['DELETE', '/api/classes/ID1'],
+  ['GET', '/api/classes/ID1/members'], ['POST', '/api/classes/ID1/members'],
+  ['PUT', '/api/classes/ID1/members/STU1'], ['DELETE', '/api/classes/ID1/members/STU1'],
+  ['POST', '/api/classes/ID1/notify'], ['POST', '/api/classes/schedules/SCH1/request'],
+  ['GET', '/api/classes/schedules/SCH1/requests/mine'], ['GET', '/api/classes/registration-requests'],
+  ['GET', '/api/classes/ID1/registration-requests'],
+  ['POST', '/api/classes/ID1/registration-requests/REQ1/approve'],
+  ['POST', '/api/classes/ID1/registration-requests/REQ1/reject'],
+  // /api/notifications/*（13 条）：server.js 把 messageRoutes 同时挂在 /api/notifications 上，
+  // 此前只扫了 /api/messages/*，同一批处理器的另一个入口无人看守。
+  ['GET', '/api/notifications/list'], ['GET', '/api/notifications/detail'],
+  ['GET', '/api/notifications/unread-count'], ['POST', '/api/notifications/create'],
+  ['POST', '/api/notifications/generate-renewal'], ['POST', '/api/notifications/read'],
+  ['POST', '/api/notifications/read-all'], ['GET', '/api/notifications/group-notice'],
+  ['POST', '/api/notifications/send'], ['GET', '/api/notifications/my'],
+  ['PUT', '/api/notifications/ID1/read'], ['PUT', '/api/notifications/read-all'],
+  ['GET', '/api/notifications/admin/list'], ['DELETE', '/api/notifications/ID1'],
+  // 零覆盖端点：增长建议、薪资结算与流水、学员分班、反馈回复等
+  ['GET', '/api/growth/suggestions'], ['GET', '/api/growth/leads/ID1/suggestion'],
+  ['POST', '/api/payroll/settle'], ['GET', '/api/payroll/logs'], ['POST', '/api/payroll/logs/ID1/void'],
+  ['GET', '/api/admin/students/STU1/classes'], ['POST', '/api/admin/students/STU1/classes'],
+  ['GET', '/api/membership/card-types'], ['GET', '/api/membership/products'],
+  ['GET', '/api/settings/terms'], ['GET', '/api/leave/rules'], ['PUT', '/api/feedback/ID1/reply'],
 ];
 const PUBLIC = [
   ['POST', '/api/auth/login'], ['POST', '/api/auth/wx-login'], ['POST', '/api/auth/phone-login'],
   ['GET', '/api/health'], ['POST', '/api/trial/apply'], ['POST', '/api/wxpay/notify'],
   ['GET', '/api/terms'], ['GET', '/api/settings'],
 ];
+
+// ---- Batch 9（C7）：补齐此前未纳入 401 扫描的端点 ----
+// 缺口是逐路由 grep + 与上方 ROUTES 求差集算出来的（挂载点取自 server.js 的 app.use）。
+// /api/classes/* 全部缺席，而它恰恰是历史上「注入 x-openid 头即可绕过 JWT」的那一批，
+// 因此单独成组，供下方 A3 段做伪造头回归。
+const CLASSES_ROUTES = [
+  ['POST', '/api/classes'], ['GET', '/api/classes'],
+  ['GET', '/api/classes/ID1'], ['PUT', '/api/classes/ID1'], ['DELETE', '/api/classes/ID1'],
+  ['GET', '/api/classes/ID1/members'], ['POST', '/api/classes/ID1/members'],
+  ['PUT', '/api/classes/ID1/members/STU1'], ['DELETE', '/api/classes/ID1/members/STU1'],
+  ['POST', '/api/classes/ID1/notify'],
+  ['POST', '/api/classes/schedules/SCH1/request'], ['GET', '/api/classes/schedules/SCH1/requests/mine'],
+  ['GET', '/api/classes/registration-requests'], ['GET', '/api/classes/ID1/registration-requests'],
+  ['POST', '/api/classes/ID1/registration-requests/REQ1/approve'],
+  ['POST', '/api/classes/ID1/registration-requests/REQ1/reject'],
+];
+const ROUTES_EXTRA = [
+  // 零覆盖端点（此前既不在 ROUTES 也不在任何用例中）
+  ['GET', '/api/growth/suggestions'], ['GET', '/api/growth/leads/ID1/suggestion'],
+  ['GET', '/api/leave/rules'],
+  ['GET', '/api/membership/card-types'], ['GET', '/api/membership/products'],
+  ['GET', '/api/payroll/logs'], ['POST', '/api/payroll/logs/ID1/void'], ['POST', '/api/payroll/settle'],
+  ['GET', '/api/admin/students/ID1/classes'], ['POST', '/api/admin/students/ID1/classes'],
+  ['GET', '/api/attendances/student/ID1'],
+  ['PUT', '/api/feedback/ID1/reply'],
+  // /api/notifications 是 messageRoutes 的第二个挂载点（server.js:222），与 /api/messages/* 同处理器
+  ['GET', '/api/notifications/list'], ['GET', '/api/notifications/detail'],
+  ['GET', '/api/notifications/unread-count'], ['POST', '/api/notifications/create'],
+  ['POST', '/api/notifications/generate-renewal'], ['POST', '/api/notifications/read'],
+  ['POST', '/api/notifications/read-all'], ['GET', '/api/notifications/group-notice'],
+  ['POST', '/api/notifications/send'], ['GET', '/api/notifications/my'],
+  ['PUT', '/api/notifications/ID1/read'], ['PUT', '/api/notifications/read-all'],
+  ['GET', '/api/notifications/admin/list'], ['DELETE', '/api/notifications/ID1'],
+];
+// 三个来源存在重叠：C7 补扫时已把 classes 与「零覆盖端点」并入 ROUTES，
+// CLASSES_ROUTES / ROUTES_EXTRA 保留下来是为了各自的用途（前者供下方 A3 伪造头用例遍历，
+// 后者标注「此前零覆盖」的来源）。若直接拼接，同一端点会被扫描两次并产生重复断言 ——
+// 断言数虚高，且失败时会刷两遍同样的红。故此处按「方法 + 归一化路径」去重。
+// 归一化把 :param 与测试占位符（ID1/STU1/SCH1/REQ1…）视为同一段，
+// 否则 /api/attendances/student/STU1 与 /api/attendances/student/ID1 会被当成两个端点。
+const dedupeProtected = (list) => {
+  const PLACEHOLDER = /^(?::.+|ID\d*|STU\d*|SCH\d*|REQ\d*|NO_SUCH_ID|NO_SUCH_STU|SCHED\d*)$/i;
+  const norm = (p) => p.split('/').map((s) => (PLACEHOLDER.test(s) ? ':x' : s)).join('/');
+  const seen = new Set();
+  const out = [];
+  for (const [m, p] of list) {
+    const k = `${m} ${norm(p)}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push([m, p]);
+  }
+  return out;
+};
+const ALL_PROTECTED = dedupeProtected([...ROUTES, ...CLASSES_ROUTES, ...ROUTES_EXTRA]);
 
 const ts = () => Date.now();
 const pad = (n) => String(n).padStart(2, '0');
@@ -194,12 +278,16 @@ async function main() {
     parentStudentId = bound.student_id;
     console.log(`家长身份: ${bound.parent_openid} 绑定学员 ${bound.student_id}(${bound.stu_name})\n`);
   } else {
-    recWarn('setup', '未找到已绑定学员的家长账号', 'canViewStudentData / 请假 正向用例将跳过');
+    // 夹具退化必须变红：seed 固定生成 12 组家长绑定（db/seed.js），解析不到说明夹具坏了，
+    // 静默 WARN 会让「家长越权 / 请假流程」整块用例凭空消失而套件仍绿。
+    rec('setup', '存在已绑定学员的家长账号（夹具完整性）', false,
+      '夹具缺少 parent_bindings —— 家长相关用例无法执行，视为失败');
   }
 
   // ---------------- A. 401 扫描 ----------------
   console.log('\x1b[1m[A] 401 鉴权闸门扫描\x1b[0m');
-  for (const [m, p] of ROUTES) {
+  console.log(`  扫描受保护端点 ${ALL_PROTECTED.length} 个（去重前 ROUTES ${ROUTES.length} + classes ${CLASSES_ROUTES.length} + 补齐 ${ROUTES_EXTRA.length}）`);
+  for (const [m, p] of ALL_PROTECTED) {
     const r = await call(m, p);
     rec('A-auth-gate', `${m} ${p}`, r.status === 401, `status=${r.status}`);
   }
@@ -223,6 +311,75 @@ async function main() {
   rec('A2-case-public-login', 'POST /API/auth/login', rLogin.status !== 401, `status=${rLogin.status}（期望非 401）`);
   const rHealth = await call('GET', '/API/health');
   rec('A2-case-public-health', 'GET /API/health', rHealth.status !== 401, `status=${rHealth.status}（期望非 401）`);
+
+  // ---------------- A3. 扫描清单自证（防漏网） ----------------
+  // 上面的 ROUTES 是一份**手写**清单，手写清单的天敌是「新路由悄悄加进来、闸门没跟上」。
+  // 这里用源码做交叉校验：把 routes/*.js 的路由按挂载前缀展开后，与 ROUTES 求差集。
+  // 若有人新增了受保护路由却没同步清单，本用例立刻变红 —— 而不是等某天有人发现闸门形同虚设。
+  {
+    const fsx = require('fs');
+    const MOUNTS = [
+      ['/api/auth', 'auth.js'], ['/api/students', 'students.js'], ['/api/schedules', 'schedules.js'],
+      ['/api/classes', 'classes.js'], ['/api/checkin', 'checkin.js'], ['/api/membership', 'membership.js'],
+      ['/api/points', 'points.js'], ['/api/orders', 'orders.js'], ['/api/messages', 'messages.js'],
+      ['/api/notifications', 'messages.js'], ['/api/admin', 'admin.js'], ['/api/settings', 'settings.js'],
+      ['/api/leave', 'leave.js'], ['/api/feedback', 'feedback.js'], ['/api/growth', 'growth.js'],
+      ['/api/followups', 'followups.js'], ['/api/payroll', 'payroll.js'], ['/api/comments', 'comments.js'],
+      ['/api/makeup', 'makeup.js'], ['/api/finance', 'finance.js'], ['/api/attendances', 'attendances.js'],
+      ['/api/trial', 'trial.js'], ['/api/wxpay', 'wxpay.js'],
+    ];
+    const PLACEHOLDER = /^(?::.+|ID\d*|STU\d*|SCH\d*|REQ\d*|NO_SUCH_ID|NO_SUCH_STU|SCHED\d*)$/i;
+    const norm = (p) => p.split('/').map((s) => (PLACEHOLDER.test(s) ? ':x' : s)).join('/').replace(/\/+$/, '') || '/';
+    const k = (m, p) => `${m} ${norm(p)}`;
+    const declared = new Map();
+    for (const [prefix, file] of MOUNTS) {
+      const src = fsx.readFileSync(path.join(__dirname, '..', 'routes', file), 'utf8');
+      const re = /router\.(get|post|put|delete|patch)\(\s*'([^']*)'/g;
+      let m;
+      while ((m = re.exec(src))) {
+        const full = prefix + (m[2] === '/' ? '' : m[2]);
+        declared.set(k(m[1].toUpperCase(), full), `${m[1].toUpperCase()} ${full}`);
+      }
+    }
+    const covered = new Set([...ROUTES, ...PUBLIC].map(([m, p]) => k(m, p)));
+    const uncovered = [...declared.entries()].filter(([key]) => !covered.has(key)).map(([, label]) => label);
+    rec('A3-scan-coverage', `ROUTES 覆盖源码全部路由（未覆盖 ${uncovered.length} 条）`,
+      uncovered.length === 0, `未覆盖：${uncovered.slice(0, 10).join(' | ')}`);
+
+    // classes.js 是最容易被漏掉的一整块（历史上靠注入 header 绕过 JWT），单独钉死条数。
+    const classesDeclared = [...declared.values()].filter((s) => s.includes('/api/classes')).length;
+    const classesScanned = ROUTES.filter(([, p]) => p.startsWith('/api/classes')).length;
+    rec('A3-scan-classes', `classes.js 的 ${classesDeclared} 条路由全部在扫描清单内`,
+      classesDeclared === 16 && classesScanned === 16, `declared=${classesDeclared} scanned=${classesScanned}`);
+
+    // 去重自证：ALL_PROTECTED 里不得有重复端点（否则断言数虚高，失败会刷两遍）。
+    // 三个来源数组本身允许重叠，重复必须在 dedupeProtected 处被吸收 —— 这条钉死该不变量。
+    const rawCount = ROUTES.length + CLASSES_ROUTES.length + ROUTES_EXTRA.length;
+    rec('A3-scan-dedup', `扫描清单已去重（原始 ${rawCount} → 实际 ${ALL_PROTECTED.length}）`,
+      ALL_PROTECTED.length <= rawCount && ALL_PROTECTED.length > 0,
+      `raw=${rawCount} deduped=${ALL_PROTECTED.length}`);
+  }
+
+  // ---------------- A3. 注入身份头不得绕过 JWT ----------------
+  // 身份的唯一可信来源是 Authorization: Bearer。客户端可自填的 x-openid / ?openid= /
+  // body.openid 一律不得作为鉴权依据 —— /api/classes/* 历史上正是从 header 取身份，
+  // 于是「不带 token + 伪造 x-openid」即可读写班级数据。此段逐端点钉死该回归。
+  console.log('\x1b[1m[A3] 注入 x-openid 头绕过鉴权\x1b[0m');
+  {
+    const forgedHeaders = { 'Content-Type': 'application/json', 'x-openid': 'wx_admin_001' };
+    for (const [m, p] of CLASSES_ROUTES) {
+      const res = await fetch(BASE + p, { method: m, headers: forgedHeaders });
+      rec('A3-forged-x-openid-classes', `${m} ${p}`, res.status === 401,
+        `status=${res.status}（伪造 x-openid 后仍须 401）`);
+    }
+    // 管理端/财务端点同样不得凭伪造头通过
+    for (const [m, p] of [['GET', '/api/admin/dashboard'], ['POST', '/api/payroll/settle'],
+      ['GET', '/api/finance/summary'], ['GET', '/api/orders']]) {
+      const res = await fetch(BASE + p, { method: m, headers: forgedHeaders });
+      rec('A3-forged-x-openid-admin', `${m} ${p}`, res.status === 401,
+        `status=${res.status}（伪造 x-openid 后仍须 401）`);
+    }
+  }
 
   // ---------------- B. 角色越权 403 矩阵 ----------------
   console.log('\n\x1b[1m[B] 角色越权矩阵\x1b[0m');
@@ -376,29 +533,61 @@ async function main() {
     rec('E-summary-math', 'GET /api/attendances/summary 数值字段', okMath, okMath ? `totalSessions=${s.totalSessions} rate=${s.attendanceRate}` : `status=${sum.status}`);
     await call('DELETE', `/api/schedules/${schedId}`, { token: tokens.admin });
   }
-  // E3 会员扣课（按卡计费模式判定是否符合预期）
+  // E3 会员扣课：用确定性的计数卡断言「扣课链路真的落了扣课记录」
+  // 旧实现取 `WHERE status='active' LIMIT 1` → 命中 seed 的时效卡（billing_mode='time'），
+  // 于是走 recWarn 分支静默跳过扣课数学断言 —— 报告里「扣课链路已覆盖」的说法并不成立。
+  // 现改为：显式锁定一张计数卡 → 扣课 → 断言 deduction_logs 的行数与卡余量。
   {
-    const mdb = new Database(process.env.DB_PATH, { readonly: true });
-    const card = mdb.prepare("SELECT id, student_id, remaining_classes, billing_mode FROM member_cards WHERE status='active' LIMIT 1").get();
-    mdb.close();
-    if (card) {
-      const before = card.remaining_classes;
-      const deduct = await call('POST', '/api/membership/deduct', { token: tokens.admin, body: {
-        scheduleId: 'sch_deduct_' + ts(), studentId: card.student_id, classes: 1, reason: '测试扣课',
-      }});
-      const okCk = deduct.status === 200 && deduct.data && deduct.data.code === 0;
-      rec('E-membership-deduct', 'POST /api/membership/deduct', okCk, okCk ? '' : `status=${deduct.status} body=${JSON.stringify(deduct.data)}`);
-      const adb = new Database(process.env.DB_PATH, { readonly: true });
-      const after = adb.prepare('SELECT remaining_classes FROM member_cards WHERE id=?').get(card.id);
-      adb.close();
-      if (card.billing_mode === 'count') {
-        rec('E-membership-deduct-math', 'count 模式 remaining -1', after.remaining_classes === before - 1, `${before} -> ${after.remaining_classes}`);
-      } else {
-        recWarn('E-membership-deduct-math', `卡为 ${card.billing_mode} 模式`, `不扣课时，before=${before} after=${after.remaining_classes}`);
-      }
-    } else {
-      recWarn('E-membership', '无 active 会员卡', '扣课用例跳过');
-    }
+    const wdb = new Database(process.env.DB_PATH); // 可写连接（与 p2-fixes 同一做法）
+    const cardId = 'mc_006';                       // seed 夹具中的计数卡（stu_006）
+    const stuId = 'stu_006';
+    const schId = 'sch_deduct_' + ts();
+    // 显式重置为已知余量，避免断言与 seed 数值耦合
+    wdb.prepare("UPDATE member_cards SET remaining_classes = 10, used_classes = 0, status = 'active' WHERE id = ?").run(cardId);
+    const seeded = wdb.prepare('SELECT id, student_id, remaining_classes, billing_mode FROM member_cards WHERE id = ?').get(cardId);
+    // 夹具退化必须变红：拿不到计数卡就无法验证扣课，不能再静默跳过
+    rec('E-membership-deduct-setup', !!seeded && seeded.billing_mode === 'count' && seeded.remaining_classes === 10,
+      `card=${JSON.stringify(seeded)}（需要一张 remaining=10 的 count 计费卡）`);
+
+    const before = seeded.remaining_classes;
+    const deduct = await call('POST', '/api/membership/deduct', { token: tokens.admin, body: {
+      scheduleId: schId, studentId: stuId, classes: 1, reason: '批次9 扣课计数',
+    }});
+    const okDeduct = deduct.status === 200 && deduct.data && deduct.data.code === 0;
+    rec('E-membership-deduct', 'POST /api/membership/deduct', okDeduct,
+      okDeduct ? '' : `status=${deduct.status} body=${JSON.stringify(deduct.data)}`);
+
+    // 判别性核心：扣课必须在 deduction_logs 留下**恰好一条**记录，且指向被扣的卡。
+    // 旧断言只看 remaining 的加减（且在 time 卡上被跳过），发现不了「扣了课却不记账」。
+    const rows = wdb.prepare('SELECT card_id FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').all(schId, stuId);
+    rec('E-membership-deduct-log', 'deduction_logs 恰好 1 行（扣课链路留痕）', rows.length === 1,
+      `rows=${rows.length}（期望 1）`);
+    rec('E-membership-deduct-log-card', '扣课记录指向被扣的卡',
+      rows.length === 1 && rows[0].card_id === cardId,
+      `card_id=${rows[0] && rows[0].card_id} 期望=${cardId}`);
+    const after = wdb.prepare('SELECT remaining_classes FROM member_cards WHERE id = ?').get(cardId).remaining_classes;
+    rec('E-membership-deduct-math', `count 模式 remaining ${before} → ${before - 1}`, after === before - 1,
+      `${before} -> ${after}`);
+    // 响应体契约：扣课数与剩余量必须与库内一致（防止只改库不改响应，或反之）
+    const d = deduct.data && deduct.data.data;
+    rec('E-membership-deduct-response', '响应回显 deducted=1 与 remainingClasses=库内值',
+      !!d && d.deducted === 1 && d.remainingClasses === after,
+      `body=${JSON.stringify(d)} db.remaining=${after}`);
+
+    // 幂等：同 (schedule, student) 再扣一次 → 业务失败码，且不产生第二条记录、不再扣减
+    const deduct2 = await call('POST', '/api/membership/deduct', { token: tokens.admin, body: {
+      scheduleId: schId, studentId: stuId, classes: 1, reason: '批次9 重复扣课',
+    }});
+    const rows2 = wdb.prepare('SELECT COUNT(*) c FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').get(schId, stuId).c;
+    const after2 = wdb.prepare('SELECT remaining_classes FROM member_cards WHERE id = ?').get(cardId).remaining_classes;
+    rec('E-membership-deduct-idempotent', '重复扣课被拒且不二次扣减',
+      rows2 === 1 && after2 === after && deduct2.data && deduct2.data.code !== 0,
+      `rows=${rows2} remaining=${after2} code=${deduct2.data && deduct2.data.code}`);
+
+    // 收尾：清掉本轮扣课痕迹，避免影响其他用例
+    wdb.prepare('DELETE FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').run(schId, stuId);
+    wdb.prepare('UPDATE member_cards SET remaining_classes = 7, used_classes = 3 WHERE id = ?').run(cardId);
+    wdb.close();
   }
   // E4 订单：创建 → 支付 → 退款预览 → 取消
   {
@@ -449,7 +638,8 @@ async function main() {
     rec('E-leave-cancel', 'POST /api/leave/:id/cancel (家长撤销)', cancel.status === 200 && cancel.data && cancel.data.code === 0, `status=${cancel.status} body=${JSON.stringify(cancel.data)}`);
     await call('DELETE', `/api/schedules/${schedIdB}`, { token: tokens.admin });
   } else {
-    recWarn('E-leave', '无家长身份', '请假流程用例跳过');
+    // 同上：无家长身份时不能再静默跳过，否则请假链路（E5）会整块消失而套件仍绿
+    rec('E-leave', '家长身份可用（夹具完整性）', false, '无家长 token —— 请假流程用例无法执行，视为失败');
   }
 
   // ---------------- F. 边界用例 ----------------
@@ -486,7 +676,9 @@ async function main() {
       const r = await call('GET', `/api/attendances/student/${other.student_id}`, { token: parentToken });
       rec('F-parent-cross-view', '家长查看他人学员 → 403', r.status === 403, `status=${r.status}`);
     } else {
-      recWarn('F-parent-cross-view', '无其他绑定学员可测', '跳过');
+      // 夹具有多名学员且家长各不相同，取不到「他人学员」说明夹具退化，不得静默跳过
+      rec('F-parent-cross-view', '存在可测的他人学员（夹具完整性）', false,
+        '未找到其他绑定学员 —— 家长越权用例无法执行，视为失败');
     }
   }
 
@@ -521,6 +713,12 @@ async function main() {
     const withOld = await call('GET', '/api/auth/getProfile', { token: tokens.sales });
     rec('G-old-token-revoked', '改密后旧 Token 立即失效 → 401', withOld.status === 401, `status=${withOld.status}`);
   }
+
+  // ---------------- 零 WARN 总闸 ----------------
+  // 全部 recWarn 跳过点均已改为硬断言（夹具退化 → FAIL）。此处再加一道总闸：
+  // 只要本次运行还有任何 WARN，套件即判失败 —— 防止将来重新引入「静默跳过」，
+  // 让「报告里声称已覆盖、实际被跳过」的情况无法再伪装成绿灯。
+  rec('W-zero-warn', '本次运行零 WARN（无静默跳过）', warned === 0, `warned=${warned}`);
 
   // ---------------- 汇总 ----------------
   console.log('\n\x1b[1m=== 测试结果汇总 ===\x1b[0m');
