@@ -495,7 +495,7 @@ const saveRule = async () => {
     // 刷新结算数据
     await load()
   } catch (e) {
-    ElMessage.error('保存失败')
+    // 拦截器已提示业务/网络错误
   } finally {
     savingRule.value = false
   }
@@ -513,7 +513,7 @@ const openDetailDrawer = async (row) => {
     detailTarget.value = row
     detailVisible.value = true
   } catch (e) {
-    ElMessage.error('获取明细失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 

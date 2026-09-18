@@ -373,7 +373,7 @@ const saveAdjust = async () => {
     loadList(); loadSummary()
     if (logsOpen.value && !batchAdjust.value) openLogs(adjustStudent.value)
   } catch (e) {
-    ElMessage.error(e.message || '操作失败')
+    // 拦截器已提示业务/网络错误
   } finally {
     adjusting.value = false
   }

@@ -121,7 +121,7 @@ const submitPassword = async () => {
       passwordForm.newPassword = ''
       passwordForm.confirmPassword = ''
     } catch (error) {
-      ElMessage.error(error.message || '修改失败')
+      // 拦截器已提示业务/网络错误
     } finally {
       passwordSaving.value = false
     }

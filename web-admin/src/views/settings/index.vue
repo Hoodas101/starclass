@@ -856,7 +856,7 @@ const confirmExport = async () => {
     ElMessage.success(`已导出 ${exportConfirmModules.value.length} 个模块`)
     exportConfirmVisible.value = false
   } catch (e) {
-    ElMessage.error(e.message || '导出失败')
+    // 拦截器已提示业务/网络错误
   } finally {
     exporting.value = false
   }
@@ -942,7 +942,7 @@ const confirmImport = async () => {
     importModulesAll.value = []
     ElMessage.success('导入完成')
   } catch (e) {
-    ElMessage.error(e.message || '导入失败')
+    // 拦截器已提示业务/网络错误
   } finally {
     importing.value = false
   }
@@ -985,7 +985,7 @@ const confirmRestore = async () => {
     restoreConfirmVisible.value = false
     ElMessage.success('数据库已恢复')
   } catch (e) {
-    ElMessage.error(e.response?.data?.message || e.message || '恢复失败')
+    // 拦截器已提示业务/网络错误
   } finally {
     restoring.value = false
   }
@@ -1024,7 +1024,7 @@ const saveTerms = async () => {
     await settingsStore.saveTermSettings(termSchemeSel.value, clean)
     ElMessage.success('称呼设置已保存，全端即时生效')
   } catch (e) {
-    ElMessage.error(e.message || '保存失败')
+    // 拦截器已提示业务/网络错误
   } finally {
     termSaving.value = false
   }
@@ -1175,7 +1175,7 @@ const sendRenewalNow = async () => {
     const res = await generateRenewalNotices()
     ElMessage.success(res?.message || '续费提醒处理完成')
   } catch (e) {
-    ElMessage.error(e.message || '发送失败')
+    // 拦截器已提示业务/网络错误
   } finally {
     renewalSending.value = false
   }

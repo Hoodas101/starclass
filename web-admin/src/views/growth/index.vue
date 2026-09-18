@@ -614,7 +614,7 @@ const saveLead = async () => {
     leadDialogOpen.value = false
     loadLeads(); loadFunnel()
   } catch (e) {
-    ElMessage.error(e.message || '操作失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 
@@ -688,7 +688,7 @@ const cancelFuFromDetail = async () => {
     fuDetailOpen.value = false
     loadFollowUps()
   } catch (e) {
-    ElMessage.error(e.message || '操作失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 
@@ -738,7 +738,7 @@ const moveStage = async (row, stage) => {
     loadPipeline(); loadFunnel(); loadLeads(); loadSuggestions()
   } catch (e) {
     loadPipeline()
-    ElMessage.error(e.message || '推进失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 
@@ -785,7 +785,7 @@ const handleGenerate = async () => {
     ElMessage.success(res.message || '已生成')
     loadFollowUps()
   } catch (e) {
-    ElMessage.error(e.message || '生成失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 
@@ -835,7 +835,7 @@ const saveFu = async () => {
     fuDialogOpen.value = false
     loadFollowUps()
   } catch (e) {
-    ElMessage.error(e.message || '创建失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 
@@ -852,7 +852,7 @@ const handleCompleteFu = async (row) => {
     ElMessage.success('已完成')
     loadFollowUps()
   } catch (e) {
-    ElMessage.error(e.message || '操作失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 
@@ -867,7 +867,7 @@ const handleCancelFu = async (row) => {
     ElMessage.success('已取消')
     loadFollowUps()
   } catch (e) {
-    ElMessage.error(e.message || '操作失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 

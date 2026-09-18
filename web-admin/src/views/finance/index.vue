@@ -187,7 +187,7 @@ async function loadSummary() {
     const res = await getFinanceSummary(getDateRange())
     summary.value = res || {}
   } catch (e) {
-    ElMessage.error('加载汇总失败')
+    // 拦截器已提示业务/网络错误
   } finally {
     loadingSummary.value = false
   }
@@ -204,7 +204,6 @@ async function loadMonthly() {
     monthlyTotals.value = res.totals || null
   } catch (e) {
     errorMonthly.value = e?.message || '数据加载失败，请稍后重试'
-    ElMessage.error(errorMonthly.value)
   } finally {
     loadingMonthly.value = false
   }
@@ -220,7 +219,6 @@ async function loadProduct() {
     productList.value = res.list || []
   } catch (e) {
     errorProduct.value = e?.message || '数据加载失败，请稍后重试'
-    ElMessage.error(errorProduct.value)
   } finally {
     loadingProduct.value = false
   }
@@ -236,7 +234,6 @@ async function loadSales() {
     salesList.value = res.list || []
   } catch (e) {
     errorSales.value = e?.message || '数据加载失败，请稍后重试'
-    ElMessage.error(errorSales.value)
   } finally {
     loadingSales.value = false
   }

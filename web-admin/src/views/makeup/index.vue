@@ -245,7 +245,6 @@ async function loadEligible() {
     eligibleList.value = res.list || []
   } catch (e) {
     error1.value = e?.message || '数据加载失败，请稍后重试'
-    ElMessage.error(error1.value)
   } finally {
     loading1.value = false
   }
@@ -263,7 +262,6 @@ async function loadRecords() {
     recordList.value = res.list || []
   } catch (e) {
     error2.value = e?.message || '数据加载失败，请稍后重试'
-    ElMessage.error(error2.value)
   } finally {
     loading2.value = false
   }
@@ -278,7 +276,7 @@ async function openAssign(row) {
     const res = await getSchedules({ pageSize: 100 })
     scheduleOptions.value = (res.list || []).filter(s => s.status === 'scheduled')
   } catch (e) {
-    ElMessage.error('加载排期失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 
@@ -296,7 +294,7 @@ async function handleAssign() {
     assignVisible.value = false
     loadEligible()
   } catch (e) {
-    ElMessage.error(e.response?.data?.message || '安排失败')
+    // 拦截器已提示业务/网络错误
   } finally {
     submitting.value = false
   }
@@ -322,7 +320,7 @@ async function handleCancel(row) {
     ElMessage.success('已取消')
     loadRecords()
   } catch (e) {
-    if (e !== 'cancel') ElMessage.error('取消失败')
+    if (e !== 'cancel') return
   }
 }
 
@@ -332,7 +330,7 @@ async function loadRescheduleSchedules() {
     const res = await getSchedules({ pageSize: 500 })
     rescheduleScheduleOptions.value = (res.list || []).filter((s) => s.status === 'scheduled')
   } catch (e) {
-    ElMessage.error('加载排期失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 
@@ -352,7 +350,6 @@ async function loadOriginalStudents() {
     )
   } catch (e) {
     error3.value = e?.message || '数据加载失败'
-    ElMessage.error(error3.value)
   } finally {
     loading3.value = false
   }
@@ -382,7 +379,7 @@ async function handleReschedule() {
     rescheduleVisible.value = false
     loadOriginalStudents()
   } catch (e) {
-    ElMessage.error(e.response?.data?.message || '调课失败')
+    // 拦截器已提示业务/网络错误
   } finally {
     submitting.value = false
   }

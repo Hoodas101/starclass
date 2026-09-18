@@ -814,8 +814,7 @@ const handleCancelOrder = async (order) => {
   } catch (e) {
     // 用户主动取消（ElMessageBox 取消按钮 reject 值为 'cancel'）静默处理
     if (e === 'cancel') return
-    // 真实 API / 网络错误：给出可见反馈
-    ElMessage.error(e?.message || '取消订单失败')
+    // 真实 API / 网络错误：拦截器已统一提示
   }
 }
 

@@ -228,7 +228,7 @@ const submitAddSuppression = async () => {
     ElMessage.success('已标记勿扰，该家长不再接收营销类通知')
     addSupVisible.value = false
   } catch (e) {
-    ElMessage.error(e.message || '操作失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 
@@ -248,7 +248,7 @@ const removeSuppression = async (s) => {
     ElMessage.success('已移除勿扰')
     supList.value = supList.value.filter((x) => x.id !== s.id)
   } catch (e) {
-    ElMessage.error(e.message || '操作失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 

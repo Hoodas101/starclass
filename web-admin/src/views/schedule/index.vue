@@ -420,7 +420,7 @@ const loadResources = async () => {
     classrooms.value = cRes.list || []
     courses.value = courseRes.list || []
   } catch (e) {
-    ElMessage.error('基础资源加载失败')
+    // 拦截器已提示业务/网络错误
   }
 }
 

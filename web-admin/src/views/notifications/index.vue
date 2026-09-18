@@ -305,7 +305,7 @@ const publish = async () => {
     form.value = { title: '', content: '', priority: 'normal', groupName: '' }
     loadList()
   } catch (e) {
-    ElMessage.error(e.message || '发布失败')
+    // 拦截器已提示业务/网络错误
   } finally {
     publishing.value = false
   }
