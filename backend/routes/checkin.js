@@ -43,10 +43,11 @@ router.post('/teacher', (req, res) => {
     const results = [];
     const dateStr = schedule.date;
 
-    for (const att of attendances) {
+    // 单学员点名处理（由下方批次事务逐个调用；事务边界提升到整批一层）
+    const processOne = (att) => {
       const { studentId, status, checkinMethod = 'manual' } = att;
       const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
-      if (!student) continue;
+      if (!student) return;
       const beforeAtt = db.prepare('SELECT status, points_earned FROM attendances WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
 
       // 清除记录：删除签到并回滚积分与扣课（供教练纠正误签到/误点名）
@@ -56,7 +57,7 @@ router.post('/teacher', (req, res) => {
         ).get(scheduleId, studentId);
         if (!existing) {
           results.push({ studentId, status: 'cleared', pointsEarned: 0 });
-          continue;
+          return;
         }
         const t = now();
         // 回滚签到积分（含累计，记录负流水）
@@ -99,13 +100,14 @@ router.post('/teacher', (req, res) => {
           after: null,
         });
         results.push({ studentId, status: 'cleared', pointsEarned: 0 });
-        continue;
+        return;
       }
 
       const pointsEarned = status === 'present' ? 10 : (status === 'late' ? 5 : 0);
 
-      // 单学员「upsert + 积分 + 扣课」包在同一事务：状态变更时的积分/课时补偿原子化，避免数据虚高或漏发
-      db.transaction(() => {
+      // 单学员「upsert + 积分 + 扣课」逻辑：状态变更时的积分/课时补偿原子化，避免数据虚高或漏发。
+      // 事务边界在整批一层（见下方 runBatch），此处不再单独开事务。
+      {
         const existing = db.prepare(
           'SELECT * FROM attendances WHERE schedule_id = ? AND student_id = ?'
         ).get(scheduleId, studentId);
@@ -140,36 +142,14 @@ router.post('/teacher', (req, res) => {
             }
             if (status === 'present' || status === 'late') {
               try {
-                const dedup = db.prepare('SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
-                if (!dedup) {
-                  const makeupEnroll = db.prepare(
-                    "SELECT 1 FROM enrollments WHERE schedule_id = ? AND student_id = ? AND enroll_type IN ('makeup', 'reschedule') AND status = 'active'"
-                  ).get(scheduleId, studentId);
-                  if (!makeupEnroll) {
-                    const card = db.prepare(`
-                      SELECT * FROM member_cards
-                      WHERE student_id = ? AND status = 'active' AND billing_mode = 'count'
-                        AND expires_at > ? AND remaining_classes > 0
-                      ORDER BY expires_at ASC LIMIT 1
-                    `).get(studentId, now());
-                    if (card) {
-                      db.prepare(`
-                        UPDATE member_cards SET remaining_classes = remaining_classes - 1, used_classes = used_classes + 1, updated_at = ?
-                        WHERE id = ?
-                      `).run(now(), card.id);
-                      db.prepare(`
-                        INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
-                        VALUES (?, ?, ?, ?)
-                      `).run(scheduleId, studentId, card.id, now());
-                    }
-                  } else {
-                    db.prepare(`
-                      UPDATE makeup_records SET status = 'completed', updated_at = ?
-                      WHERE makeup_schedule_id = ? AND student_id = ? AND status = 'pending'
-                    `).run(now(), scheduleId, studentId);
-                  }
+                applyArrivalDeduction(studentId, scheduleId, now());
+              } catch (e) {
+                // 仅忽略幂等冲突（同一排期+学员重复扣课）；no such column / SQLITE_BUSY 等真实故障必须暴露
+                if (!isUniqueViolation(e)) {
+                  console.error('[checkin deduction]', e && e.stack ? e.stack : e);
+                  throw e;
                 }
-              } catch (e) { /* 扣课失败不影响签到记录 */ }
+              }
             }
           } else if (oldIsEarn && newIsEarn) {
             // 旧新均为签到（如 late→present）：仅调整积分差，扣课已按"每排期每学员一次"记录，保持不变
@@ -202,44 +182,19 @@ router.post('/teacher', (req, res) => {
           // 补课/调课登记的学员不扣课时（原排期已扣或请假已扣）
           if (status === 'present' || status === 'late') {
             try {
-              const dedup = db.prepare('SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
-              if (!dedup) {
-                // 检查是否为补课/调课登记（不扣课）
-                const makeupEnroll = db.prepare(
-                  "SELECT 1 FROM enrollments WHERE schedule_id = ? AND student_id = ? AND enroll_type IN ('makeup', 'reschedule') AND status = 'active'"
-                ).get(scheduleId, studentId);
-
-                if (!makeupEnroll) {
-                  const card = db.prepare(`
-                    SELECT * FROM member_cards
-                    WHERE student_id = ? AND status = 'active' AND billing_mode = 'count'
-                      AND expires_at > ? AND remaining_classes > 0
-                    ORDER BY expires_at ASC LIMIT 1
-                  `).get(studentId, now());
-                  if (card) {
-                    db.prepare(`
-                      UPDATE member_cards SET remaining_classes = remaining_classes - 1, used_classes = used_classes + 1, updated_at = ?
-                      WHERE id = ?
-                    `).run(now(), card.id);
-                    db.prepare(`
-                      INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
-                      VALUES (?, ?, ?, ?)
-                    `).run(scheduleId, studentId, card.id, now());
-                  }
-                } else {
-                  // 补课签到完成，更新补课记录状态
-                  db.prepare(`
-                    UPDATE makeup_records SET status = 'completed', updated_at = ?
-                    WHERE makeup_schedule_id = ? AND student_id = ? AND status = 'pending'
-                  `).run(now(), scheduleId, studentId);
-                }
+              applyArrivalDeduction(studentId, scheduleId, now());
+            } catch (e) {
+              // 仅忽略幂等冲突（同一排期+学员重复扣课）；no such column / SQLITE_BUSY 等真实故障必须暴露
+              if (!isUniqueViolation(e)) {
+                console.error('[checkin deduction]', e && e.stack ? e.stack : e);
+                throw e;
               }
-            } catch (e) { /* 扣课失败不影响签到记录 */ }
+            }
           }
         }
 
         results.push({ studentId, status, pointsEarned });
-      })();
+      }
 
       recordAudit(db, {
         entity: 'attendance',
@@ -250,10 +205,18 @@ router.post('/teacher', (req, res) => {
         before: beforeAtt,
         after: { status, points_earned: pointsEarned },
       });
-    }
+    };
+
+    // T1/T2/T4：整个批量点名（含 clear 清退分支的全部写入）收敛到**单个** immediate 事务 ——
+    // 一次提交；任一学员中途失败则整批回滚，不会留下「部分学员已改、部分未改」的半完成账目。
+    const runBatch = db.transaction(() => {
+      for (const att of attendances) processOne(att);
+    });
+    runBatch.immediate();
 
     res.json(success({ count: results.length, results }));
   } catch (err) {
+    console.error('[checkin teacher]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }
 });
@@ -262,10 +225,18 @@ router.post('/teacher', (req, res) => {
  * Deduct one class from a count card on first arrival.
  * Shared with the teacher roll-call path; idempotent per (schedule, student);
  * must be called inside a transaction.
+ * Also skips when a leave deduction has already been posted for the same
+ * (schedule, student) — see T7: the two ledgers (deduction_logs /
+ * leave_deduction_logs) must not deduct the same class twice.
  */
 function applyArrivalDeduction(studentId, scheduleId, t) {
   const dedup = db.prepare('SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
   if (dedup) return;
+  // T7：同一排期+学员若已按请假规则扣过课，则签到侧不得再次扣课。
+  // 「先请假获批扣课 → 后改为签到」曾会扣两次课时；两套账本交叉校验后只扣一次。
+  // leave_deduction_logs 的记录保留不动（请假路径的幂等依赖该行），此处仅跳过签到侧扣课。
+  const leaveDed = db.prepare('SELECT 1 FROM leave_deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
+  if (leaveDed) return;
   const makeupEnroll = db.prepare(
     "SELECT 1 FROM enrollments WHERE schedule_id = ? AND student_id = ? AND enroll_type IN ('makeup', 'reschedule') AND status = 'active'"
   ).get(scheduleId, studentId);
@@ -344,7 +315,9 @@ router.post('/parent', (req, res) => {
 
     const pointsEarned = 10;
     const t = now();
-    // Attendance + points + class deduction in one transaction
+    // Attendance + points + class deduction in one immediate transaction:
+    // the existence check above and the INSERT below are a check-then-act pair,
+    // so take the write lock up front (T4) instead of upgrading mid-transaction.
     const outcome = db.transaction(() => {
       const existing = db.prepare(
         'SELECT * FROM attendances WHERE schedule_id = ? AND student_id = ?'
@@ -363,10 +336,16 @@ router.post('/parent', (req, res) => {
       // 次数卡扣课（与教练点名同一规则，幂等）
       try {
         applyArrivalDeduction(studentId, scheduleId, t);
-      } catch (e) { /* 扣课失败不阻塞签到记录，与教练路径保持一致 */ }
+      } catch (e) {
+        // 仅忽略幂等冲突；真实故障（no such column / SQLITE_BUSY）必须暴露并回滚本次签到
+        if (!isUniqueViolation(e)) {
+          console.error('[checkin deduction]', e && e.stack ? e.stack : e);
+          throw e;
+        }
+      }
 
       return { attendanceId: id };
-    })();
+    }).immediate();
     if (outcome.err) return res.json(fail(outcome.err));
 
     recordAudit(db, {
@@ -381,6 +360,7 @@ router.post('/parent', (req, res) => {
 
     res.json(success({ attendanceId: outcome.attendanceId, pointsEarned }));
   } catch (err) {
+    console.error('[checkin parent]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }
 });
@@ -429,6 +409,7 @@ router.get('/records', (req, res) => {
 
     res.json(success({ list, total, page, pageSize }));
   } catch (err) {
+    console.error('[checkin records]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }
 });
@@ -478,6 +459,7 @@ router.get('/today', (req, res) => {
 
     res.json(success({ date: today, stats, records }));
   } catch (err) {
+    console.error('[checkin today]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }
 });
@@ -501,7 +483,9 @@ function runAutoAbsent(dateStr) {
   `).all(targetDate, currentTime);
 
   let markedCount = 0;
-  for (const schedule of schedules) {
+
+  // 单个排期的缺席标记（由下方批次事务逐个调用）
+  const markSchedule = (schedule) => {
     const missingStudents = db.prepare(`
       SELECT e.student_id, e.student_name
       FROM enrollments e
@@ -543,9 +527,19 @@ function runAutoAbsent(dateStr) {
             VALUES (?, ?, ?, ?, 'important', 'attendance', ?, 'inapp', 'sent', ?, ?)
           `).run(noticeId, parent.parent_openid, title, content, content.slice(0, 60), now(), now());
         }
-      } catch (e) { /* 通知失败不影响考勤记录 */ }
+      } catch (e) {
+        console.error('[checkin auto-absent notify]', e && e.stack ? e.stack : e);
+      }
     }
-  }
+  };
+
+  // E6/T4：整批自动缺席（考勤 INSERT + 审计 + 家长通知）收敛到单个 immediate 事务，
+  // 一次提交；中途失败整批回滚，不再逐条独立提交留下半完成状态。
+  const runAbsentBatch = db.transaction(() => {
+    for (const schedule of schedules) markSchedule(schedule);
+  });
+  runAbsentBatch.immediate();
+
   return { date: targetDate, markedCount };
 }
 
@@ -556,6 +550,7 @@ router.post('/auto-absent', (req, res) => {
     const result = runAutoAbsent(req.body?.date);
     res.json(success(result));
   } catch (err) {
+    console.error('[checkin auto-absent]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }
 });
@@ -615,6 +610,19 @@ function reversePoints(studentId, amount, referenceId, description) {
 function _currentTimeStr() {
   const d = new Date();
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/**
+ * 是否为唯一约束冲突（幂等重复写入）。
+ * 只有这类错误可以安全忽略：并发/重复提交导致的 UNIQUE 冲突本就是「已扣过课」的语义。
+ * 其余错误（no such column、SQLITE_BUSY、磁盘/IO 故障）必须向上抛出，避免账目静默漂移。
+ */
+function isUniqueViolation(e) {
+  const code = (e && e.code) ? String(e.code) : '';
+  const msg = (e && e.message) ? String(e.message) : '';
+  return code === 'SQLITE_CONSTRAINT_UNIQUE'
+    || code === 'SQLITE_CONSTRAINT_PRIMARYKEY'
+    || /UNIQUE constraint failed/i.test(msg);
 }
 
 module.exports = router;

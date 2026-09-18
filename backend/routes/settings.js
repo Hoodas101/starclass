@@ -36,6 +36,7 @@ function termsHandler(req, res) {
       schemes: Object.values(termsUtil.SCHEMES).map((s) => ({ key: s.key, name: s.name, desc: s.desc })),
     }));
   } catch (err) {
+    console.error('[settings terms]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail('获取称呼方案失败'));
   }
 }
@@ -173,6 +174,7 @@ router.get('/', (req, res) => {
     }
     res.json(success(result));
   } catch (err) {
+    console.error('[settings get]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail('获取设置失败'));
   }
 });
@@ -212,7 +214,7 @@ router.put('/', (req, res) => {
     }
     res.json(success({ saved: true }));
   } catch (err) {
-    console.error('[settings save]', err);
+    console.error('[settings save]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail('保存设置失败'));
   }
 });
@@ -225,7 +227,7 @@ router.get('/data-modules', (req, res) => {
     if (!isAdminReq(req)) return res.status(403).json({ code: 403, data: null, message: '仅管理员可操作' });
     res.json(success({ modules: getModulesMeta() }));
   } catch (err) {
-    console.error('[data-modules]', err);
+    console.error('[data-modules]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail('获取模块列表失败'));
   }
 });
@@ -249,10 +251,14 @@ router.get('/export', (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(json);
   } catch (err) {
-    console.error('[export]', err);
+    console.error('[export]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail('导出失败'));
   }
 });
+
+// 大体积请求体解析器只挂在 /import 路由上（位于本路由守卫与全局 JWT 鉴权之后），
+// 避免未认证客户端用 100mb 请求体拖垮进程（T5，原挂在 server.js 鉴权之前）。
+const importJson = bodyParser.json({ limit: '100mb' });
 
 /**
  * POST /api/settings/import — 导入数据（JSON）
@@ -260,7 +266,7 @@ router.get('/export', (req, res) => {
  * Query: modules=a,b（可选，限制导入模块）；replace=true（可选，先清空所选模块再写入）
  * 仅管理员
  */
-router.post('/import', (req, res) => {
+router.post('/import', importJson, (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json({ code: 403, data: null, message: '仅管理员可操作' });
     const body = req.body;
@@ -271,7 +277,7 @@ router.post('/import', (req, res) => {
     const result = importData(body, { modules, replace });
     res.json(success(result));
   } catch (err) {
-    console.error('[import]', err);
+    console.error('[import]', err && err.stack ? err.stack : err);
     res.status(400).json(fail(err.message || '导入失败'));
   }
 });
@@ -344,10 +350,13 @@ router.post('/db-restore', rawUpload, async (req, res) => {
         }
         return result;
       });
-      summary = copy();
+      // better-sqlite3：`.immediate` 本身就是「以 immediate 模式执行该事务」的入口，
+      // 不是返回新事务函数的工厂 —— 故先构造事务再调用 copy.immediate()（T4）。
+      summary = copy.immediate();
       db.exec('DETACH DATABASE src');
       db.pragma('foreign_keys = ON');
     } catch (e) {
+      console.error('[db-restore copy]', e && e.stack ? e.stack : e);
       try { db.exec('DETACH DATABASE src'); } catch (_) {}
       db.pragma('foreign_keys = ON');
       try { fs.unlinkSync(tmp); } catch (_) {}
@@ -356,7 +365,7 @@ router.post('/db-restore', rawUpload, async (req, res) => {
     try { fs.unlinkSync(tmp); } catch (_) {}
     res.json(success({ summary, safetyBackup: safetyName }));
   } catch (err) {
-    console.error('[db-restore]', err);
+    console.error('[db-restore]', err && err.stack ? err.stack : err);
     // 详细错误只进日志：err.message 可能携带文件路径/SQL 细节
     res.status(500).json(safeFail('恢复失败，请查看服务端日志'));
   }
@@ -372,7 +381,7 @@ router.get('/backups', (req, res) => {
     const list = listBackups();
     res.json(success({ list, config, backupDir: path.basename(BACKUP_DIR) }));
   } catch (err) {
-    console.error('[backups list]', err);
+    console.error('[backups list]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail('获取备份列表失败'));
   }
 });
@@ -390,7 +399,7 @@ router.post('/backups/create', (req, res) => {
       res.json(fail(result.error || '备份失败'));
     }
   } catch (err) {
-    console.error('[backup create]', err);
+    console.error('[backup create]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail('创建备份失败'));
   }
 });
@@ -404,6 +413,7 @@ router.delete('/backups/:filename', (req, res) => {
     const result = deleteBackup(req.params.filename);
     res.json(success({ deleted: true, filename: req.params.filename }));
   } catch (err) {
+    console.error('[backup delete]', err && err.stack ? err.stack : err);
     res.json(fail('删除失败，请查看服务端日志'));
   }
 });

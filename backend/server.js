@@ -107,14 +107,16 @@ app.use((req, res, next) => {
   next();
 });
 
-// 1mb body limit for normal requests; data-import endpoint allows 100mb.
+// 普通请求 1mb 上限。数据导入（/api/settings/import）需要 100mb，但那个大解析器
+// **不能**挂在这里：本段中间件位于下方 JWT 鉴权之前，未认证客户端即可让进程缓冲
+// 100mb 请求体（OOM 风险，T5）。大体积解析器已改为挂在 routes/settings.js 的
+// /import 路由上 —— 那里在管理员守卫之后执行，未通过鉴权就不会读取 body。
 const jsonParser = bodyParser.json({ limit: '1mb' });
 app.use((req, res, next) => {
-  // import endpoint skips the global parser; handled by the big parser below
+  // import 路径跳过全局小解析器，交给路由级的大解析器处理（否则会被 1mb 上限 413）
   if (req.path === '/api/settings/import') return next();
   jsonParser(req, res, next);
 });
-app.use('/api/settings/import', bodyParser.json({ limit: '100mb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // === JWT 认证中间件（排除公开路由）===
@@ -316,7 +318,7 @@ setInterval(() => {
       trialRoutes.cleanupTrialPhoneLimits();
     }
   } catch (e) {
-    console.error('[MapCleanup] 清理失败:', e.message);
+    console.error('[MapCleanup] 清理失败:', e && e.stack ? e.stack : e);
   }
 }, MAP_CLEANUP_INTERVAL);
 
