@@ -7,6 +7,8 @@
  *  - 导入默认按主键 upsert（INSERT OR REPLACE），幂等安全；可选「覆盖模式」先清空所选模块再写入，用于完整回滚。
  *
  * 安全说明：SQL 中的表名、列名均来自本文件内受控的 MODULES 常量（非用户输入），不存在注入风险。
+ * 另有 FORBIDDEN_TABLES 受保护表集合（users / settings / sqlite_sequence）：导入时一律跳过，
+ * 防止通过 JSON 导入整行覆盖 password / role / token_version 等鉴权字段。
  */
 const db = require('../db');
 // recordAudit 与 routes/*.js 用的是同一个实现：utils/index.js 也是 `require('./audit')` 再转出，
@@ -51,6 +53,18 @@ const MODULES = [
 const EXCLUDED_TABLES = ['_migrations', 'jobs'];
 
 const MODULE_MAP = Object.fromEntries(MODULES.map((m) => [m.key, m]));
+
+/**
+ * 受保护表 —— 禁止通过 JSON 导入（POST /api/settings/import）覆盖。
+ *
+ * 与 routes/settings.js 的 db-restore 同源：这两个入口都能整行改写数据库，
+ * 而 users 表持有 password 哈希 / role / token_version —— 一旦被导入覆盖，
+ * 等于可重置管理员口令或植入后门账号；settings 表则是机构级鉴权与业务配置。
+ * 故与 db-restore 共用同一份保护集合（此前 db-restore 自带一份、导入侧完全没有）。
+ *
+ * sqlite_sequence 是 SQLite 内部自增台账，一并排除。
+ */
+const FORBIDDEN_TABLES = new Set(['users', 'settings', 'sqlite_sequence']);
 
 // 各表可用于「按时间范围导出」的日期列（均为 epoch 毫秒）。
 // 仅当该列存在且查询给定了 from/to 时，导出才对该表做时间筛选；其余表导出全部。
@@ -237,6 +251,11 @@ function exportData(modulesInput, opts = {}) {
 
 /**
  * 导入数据
+ *
+ * FORBIDDEN_TABLES 中的受保护表（users / settings / sqlite_sequence）一律跳过，
+ * 即使 replace=true 也不会被清空 —— 防止通过导入重置管理员或植入后门账号。
+ * 被跳过的表会写入返回的 errors。
+ *
  * @param {object} payload 文件 JSON：{ meta, data }
  * @param {{ modules?: string[], replace?: boolean }} opts
  * @returns {{ imported: object, errors: string[], meta: object }}
@@ -283,6 +302,12 @@ function importData(payload, opts = {}) {
       for (const t of mod.tables) {
         const rows = tablesObj[t];
         if (!Array.isArray(rows)) continue;
+        // 受保护表必须在 replace 的 DELETE 之前拦下：否则 replace=true 时
+        // 会先清空 users/settings，再被下面的 INSERT OR REPLACE 写回文件内容。
+        if (FORBIDDEN_TABLES.has(t)) {
+          errors.push(`表 ${t} 属受保护表，禁止通过导入覆盖（已跳过）`);
+          continue;
+        }
         const cols = getColumns(t);
         if (cols.length === 0) {
           errors.push(`表 ${t} 不存在，已跳过`);
@@ -336,6 +361,7 @@ module.exports = {
   APP_NAME,
   FORMAT_VERSION,
   MODULES,
+  FORBIDDEN_TABLES,
   getModulesMeta,
   resolveModules,
   findUncoveredTables,

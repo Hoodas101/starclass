@@ -426,7 +426,52 @@ router.get('/getProfile', (req, res) => {
 });
 
 // 家长绑定失败计数器（内存级，防重名误绑枚举 / 爆破）
-const bindAttempts = new Map();
+//
+// 三个维度，缺一不可：
+//   openid     —— 原语义：防单个账号反复试错；
+//   phoneLast4 —— 同一手机后4位被反复试探时收紧（更严格的手机维度）；
+//   studentId  —— 主防线。绑定的秘密是「家长手机号后4位」，只有 10^4 种可能，
+//                 而攻击者必须锁定某个具体学员才能枚举其后4位（前置条件是知道姓名）。
+//                 因此以「目标学员」为 key 才真正封死枚举 —— 轮换账号无法绕开这一维度。
+//                 仅靠 phoneLast4 维度不足以防枚举：后4位本身就是 10^4 个桶，
+//                 攻击者每次换一个后4位就能拿到独立配额，仍可把空间走完。
+// 三个 Map 的 key 上界分别受 openid 数 / 学员数 / 10^4 约束，不会无界增长。
+const bindAttempts = new Map();        // openid     → { count, first, blockedUntil }
+const bindPhoneAttempts = new Map();   // phoneLast4 → { count, first, blockedUntil }
+const bindTargetAttempts = new Map();  // studentId  → { count, first, blockedUntil }
+
+const BIND_WINDOW = 10 * 60 * 1000;   // openid 维度：窗口 10 分钟
+const BIND_LIMIT = 10;                // openid 维度：失败 ≥10 次
+const BIND_BLOCK = 10 * 60 * 1000;    // openid 维度：冷却 10 分钟
+const PHONE_WINDOW = 30 * 60 * 1000;  // 手机后4位维度：窗口 30 分钟
+const PHONE_LIMIT = 10;               // 手机后4位维度：失败 ≥10 次
+const PHONE_BLOCK = 30 * 60 * 1000;   // 手机后4位维度：冷却 30 分钟
+const TARGET_WINDOW = 30 * 60 * 1000; // 学员维度（主防线，更严）：窗口 30 分钟
+const TARGET_LIMIT = 5;               // 学员维度：失败 ≥5 次
+const TARGET_BLOCK = 30 * 60 * 1000;  // 学员维度：冷却 30 分钟
+
+/**
+ * 通用「窗口内计数 + 冷却」判定。
+ * @returns {{ok: boolean, att: object}} ok=false 表示已进入冷却或本次已达上限，调用方应回 429
+ */
+function throttleCheck(map, key, limit, windowMs, blockMs, nowTs) {
+  const att = map.get(key) || { count: 0, first: nowTs, blockedUntil: 0 };
+  if (att.blockedUntil && att.blockedUntil > nowTs) return { ok: false, att };
+  if (nowTs - att.first > windowMs) { att.count = 0; att.first = nowTs; }
+  if (att.count >= limit) {
+    att.blockedUntil = nowTs + blockMs;
+    map.set(key, att);
+    return { ok: false, att };
+  }
+  return { ok: true, att };
+}
+
+/** 记一次失败（att 取自 throttleCheck 的返回值，保证与判定用的是同一份计数对象） */
+function throttleFail(map, key, att) {
+  if (!att) return;
+  att.count++;
+  map.set(key, att);
+}
 
 /**
  * POST /api/auth/bindStudent
@@ -440,14 +485,21 @@ router.post('/bindStudent', (req, res) => {
     if (!studentName || studentName.trim().length === 0) return res.status(400).json(safeFail('请输入成员姓名'));
     if (!phoneLast4 || !/^\d{4}$/.test(phoneLast4)) return res.status(400).json(safeFail('请输入有效的手机号后4位'));
 
-    // 失败频控：同一家长 10 分钟内失败 ≥10 次则冷却 10 分钟
+    // 失败频控（第 1 层）：同一家长 10 分钟内失败 ≥10 次则冷却 10 分钟
+    // 失败频控（第 2 层）：同一手机后4位 30 分钟内失败 ≥10 次则冷却 30 分钟
     const nowTs = now();
-    const att = bindAttempts.get(openid) || { count: 0, first: nowTs, blockedUntil: 0 };
-    if (att.blockedUntil && att.blockedUntil > nowTs) {
-      return res.status(429).json(safeFail('操作过于频繁，请稍后再试'));
-    }
-    if (nowTs - att.first > 10 * 60 * 1000) { att.count = 0; att.first = nowTs; }
-    if (att.count >= 10) { att.blockedUntil = nowTs + 10 * 60 * 1000; bindAttempts.set(openid, att); return res.status(429).json(safeFail('操作过于频繁，请稍后再试')); }
+    const openidThrottle = throttleCheck(bindAttempts, openid, BIND_LIMIT, BIND_WINDOW, BIND_BLOCK, nowTs);
+    if (!openidThrottle.ok) return res.status(429).json(safeFail('操作过于频繁，请稍后再试'));
+    const phoneThrottle = throttleCheck(bindPhoneAttempts, phoneLast4, PHONE_LIMIT, PHONE_WINDOW, PHONE_BLOCK, nowTs);
+    if (!phoneThrottle.ok) return res.status(429).json(safeFail('操作过于频繁，请稍后再试'));
+
+    // 本次请求的失败要在各维度同时记账。studentId 在姓名/编号未解析出来时不可得，
+    // 此时仅记 openid + 手机后4位两个维度（这两条失败路径也不泄露后4位是否正确）。
+    const failAll = (studentId, targetAtt) => {
+      throttleFail(bindAttempts, openid, openidThrottle.att);
+      throttleFail(bindPhoneAttempts, phoneLast4, phoneThrottle.att);
+      if (studentId && targetAtt) throttleFail(bindTargetAttempts, studentId, targetAtt);
+    };
 
     // 每位家长最多绑定 3 位成员
     const bindCount = db.prepare('SELECT COUNT(*) as count FROM parent_bindings WHERE parent_openid = ?').get(openid).count;
@@ -455,21 +507,26 @@ router.post('/bindStudent', (req, res) => {
 
     // 按姓名匹配；重名时需用学员编号（memberNo）进一步区分，避免误绑陌生人孩子
     const candidates = db.prepare('SELECT id, name, member_no FROM students WHERE name = ? AND status = ?').all(studentName.trim(), 'active');
-    if (candidates.length === 0) { att.count++; bindAttempts.set(openid, att); return res.status(404).json(safeFail('成员不存在，请检查姓名')); }
+    if (candidates.length === 0) { failAll(null, null); return res.status(404).json(safeFail('成员不存在，请检查姓名')); }
     if (candidates.length > 1 && !memberNo) {
-      att.count++; bindAttempts.set(openid, att);
+      failAll(null, null);
       return res.status(400).json(safeFail('该姓名存在多位成员，请填写学员编号（memberNo）以确认'));
     }
     const student = memberNo
       ? candidates.find((c) => (c.member_no || '') === String(memberNo).trim())
       : candidates[0];
-    if (!student) { att.count++; bindAttempts.set(openid, att); return res.status(404).json(safeFail('未找到匹配该编号的成员')); }
+    if (!student) { failAll(null, null); return res.status(404).json(safeFail('未找到匹配该编号的成员')); }
+
+    // 失败频控（第 3 层，主防线）：同一学员 30 分钟内失败 ≥5 次则冷却 30 分钟。
+    // 必须放在解析出 student 之后 —— 枚举后4位必然针对某个具体学员。
+    const targetThrottle = throttleCheck(bindTargetAttempts, student.id, TARGET_LIMIT, TARGET_WINDOW, TARGET_BLOCK, nowTs);
+    if (!targetThrottle.ok) return res.status(429).json(safeFail('操作过于频繁，请稍后再试'));
 
     const safePhoneLast4 = escapeLike(phoneLast4);
     const existingBinding = db.prepare(`
       SELECT * FROM parent_bindings WHERE student_id = ? AND parent_phone LIKE ? ESCAPE '\\'
     `).get(student.id, `%${safePhoneLast4}`);
-    if (!existingBinding) { att.count++; bindAttempts.set(openid, att); return res.status(400).json(safeFail('手机号后4位不匹配，绑定失败')); }
+    if (!existingBinding) { failAll(student.id, targetThrottle.att); return res.status(400).json(safeFail('手机号后4位不匹配，绑定失败')); }
 
     const alreadyBound = db.prepare(`SELECT 1 FROM parent_bindings WHERE student_id = ? AND parent_openid = ?`).get(student.id, openid);
     if (alreadyBound) return res.status(400).json(safeFail('已绑定该成员'));
@@ -479,8 +536,10 @@ router.post('/bindStudent', (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, 1, ?)
     `).run(student.id, student.name, parentName || '家长', openid, existingBinding.parent_phone, relation, now());
 
-    // 绑定成功，重置失败计数
+    // 绑定成功，重置本次相关维度的失败计数
     bindAttempts.delete(openid);
+    bindPhoneAttempts.delete(phoneLast4);
+    bindTargetAttempts.delete(student.id);
 
     res.json(success({ studentId: student.id, studentName: student.name, relation }));
   } catch (err) {

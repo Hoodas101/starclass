@@ -24,6 +24,7 @@ const STAFF_ROLES = ['admin', 'coach', 'sales'];
 /**
  * 校验当前请求是否持有某模块权限。
  * 不通过时回 403 并返回 false，调用方据此提前 return。
+ * 身份未知（req.userRole 缺失）同样按拒绝处理 —— 见下方失败关闭说明。
  *
  * @param {import('express').Request} req
  * @param {import('express').Response} res
@@ -33,6 +34,14 @@ const STAFF_ROLES = ['admin', 'coach', 'sales'];
  */
 function requireStaffPerm(req, res, perm, label) {
   const role = req.userRole;
+  // 失败关闭（fail-closed）：身份未知（未认证 / token 缺 role 声明）一律拒绝。
+  // 此前 `!STAFF_ROLES.includes(undefined)` 为真，会落进「非员工角色」分支被放行 ——
+  // 任何漏传 role 的 token 都能拿到通行证，契约过于脆弱。
+  // 注意：家长等非员工角色是**已定义值**（'parent'），不受本次收紧影响，仍走下方放行分支。
+  if (role === undefined || role === null) {
+    res.status(403).json(safeFail(`无权访问${label || '该功能'}`));
+    return false;
+  }
   if (!STAFF_ROLES.includes(role)) return true; // 家长等非员工角色不受员工权限清单约束
   if (role === 'admin') return true;            // 管理员恒通过，且省去一次用户查询
   if (resolvePerms(getReqUser(req)).includes(perm)) return true;

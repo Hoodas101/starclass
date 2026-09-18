@@ -95,12 +95,17 @@ function generateToken(payload) {
 
 /**
  * 验证 JWT Token（使用 jsonwebtoken 标准库）
+ *
+ * 显式固定 `algorithms: ['HS256']`，与 generateToken 的签发算法保持一致。
+ * 不固定算法时，jsonwebtoken 会按密钥类型自行推导可接受的算法集合，
+ * 任何同族 HMAC 算法（如 HS512）签出的 token 都会被接受 —— 属纵深防御缺口。
+ *
  * @param {string} token - token 字符串
  * @returns {object|null} 解码后的 payload，验证失败返回 null
  */
 function verifyToken(token) {
   try {
-    return jwt.verify(token, JWT_SECRET);
+    return jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
   } catch {
     return null;
   }

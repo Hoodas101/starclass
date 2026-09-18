@@ -224,6 +224,50 @@ router.post('/recursive', (req, res) => {
 });
 
 /**
+ * 可见性规则（兼容新旧两类「班级」模型）—— GET / 与 GET /today 的唯一实现：
+ *   新模型：schedules.class_id + class_members
+ *   旧模型：schedules.group_course_id + student_class（课程即班级）
+ * 判定：
+ *   - group_course_id 与 class_id 均为空 = 全员可见；
+ *   - 否则为受限排期，仅当浏览者归属其关联班级（任一模型命中）时可见。
+ * 注意：class_id 非空而 group_course_id 为空，仍属「仅本班可见」，不可当作全员可见。
+ *
+ * 把过滤片段追加到 where、并把 classIds 压入 params，返回新的 where 字符串。
+ */
+function applyClassVisibility(where, params, classIds) {
+  let w = `${where} AND (`;
+  w += " (COALESCE(group_course_id,'') = '' AND COALESCE(class_id,'') = '')";
+  if (classIds.length) {
+    const ph = classIds.map(() => '?').join(',');
+    w += ` OR (COALESCE(group_course_id,'') != '' AND group_course_id IN (${ph}))`;
+    w += ` OR (COALESCE(class_id,'') != '' AND class_id IN (${ph}))`;
+    params.push(...classIds, ...classIds);
+  }
+  return `${w} )`;
+}
+
+/** 解析逗号分隔的班级 ID 列表（管理端可按多班筛选） */
+function resolveClassIds(raw) {
+  return String(raw || '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * 当前请求者（家长等普通成员）有权看到的班级并集。
+ * 合并其绑定成员所属的新旧两类班级模型；未登录或无绑定返回 []。
+ */
+function parentVisibleClassIds(req) {
+  const openid = getOpenId(req);
+  if (!openid) return [];
+  const bound = db.prepare('SELECT DISTINCT student_id FROM parent_bindings WHERE parent_openid = ?').all(openid);
+  const sIds = bound.map((b) => b.student_id).filter(Boolean);
+  if (!sIds.length) return [];
+  const ph = sIds.map(() => '?').join(',');
+  const oldIds = db.prepare(`SELECT DISTINCT class_id FROM student_class WHERE student_id IN (${ph})`).all(...sIds).map((r) => r.class_id);
+  const newIds = db.prepare(`SELECT DISTINCT class_id FROM class_members WHERE student_id IN (${ph})`).all(...sIds).map((r) => r.class_id);
+  return [...oldIds, ...newIds];
+}
+
+/**
  * GET /api/schedules — 课表查询（按日期范围/教师/场地）
  * Query: { startDate, endDate, teacherId, classroomId, page, pageSize }
  */
@@ -245,30 +289,19 @@ router.get('/', (req, res) => {
     // - studentId：按单个成员可见性筛选（仅返回全员可见或该成员所属班级可见的排期），带越权校验
     // - 家长等普通成员（非管理端工作人员）：自动按其绑定成员所属班级的并集进行过滤，
     //   仅展示“全员可见”或“其孩子所在班级可见”的排期，防止跨班窥视（防越权）
-    // 规则：group_course_id 为空 = 全员可见；非空 = 仅目标班级可见
-    const resolveClassIds = (raw) => String(raw || '').split(',').map((s) => s.trim()).filter(Boolean);
-    // 可见性规则（兼容新旧两类「班级」模型）：
-    //   新模型：schedules.class_id + class_members
-    //   旧模型：schedules.group_course_id + student_class（课程即班级）
-    // 判定：
-    //   - group_course_id 与 class_id 均为空 = 全员可见；
-    //   - 否则为受限排期，仅当浏览者归属其关联班级（任一模型命中）时可见。
-    // 注意：class_id 非空而 group_course_id 为空，仍属「仅本班可见」，不可当作全员可见。
-    const applyVisibility = (classIds) => {
-      where += ' AND (';
-      where += " (COALESCE(group_course_id,'') = '' AND COALESCE(class_id,'') = '')";
-      if (classIds.length) {
-        const ph = classIds.map(() => '?').join(',');
-        where += ` OR (COALESCE(group_course_id,'') != '' AND group_course_id IN (${ph}))`;
-        where += ` OR (COALESCE(class_id,'') != '' AND class_id IN (${ph}))`;
-        params.push(...classIds, ...classIds);
-      }
-      where += ' )';
-    };
-
     if (classId) {
       // 管理端显式按班级筛选（管理员/教练）
-      applyVisibility(resolveClassIds(classId));
+      const requested = resolveClassIds(classId);
+      if (isStaffReq(req)) {
+        where = applyClassVisibility(where, params, requested);
+      } else {
+        // 家长：请求的班级必须落在其可见并集内，否则直接拒绝。
+        // 若在此处退化成空并集，会把「他人班级」静默变成「全员可见排期」，与请求语义不符。
+        const allowed = parentVisibleClassIds(req);
+        const permitted = requested.filter((c) => allowed.includes(c));
+        if (permitted.length === 0) return res.status(403).json(safeFail('无权查看该班级的排期'));
+        where = applyClassVisibility(where, params, permitted);
+      }
     } else if (studentId) {
       // 家长/教练/管理员按成员可见性筛选（防越权）
       if (!canViewStudentData(req, studentId)) {
@@ -276,23 +309,11 @@ router.get('/', (req, res) => {
       }
       const oldIds = db.prepare('SELECT class_id FROM student_class WHERE student_id = ?').all(studentId).map((r) => r.class_id);
       const newIds = db.prepare('SELECT class_id FROM class_members WHERE student_id = ?').all(studentId).map((r) => r.class_id);
-      applyVisibility([...oldIds, ...newIds]);
+      where = applyClassVisibility(where, params, [...oldIds, ...newIds]);
     } else if (!isStaffReq(req)) {
       // 普通成员（家长）：仅展示其绑定成员所属班级并集可见的排期，
       // 避免客户端伪造 classId 导致跨班窥视；并集为空时仅展示全员可见排期
-      const openid = getOpenId(req);
-      let classIds = [];
-      if (openid) {
-        const bound = db.prepare('SELECT DISTINCT student_id FROM parent_bindings WHERE parent_openid = ?').all(openid);
-        const sIds = bound.map((b) => b.student_id).filter(Boolean);
-        if (sIds.length) {
-          const ph = sIds.map(() => '?').join(',');
-          const oldIds = db.prepare(`SELECT DISTINCT class_id FROM student_class WHERE student_id IN (${ph})`).all(...sIds).map((r) => r.class_id);
-          const newIds = db.prepare(`SELECT DISTINCT class_id FROM class_members WHERE student_id IN (${ph})`).all(...sIds).map((r) => r.class_id);
-          classIds = [...oldIds, ...newIds];
-        }
-      }
-      applyVisibility(classIds);
+      where = applyClassVisibility(where, params, parentVisibleClassIds(req));
     }
 
     const total = db.prepare(`SELECT COUNT(*) as count FROM schedules ${where}`).get(...params).count;
@@ -335,15 +356,24 @@ router.get('/my', (req, res) => {
 
 /**
  * GET /api/schedules/today — 今日课表
+ *
+ * 与 GET /api/schedules 同源的可见性强制：员工（管理员/教练/销售）看当日全量；
+ * 家长等普通成员只能看到「全员可见」或自己孩子所在班级的当日排期。
+ * 此前本端点无任何身份/角色判断，任一登录家长都能读到全机构当日排课。
  */
 router.get('/today', (req, res) => {
   try {
     const today = formatDate(now());
+    let where = "WHERE date = ? AND status = 'scheduled'";
+    const params = [today];
+    if (!isStaffReq(req)) {
+      where = applyClassVisibility(where, params, parentVisibleClassIds(req));
+    }
     const list = db.prepare(`
       SELECT * FROM schedules
-      WHERE date = ? AND status = 'scheduled'
+      ${where}
       ORDER BY start_time ASC
-    `).all(today);
+    `).all(...params);
 
     res.json(success({ date: today, list, count: list.length }));
   } catch (err) {

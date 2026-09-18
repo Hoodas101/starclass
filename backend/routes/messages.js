@@ -417,20 +417,35 @@ router.get('/my', (req, res) => {
 });
 
 /**
- * PUT /api/messages/:id/read — 标记已读
+ * PUT /api/messages/:id/read — 标记已读（按用户）
+ *
+ * 广播通知（is_broadcast=1，user_id 为空串）的已读状态是**每用户**的，必须记录在
+ * notification_reads 里。此前这里直接 `UPDATE notifications SET status='read' WHERE id=?`，
+ * 而归属校验又因 `existing.user_id` 为空串而短路跳过 —— 任一家长标记一条广播已读后，
+ * 整行 status 被全局改写，所有家长都看不到该条未读了。
+ * 现与 POST /read 共用 markRead()：广播写 notification_reads，定向通知仅接收人可写回本行 status。
  */
 router.put('/:id/read', (req, res) => {
   try {
     const { id } = req.params;
     const existing = db.prepare('SELECT * FROM notifications WHERE id = ?').get(id);
     if (!existing) return res.json(fail('消息不存在'));
-    // 归属校验：仅消息接收人可标记已读，防止越权标记他人消息
+
     const openid = getOpenId(req);
-    if (openid && existing.user_id && existing.user_id !== openid) {
-      return res.status(403).json(safeFail('无权操作他人消息'));
+    if (!openid) return res.status(401).json(safeFail('未登录'));
+
+    // 广播通知：按调用者写入 notification_reads，绝不改写全局 status
+    if (existing.is_broadcast) {
+      markRead(existing, openid);
+      return res.json(success({ id, read: true }));
     }
 
-    db.prepare("UPDATE notifications SET status = 'read' WHERE id = ?").run(id);
+    // 定向通知：仅消息接收人可标记已读，防止越权标记他人消息
+    // （不能用「user_id 为空即放行」的短路判断，那正是广播被全局改写的根因）
+    if (existing.user_id !== openid) {
+      return res.status(403).json(safeFail('无权操作他人消息'));
+    }
+    markRead(existing, openid);
     res.json(success({ id, read: true }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));

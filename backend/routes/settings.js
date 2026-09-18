@@ -11,9 +11,9 @@ const fs = require('fs');
 const os = require('os');
 const Database = require('better-sqlite3');
 const bodyParser = require('body-parser');
-const { success, fail, safeFail, getOpenId, now, isAdminReq, isStaffReq } = require('../utils');
+const { success, fail, safeFail, getOpenId, getActor, recordAudit, now, isAdminReq, isStaffReq } = require('../utils');
 const { getBackupConfig, createBackup, listBackups, deleteBackup, BACKUP_DIR } = require('../utils/backup');
-const { getModulesMeta, exportData, importData } = require('../utils/dataio');
+const { getModulesMeta, exportData, importData, FORBIDDEN_TABLES } = require('../utils/dataio');
 const termsUtil = require('../utils/terms');
 
 // 公开端点：返回机构当前称呼方案与解析后的术语表（无任何敏感信息，供管理端/家长端/微信通知共用）
@@ -265,6 +265,9 @@ const importJson = bodyParser.json({ limit: '100mb' });
  * Body: 导出文件内容 { meta, data }
  * Query: modules=a,b（可选，限制导入模块）；replace=true（可选，先清空所选模块再写入）
  * 仅管理员
+ *
+ * 受保护表（users / settings）由 utils/dataio 的 FORBIDDEN_TABLES 拦截，不会写入；
+ * 被跳过的表会在返回的 errors 中说明。导入动作记入审计日志。
  */
 router.post('/import', importJson, (req, res) => {
   try {
@@ -275,10 +278,21 @@ router.post('/import', importJson, (req, res) => {
       : null;
     const replace = req.query.replace === 'true' || req.query.replace === '1';
     const result = importData(body, { modules, replace });
+    // 导入属批量改写业务数据的高危操作，必须留痕（谁、何时、导了哪些模块、是否覆盖模式、跳过了什么）
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'data_import',
+      entityId: (result.meta && Array.isArray(result.meta.modules) ? result.meta.modules.join(',') : ''),
+      action: 'import',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { modules: result.meta && result.meta.modules, replace, errors: result.errors },
+    });
     res.json(success(result));
   } catch (err) {
     console.error('[import]', err && err.stack ? err.stack : err);
-    res.status(400).json(fail(err.message || '导入失败'));
+    // 详细错误只进日志：err.message 可能携带 SQLite 原生报错（表结构/文件路径）
+    res.status(400).json(safeFail('导入失败，请查看服务端日志'));
   }
 });
 
@@ -332,10 +346,11 @@ router.post('/db-restore', rawUpload, async (req, res) => {
           "SELECT name FROM src.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).all().map((r) => r.name);
         const result = {};
-        // 受保护表：禁止通过还原覆盖鉴权与系统配置，防止重置管理员 / 植入后门
-        const FORBIDDEN = new Set(['users', 'settings', 'sqlite_sequence']);
+        // 受保护表：禁止通过还原覆盖鉴权与系统配置，防止重置管理员 / 植入后门。
+        // 集合与 JSON 导入（/settings/import）共用同一份定义（utils/dataio 的 FORBIDDEN_TABLES），
+        // 避免两个入口的保护范围再次分叉。
         for (const t of srcTables) {
-          if (t.startsWith('sqlite_') || FORBIDDEN.has(t)) {
+          if (t.startsWith('sqlite_') || FORBIDDEN_TABLES.has(t)) {
             result[t] = 'skip(受保护表，禁止恢复)';
             continue;
           }
