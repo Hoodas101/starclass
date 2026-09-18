@@ -9,6 +9,9 @@
  * 安全说明：SQL 中的表名、列名均来自本文件内受控的 MODULES 常量（非用户输入），不存在注入风险。
  */
 const db = require('../db');
+// recordAudit 与 routes/*.js 用的是同一个实现：utils/index.js 也是 `require('./audit')` 再转出，
+// 此处直接 require 同目录模块，避免经 index.js 形成环。
+const { recordAudit } = require('./audit');
 
 const APP_NAME = 'edu-admin';
 const FORMAT_VERSION = 1;
@@ -155,9 +158,20 @@ function exportData(modulesInput, opts = {}) {
   const mods = resolveModules(modulesInput);
   const dateFrom = typeof opts.dateFrom === 'number' && !Number.isNaN(opts.dateFrom) ? opts.dateFrom : null;
   const dateTo = typeof opts.dateTo === 'number' && !Number.isNaN(opts.dateTo) ? opts.dateTo : null;
+
+  // E14：本函数会把整库（含 users.password 哈希、家长手机号、学员档案等全量 PII）
+  // 一次性 SELECT * 读进内存再序列化成下载文件。无时间范围时等于「全库 dump」——
+  // 大库上内存峰值与响应体都不可控，且没有任何留痕。
+  // 因此强制要求 from/to（epoch 毫秒）；调用方（routes/settings.js 的 /settings/export）
+  // 需确保前端总是带上范围。
+  if (dateFrom == null || dateTo == null) {
+    throw new Error('导出需指定时间范围（from / to，epoch 毫秒）；无范围的全库导出已禁用');
+  }
+
   const useDate = dateFrom != null && dateTo != null;
   const data = {};
   const failedTables = [];
+  let rowCount = 0;
   for (const m of mods) {
     const tables = {};
     for (const t of m.tables) {
@@ -179,6 +193,7 @@ function exportData(modulesInput, opts = {}) {
         tables[t] = [];
         failedTables.push(`${t}: ${e.message}`);
       }
+      rowCount += tables[t].length;
     }
     data[m.key] = { tables };
   }
@@ -190,7 +205,7 @@ function exportData(modulesInput, opts = {}) {
       failedTables.length ? `读取失败：${failedTables.join(' | ')}` : ''
     );
   }
-  return {
+  const payload = {
     meta: {
       app: APP_NAME,
       format: FORMAT_VERSION,
@@ -204,6 +219,20 @@ function exportData(modulesInput, opts = {}) {
     },
     data,
   };
+
+  // E14：导出属于对全量 PII 的批量读取，必须留痕（谁、何时、导了哪些模块、什么时间范围、多少行）。
+  // actorId / actorRole 由调用方通过 opts 传入；未传时记空串，至少保留「发生过一次导出」这一事实。
+  // recordAudit 内部吞异常，不会影响导出主流程。
+  recordAudit(db, {
+    entity: 'data_export',
+    entityId: mods.map((m) => m.key).join(','),
+    action: 'export',
+    actorId: opts.actorId || '',
+    actorRole: opts.actorRole || '',
+    after: { modules: mods.map((m) => m.key), dateFrom, dateTo, rowCount },
+  });
+
+  return payload;
 }
 
 /**

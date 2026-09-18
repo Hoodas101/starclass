@@ -253,53 +253,64 @@ router.get('/by-product', (req, res) => {
       end = now.getTime();
     }
 
-    const list = db.prepare(`
-      SELECT
-        items,
-        payable_amount,
-        refunded_amount,
-        order_type
-      FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
+    // E16：原实现把区间内每张订单的 items 整行读进 JS、逐条 JSON.parse 再在 JS 里做加权分摊，
+    // 订单量上万后是纯 CPU + 内存开销。改为 SQL 侧 json_each 展开、按订单算 gross 后分摊，
+    // 只把「已按产品名聚合好的行」带回 JS（与 /admin/charts 的 productSales 同一套路）。
+    // 分摊口径与旧实现逐字对应：
+    //   · gross = Σ(unitPrice×qty)（unitPrice 缺失回退 price，再缺失记 0）
+    //   · gross > 0 时按单项 itemValue/gross 占比分摊 payable_amount / refunded_amount
+    //   · gross 非正时按订单项数均分
+    //   · 非法 JSON / 非数组 items 统一按 '[]' 处理，等价于旧实现的 continue
+    //   · 元素必须自身是 JSON 对象才取字段（json_type = 'object'）。这是刻意保留旧实现的语义：
+    //     json_extract 对「数组元素为 JSON 字符串」的双重编码行会**自动下沉**解析出真实 itemName，
+    //     而旧 JS 实现取 item.itemName 恒为 undefined、把这类行记成「未命名」且标价计 0。
+    //     /admin/charts 的 productSales 已按前者（真实项目名）归类；本接口是财务报表，
+    //     口径变更会让历史月份的 by-product 与既有报表对不上，故此处显式保持旧口径不变。
+    //     （附带修正：旧实现在元素为 null 时会抛 TypeError 导致整个接口 500，此处按「未命名」处理。）
+    // 四舍五入刻意留在 JS：SQL 的 round() 对负数是「远离零」，JS Math.round 是「向上」，
+    // 而 net 可能为负，两者会在 .5 处产生分歧。
+    const rows = db.prepare(`
+      WITH valid AS (
+        SELECT o.id, o.payable_amount, o.refunded_amount,
+               CASE WHEN json_valid(o.items) AND json_type(o.items) = 'array'
+                    THEN o.items ELSE '[]' END AS items_json
+        FROM orders o
+        WHERE o.status IN ('paid', 'refunded') AND o.order_type != 'refund'
+          AND o.paid_at >= ? AND o.paid_at <= ?
+      ),
+      exploded AS (
+        SELECT v.id, v.payable_amount, v.refunded_amount,
+               json_array_length(v.items_json) AS n_items,
+               CASE WHEN it.type = 'object'
+                    THEN COALESCE(NULLIF(json_extract(it.value, '$.itemName'), ''),
+                                  NULLIF(json_extract(it.value, '$.name'), ''), '未命名')
+                    ELSE '未命名' END AS name,
+               CASE WHEN it.type = 'object'
+                     AND CAST(json_extract(it.value, '$.quantity') AS REAL) > 0
+                    THEN CAST(json_extract(it.value, '$.quantity') AS REAL) ELSE 1 END AS qty,
+               CASE WHEN it.type = 'object'
+                    THEN COALESCE(CAST(json_extract(it.value, '$.unitPrice') AS REAL),
+                                  CAST(json_extract(it.value, '$.price') AS REAL), 0)
+                    ELSE 0 END AS unit_price
+        FROM valid v, json_each(v.items_json) AS it
+      ),
+      per_order AS (
+        SELECT id, SUM(unit_price * qty) AS gross FROM exploded GROUP BY id
+      )
+      SELECT e.name AS name,
+             SUM(e.qty) AS count,
+             SUM(CASE WHEN p.gross > 0 THEN e.payable_amount * (e.unit_price * e.qty / p.gross)
+                      WHEN e.n_items > 0 THEN e.payable_amount * 1.0 / e.n_items
+                      ELSE 0 END) AS revenue,
+             SUM(CASE WHEN p.gross > 0 THEN e.refunded_amount * (e.unit_price * e.qty / p.gross)
+                      WHEN e.n_items > 0 THEN e.refunded_amount * 1.0 / e.n_items
+                      ELSE 0 END) AS refunded
+      FROM exploded e JOIN per_order p ON p.id = e.id
+      GROUP BY e.name
     `).all(start, end);
 
-    // 解析订单项目，按产品名聚合；收入按订单实付(payable_amount)分摊，退款按订单行比例分摊
-    const productMap = {};
-    for (const order of list) {
-      let items = [];
-      try { items = JSON.parse(order.items || '[]'); } catch (e) { continue; }
-      if (!items.length) continue;
-
-      const payable = Number(order.payable_amount) || 0;
-      const refunded = Number(order.refunded_amount) || 0;
-      // 订单明细写入字段是 unitPrice（orders.js）；兼容历史数据以 price 回退，否则 gross 恒为 0 退化为均分
-      const unitOf = (it) => Number(it.unitPrice ?? it.price) || 0;
-      const gross = items.reduce((s, it) => s + unitOf(it) * (Number(it.quantity) || 1), 0);
-
-      items.forEach((item) => {
-        const name = item.itemName || item.name || '未命名';
-        if (!productMap[name]) productMap[name] = { name, count: 0, revenue: 0, refunded: 0 };
-        const qty = Number(item.quantity) || 1;
-        productMap[name].count += qty;
-
-        const itemValue = unitOf(item) * qty;
-        let revenueShare = 0, refundShare = 0;
-        if (gross > 0) {
-          const w = itemValue / gross;
-          revenueShare = payable * w;
-          refundShare = refunded * w;
-        } else if (items.length > 0) {
-          // 无标价时按项数均分
-          revenueShare = payable / items.length;
-          refundShare = refunded / items.length;
-        }
-        productMap[name].revenue += revenueShare;
-        productMap[name].refunded += refundShare;
-      });
-    }
-
-    const result = Object.values(productMap)
-      .map(p => ({
+    const result = rows
+      .map((p) => ({
         ...p,
         revenue: Math.round(p.revenue),
         refunded: Math.round(p.refunded),

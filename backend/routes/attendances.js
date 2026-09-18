@@ -236,21 +236,25 @@ router.get('/summary', (req, res) => {
 
     const { where, params } = buildWhere(req.query);
 
+    // E5：原先把全部考勤行读进内存再 slice(0, 20000)，全员口径下会在峰值时把整张
+    // attendances 表（含大库几十万行）materialize 一遍。LIMIT 下推到 SQL 后由引擎在
+    // 扫描阶段就截断（ORDER BY a.date ASC 可走 idx_attendances_date），内存峰值降为封顶行数。
+    // 语义完全不变：排序键一致，截断点仍是「按 date 升序的前 20000 行」。
+    const SUMMARY_ROW_CAP = 20000;
     const raw = db.prepare(`
       SELECT a.*, s.start_time, s.end_time
       FROM attendances a
       LEFT JOIN schedules s ON s.id = a.schedule_id
       ${where}
       ORDER BY a.date ASC
+      LIMIT ${SUMMARY_ROW_CAP}
     `).all(...params);
 
     const rows = raw.map((a) => mapRecord(a, a));
-    // 限制趋势/汇总规模（全员口径下数据量可能较大，封顶 20000 行）
-    const capped = rows.length > 20000 ? rows.slice(0, 20000) : rows;
 
     res.json(success({
-      summary: computeSummary(capped),
-      trend: computeTrend(capped),
+      summary: computeSummary(rows),
+      trend: computeTrend(rows),
       filters: { studentId: studentId || '', classId: classId || courseId || '', teacherId: teacherId || '', startDate: startDate || '', endDate: endDate || '', status: status || '' },
     }));
   } catch (err) {

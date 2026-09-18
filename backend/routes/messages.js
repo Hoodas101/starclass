@@ -486,18 +486,39 @@ router.get('/admin/list', (req, res) => {
 
     // 家长用户总数（广播送达基数）
     const parentCount = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'parent'").get().count;
+
+    // E8：原先在 rows.map 内逐行 prepare + 执行两条查询（已读数、定向班级送达数），
+    // 每页 pageSize 行就是 2×pageSize 次数据库往返（N+1）。改为按当前页的 id / 课程名
+    // 各批量取一次，查询数与页大小无关；两处口径与逐行版本逐字保持一致。
+    const ids = rows.map((r) => r.id);
+    const readCountMap = new Map();
+    if (ids.length) {
+      const ph = ids.map(() => '?').join(',');
+      db.prepare(`
+        SELECT notification_id, COUNT(*) as count FROM notification_reads
+        WHERE notification_id IN (${ph}) GROUP BY notification_id
+      `).all(...ids).forEach((r) => readCountMap.set(r.notification_id, r.count));
+    }
+    const groupNames = [...new Set(rows.filter((r) => r.is_broadcast && r.group_name).map((r) => r.group_name))];
+    const groupCountMap = new Map();
+    if (groupNames.length) {
+      const ph = groupNames.map(() => '?').join(',');
+      db.prepare(`
+        SELECT s.course_name AS name, COUNT(DISTINCT pb.parent_openid) as count
+        FROM enrollments e
+        JOIN schedules s ON s.id = e.schedule_id
+        JOIN parent_bindings pb ON pb.student_id = e.student_id
+        WHERE e.status = 'active' AND s.course_name IN (${ph}) AND pb.parent_openid != ''
+        GROUP BY s.course_name
+      `).all(...groupNames).forEach((r) => groupCountMap.set(r.name, r.count));
+    }
+
     const list = rows.map((row) => {
-      const readCount = db.prepare('SELECT COUNT(*) as count FROM notification_reads WHERE notification_id = ?').get(row.id).count;
+      const readCount = readCountMap.get(row.id) || 0;
       // 定向班级广播：按已报名该课程成员的绑定家长数统计送达，避免误显示为全员
       let delivered = parentCount;
       if (row.is_broadcast && row.group_name) {
-        const groupCount = db.prepare(`
-          SELECT COUNT(DISTINCT pb.parent_openid) as count
-          FROM enrollments e
-          JOIN schedules s ON s.id = e.schedule_id
-          JOIN parent_bindings pb ON pb.student_id = e.student_id
-          WHERE e.status = 'active' AND s.course_name = ? AND pb.parent_openid != ''
-        `).get(row.group_name).count;
+        const groupCount = groupCountMap.get(row.group_name) || 0;
         if (groupCount > 0) delivered = groupCount;
       }
       return {

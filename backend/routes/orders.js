@@ -17,6 +17,21 @@ function canSales(req) {
   return isAdminReq(req) || hasPerm(getReqUser(req), 'sales');
 }
 
+// E3：把 date(paid_at/1000,'unixepoch','localtime') 这类表达式谓词改写为 paid_at 的毫秒区间比较。
+// 函数包裹的列用不上索引 → 每次 /stats 与订单列表筛选都对 orders 全表扫描；
+// 016 迁移建的 idx_orders_paid_at 只在裸列比较下才会被选中。
+// paid_at 存的是 epoch 毫秒整数；区间取半开 [start, end)，与原来的 date(...) 比较等价。
+const dayStartMs = (d) => new Date(`${d}T00:00:00`).getTime();        // 'YYYY-MM-DD' 当日 00:00 本地
+const dayEndMs = (d) => dayStartMs(d) + 86400000;                      // 次日 00:00（开区间上界）
+const monthStartMs = (ym) => new Date(`${ym}-01T00:00:00`).getTime();  // 'YYYY-MM' 当月 1 日 00:00
+const nextMonthStartMs = (ym) => {
+  const [y, m] = ym.split('-').map(Number);
+  const nm = m === 12 ? 1 : m + 1;
+  return new Date(`${m === 12 ? y + 1 : y}-${String(nm).padStart(2, '0')}-01T00:00:00`).getTime();
+};
+const yearStartMs = (y) => new Date(`${y}-01-01T00:00:00`).getTime();
+const nextYearStartMs = (y) => new Date(`${Number(y) + 1}-01-01T00:00:00`).getTime();
+
 // refunded_amount / salesperson / remark / is_1v1 列已收编至 migrations/011
 
 // 解析订单项目文本
@@ -704,11 +719,12 @@ router.get('/stats', (req, res) => {
     const month = today.slice(0, 7);
     const year = today.slice(0, 4);
     const q = (sql, ...p) => db.prepare(sql).get(...p).t;
-    // 'localtime' 不可省略：today/month/year 由 formatDate() 按本机时区生成，
-    // 若 SQL 侧按 UTC 渲染，东八区 00:00–08:00 的订单会被算进前一天。
-    const todayAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND date(paid_at/1000,'unixepoch','localtime')=?`, today);
-    const monthAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND strftime('%Y-%m', paid_at/1000,'unixepoch','localtime')=?`, month);
-    const yearAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND strftime('%Y', paid_at/1000,'unixepoch','localtime')=?`, year);
+    // 'localtime' 口径不可省略：today/month/year 由 formatDate() 按本机时区生成。
+    // E3：谓词由 date(paid_at/1000,'unixepoch','localtime') = ? 改为 paid_at 毫秒区间（半开），
+    // 前者是表达式谓词、用不上 idx_orders_paid_at，每次 /stats 全表扫三遍。
+    const todayAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND paid_at >= ? AND paid_at < ?`, dayStartMs(today), dayEndMs(today));
+    const monthAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND paid_at >= ? AND paid_at < ?`, monthStartMs(month), nextMonthStartMs(month));
+    const yearAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND paid_at >= ? AND paid_at < ?`, yearStartMs(year), nextYearStartMs(year));
     res.json(success({ today: todayAmount, month: monthAmount, year: yearAmount }));
   } catch (err) {
     console.error('[orders stats]', err);
@@ -731,8 +747,9 @@ router.get('/', (req, res) => {
 
     if (status) { where += ' AND status = ?'; params.push(status); }
     if (studentId) { where += ' AND student_id = ?'; params.push(studentId); }
-    if (startDate) { where += ' AND date(paid_at/1000, \'unixepoch\', \'localtime\') >= ?'; params.push(startDate); }
-    if (endDate) { where += ' AND date(paid_at/1000, \'unixepoch\', \'localtime\') <= ?'; params.push(endDate); }
+    // E3：日期筛选改为 paid_at 毫秒区间（半开），命中 idx_orders_paid_at，避免全表扫描
+    if (startDate) { where += ' AND paid_at >= ?'; params.push(dayStartMs(startDate)); }
+    if (endDate) { where += ' AND paid_at < ?'; params.push(dayEndMs(endDate)); }
 
     const total = db.prepare(`SELECT COUNT(*) as count FROM orders o ${where.replace('WHERE', 'WHERE')}`).get(...params).count;
     const list = db.prepare(`

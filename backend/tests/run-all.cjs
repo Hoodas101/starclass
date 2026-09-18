@@ -24,6 +24,7 @@ const backendDir = path.join(__dirname, '..');
 const SUITES = [
   ['class-module.test.js', '课程模块'],
   ['p2-infra-regression.cjs', 'P2 基础设施（唯一约束/索引/TRUST_PROXY）'],
+  ['upgrade-path.test.cjs', 'E20 迁移升级路径收敛'],
   ['audit-regression.cjs', '审计埋点回归'],
   ['lead-suggestions-regression.cjs', '线索推荐回归'],
   ['queue-regression.cjs', '排队队列回归'],
