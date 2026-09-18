@@ -6,7 +6,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { success, fail, safeFail, generateId, getOpenId, formatDate, now, hashPassword, resolvePerms, hasPerm, getReqUser } = require('../utils');
+const { success, fail, safeFail, generateId, getOpenId, formatDate, now, hashPassword, resolvePerms, hasPerm, getReqUser, attendanceRate, isAdminReq } = require('../utils');
 
 // courses.archived / teachers.class_fee / teachers.pay_rule 列已收编至 migrations/011
 
@@ -22,15 +22,7 @@ router.use((req, res, next) => {
 });
 
 // 写操作 / 敏感数据：仍要求管理员
-function isAdminReq(req) {
-  if (req.userRole === 'admin') return true;
-  const openid = getOpenId(req);
-  if (openid) {
-    const u = db.prepare('SELECT role FROM users WHERE openid = ?').get(openid);
-    return !!(u && u.role === 'admin');
-  }
-  return false;
-}
+// isAdminReq 统一来自 utils（此前本文件与另外 4 个路由各自复制了一份实现）
 const adminOnly = (req, res, next) => {
   if (isAdminReq(req)) return next();
   return res.status(403).json({ code: 403, data: null, message: '仅管理员可操作' });
@@ -92,15 +84,15 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
 
     // 今日收入（已支付订单）
     const todayRevenueRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
-      WHERE status = 'paid' AND date(paid_at/1000, 'unixepoch') = ?${spSql}
+      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
+      WHERE status IN ('paid', 'refunded') AND date(paid_at/1000, 'unixepoch', 'localtime') = ?${spSql}
     `).get(today, ...spParams);
     const todayRevenue = todayRevenueRow?.total || 0;
 
     // 昨日收入（涨跌对比）
     const yesterdayRevenueRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
-      WHERE status = 'paid' AND date(paid_at/1000, 'unixepoch') = date('now', '-1 day')${spSql}
+      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
+      WHERE status IN ('paid', 'refunded') AND date(paid_at/1000, 'unixepoch', 'localtime') = date('now', 'localtime', '-1 day')${spSql}
     `).get(...spParams);
     const yesterdayRevenue = yesterdayRevenueRow?.total || 0;
     const pct = (cur, prev) => (prev > 0 ? Math.round(((cur - prev) / prev) * 1000) / 10 : null);
@@ -110,8 +102,8 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const weekStartMs = now() - ((dayOfWeek + 6) % 7) * 86400000;
     const weekStart = formatDate(weekStartMs);
     const weekRevenueRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
-      WHERE status = 'paid' AND date(paid_at/1000, 'unixepoch') >= ? AND date(paid_at/1000, 'unixepoch') <= ?${spSql}
+      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
+      WHERE status IN ('paid', 'refunded') AND date(paid_at/1000, 'unixepoch', 'localtime') >= ? AND date(paid_at/1000, 'unixepoch', 'localtime') <= ?${spSql}
     `).get(weekStart, today, ...spParams);
     const weekRevenue = weekRevenueRow?.total || 0;
 
@@ -120,16 +112,16 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const prevWeekStart = formatDate(prevWeekStartMs);
     const prevWeekEnd = formatDate(weekStartMs - 86400000);
     const prevWeekRevenueRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
-      WHERE status = 'paid' AND date(paid_at/1000, 'unixepoch') >= ? AND date(paid_at/1000, 'unixepoch') <= ?${spSql}
+      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
+      WHERE status IN ('paid', 'refunded') AND date(paid_at/1000, 'unixepoch', 'localtime') >= ? AND date(paid_at/1000, 'unixepoch', 'localtime') <= ?${spSql}
     `).get(prevWeekStart, prevWeekEnd, ...spParams);
     const prevWeekRevenue = prevWeekRevenueRow?.total || 0;
 
     // 本月收入
     const monthStart = today.slice(0, 7); // YYYY-MM
     const monthRevenueRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
-      WHERE status = 'paid' AND strftime('%Y-%m', paid_at/1000, 'unixepoch') = ?${spSql}
+      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
+      WHERE status IN ('paid', 'refunded') AND strftime('%Y-%m', paid_at/1000, 'unixepoch', 'localtime') = ?${spSql}
     `).get(monthStart, ...spParams);
     const monthRevenue = monthRevenueRow?.total || 0;
 
@@ -137,60 +129,62 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const prevMonthKey = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1);
     const prevMonthStart = `${prevMonthKey.getFullYear()}-${String(prevMonthKey.getMonth() + 1).padStart(2, '0')}`;
     const prevMonthRevenueRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
-      WHERE status = 'paid' AND strftime('%Y-%m', paid_at/1000, 'unixepoch') = ?${spSql}
+      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
+      WHERE status IN ('paid', 'refunded') AND strftime('%Y-%m', paid_at/1000, 'unixepoch', 'localtime') = ?${spSql}
     `).get(prevMonthStart, ...spParams);
     const prevMonthRevenue = prevMonthRevenueRow?.total || 0;
 
     // 本年 / 去年收入
     const yearStart = `${today.slice(0, 4)}-01-01`;
     const yearRevenueRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
-      WHERE status = 'paid' AND date(paid_at/1000, 'unixepoch') >= ?${spSql}
+      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
+      WHERE status IN ('paid', 'refunded') AND date(paid_at/1000, 'unixepoch', 'localtime') >= ?${spSql}
     `).get(yearStart, ...spParams);
     const yearRevenue = yearRevenueRow?.total || 0;
     const prevYearStart = `${String(Number(today.slice(0, 4)) - 1)}-01-01`;
     const prevYearEnd = `${String(Number(today.slice(0, 4)) - 1)}-12-31`;
     const prevYearRevenueRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
-      WHERE status = 'paid' AND date(paid_at/1000, 'unixepoch') >= ? AND date(paid_at/1000, 'unixepoch') <= ?${spSql}
+      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
+      WHERE status IN ('paid', 'refunded') AND date(paid_at/1000, 'unixepoch', 'localtime') >= ? AND date(paid_at/1000, 'unixepoch', 'localtime') <= ?${spSql}
     `).get(prevYearStart, prevYearEnd, ...spParams);
     const prevYearRevenue = prevYearRevenueRow?.total || 0;
 
     // 本月签单人排名
     const monthSales = db.prepare(`
-      SELECT salesperson, COALESCE(SUM(payable_amount), 0) as amount, COUNT(*) as count
+      SELECT salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
       FROM orders
-      WHERE status = 'paid' AND salesperson != '' AND strftime('%Y-%m', paid_at/1000, 'unixepoch') = ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND salesperson != '' AND strftime('%Y-%m', paid_at/1000, 'unixepoch', 'localtime') = ?${spSql}
       GROUP BY salesperson ORDER BY amount DESC LIMIT 10
     `).all(monthStart, ...spParams);
 
     // 本周签单人排名（与小程序管理端一致：按签单人聚合金额与单数）
     const weekSales = db.prepare(`
-      SELECT salesperson, COALESCE(SUM(payable_amount), 0) as amount, COUNT(*) as count
+      SELECT salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
       FROM orders
-      WHERE status = 'paid' AND salesperson != ''
-        AND date(paid_at/1000, 'unixepoch') >= ? AND date(paid_at/1000, 'unixepoch') <= ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND salesperson != ''
+        AND date(paid_at/1000, 'unixepoch', 'localtime') >= ? AND date(paid_at/1000, 'unixepoch', 'localtime') <= ?${spSql}
       GROUP BY salesperson ORDER BY amount DESC LIMIT 10
     `).all(weekStart, today, ...spParams);
 
     // 本年签单人排名
     const yearSales = db.prepare(`
-      SELECT salesperson, COALESCE(SUM(payable_amount), 0) as amount, COUNT(*) as count
+      SELECT salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
       FROM orders
-      WHERE status = 'paid' AND salesperson != '' AND date(paid_at/1000, 'unixepoch') >= ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND salesperson != '' AND date(paid_at/1000, 'unixepoch', 'localtime') >= ?${spSql}
       GROUP BY salesperson ORDER BY amount DESC LIMIT 10
     `).all(`${today.slice(0, 4)}-01-01`, ...spParams);
 
     // 1v1 销售金额（is_1v1 标记）
     const oneToOneRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount), 0) as total, COUNT(*) as count
+      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total, COUNT(*) as count
       FROM orders
-      WHERE status = 'paid' AND is_1v1 = 1 AND strftime('%Y-%m', paid_at/1000, 'unixepoch') = ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND is_1v1 = 1 AND strftime('%Y-%m', paid_at/1000, 'unixepoch', 'localtime') = ?${spSql}
     `).get(monthStart, ...spParams);
     const oneToOne = { amount: oneToOneRow?.total || 0, count: oneToOneRow?.count || 0 };
 
     // 本月购买项目统计（按订单项名称聚合，取 Top5）
+    // 刻意保留 status='paid' 毛额口径：退款是订单级的，无法分摊到具体商品项，
+    // 纳入已全额退款订单会高估单品热度（与 CSV 导出 sales 分支同一取舍）。
     let itemStats = [];
     try {
       itemStats = db.prepare(`
@@ -199,7 +193,7 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
                SUM(o.payable_amount) AS amount
         FROM orders o, json_each(o.items) je
         WHERE o.status = 'paid'
-          AND strftime('%Y-%m', o.paid_at/1000, 'unixepoch') = ?
+          AND strftime('%Y-%m', o.paid_at/1000, 'unixepoch', 'localtime') = ?
           ${spSql.replace('salesperson', 'o.salesperson')}
           AND json_extract(je.value, '$.itemName') IS NOT NULL
         GROUP BY item_name
@@ -219,9 +213,8 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
       "SELECT COUNT(*) as count FROM member_cards WHERE status = 'active' AND expires_at < ? AND expires_at > ?"
     ).get(currentTime + 7 * 86400000, currentTime).count;
 
-    // 到场率：签到人数 / (签到+迟到+缺席)
-    const totalAttendance = todayCheckins + todayLate + todayAbsent;
-    const attendanceRate = totalAttendance > 0 ? Math.round((todayCheckins / totalAttendance) * 100) : 0;
+    // 到场率：统一口径见 utils.attendanceRate（迟到计到场，请假不计入分母）
+    const attendanceRatePct = attendanceRate({ present: todayCheckins, late: todayLate, absent: todayAbsent });
 
     // 总会员卡数
     // 有效会员卡：仅统计进行中且未过期的卡（过期卡不计入有效统计）
@@ -251,7 +244,7 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
         checkins: todayCheckins,
         late: todayLate,
         absent: todayAbsent,
-        attendanceRate: `${attendanceRate}%`,
+        attendanceRate: `${attendanceRatePct}%`,
       },
       revenue: {
         today: todayRevenue,
@@ -288,20 +281,29 @@ router.get('/charts', dashboardGuard, (req, res) => {
     // 到场趋势支持按周期查询：week=近7天，month=近30天（默认 week，与看板“本周/本月”切换联动）
     const period = req.query.period === 'month' ? 'month' : 'week';
     const attDays = period === 'month' ? 29 : 6;
-    const labels = [];
-    const attendanceData = [];
+    // 日期轴（本地日期字符串，与 SQL 侧 date(...,'localtime') 同口径）
+    const dayList = [];
     for (let i = attDays; i >= 0; i--) {
       const d = new Date(Date.now() - i * 86400000);
-      const ds = formatDate(d.getTime());
-      const rec = db.prepare(`
-        SELECT COUNT(*) as total, COALESCE(SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END), 0) as present
-        FROM attendances WHERE date = ?
-      `).get(ds);
-      const total = rec.total || 0;
-      const present = rec.present || 0;
-      labels.push(`${d.getMonth() + 1}/${d.getDate()}`);
-      attendanceData.push(total ? Math.round((present / total) * 100) : 0);
+      dayList.push({ date: formatDate(d.getTime()), label: `${d.getMonth() + 1}/${d.getDate()}` });
     }
+
+    // 到场趋势：单次 GROUP BY 取代「逐日 prepare + 查询」。
+    // 旧实现按天循环 prepare（month 口径 = 30 次编译 + 30 次查询）；此处只编译并执行 1 次，
+    // 且 date 区间条件可用索引。口径不变（迟到计到场、请假不进分母，见 utils.attendanceRate）。
+    const attMap = new Map(db.prepare(`
+      SELECT date,
+             COALESCE(SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END), 0) AS present,
+             COALESCE(SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END), 0) AS late,
+             COALESCE(SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END), 0) AS absent
+      FROM attendances
+      WHERE date >= ? AND date <= ?
+      GROUP BY date
+    `).all(dayList[0].date, dayList[dayList.length - 1].date).map((r) => [r.date, r]));
+
+    const labels = dayList.map((d) => d.label);
+    // 无记录的日期传 undefined，attendanceRate 的默认参数会按全 0 处理（与旧实现 COALESCE 结果一致）
+    const attendanceData = dayList.map((d) => attendanceRate(attMap.get(d.date)));
 
     // 报名分布（按活动）
     const enrollRows = db.prepare(`
@@ -310,41 +312,51 @@ router.get('/charts', dashboardGuard, (req, res) => {
     `).all();
     const courseDist = enrollRows.map((c) => ({ name: c.course_name || '未命名活动', count: c.count }));
 
-    // 产品销量（已支付订单按项目统计）
-    const paidOrders = db.prepare("SELECT items FROM orders WHERE status = 'paid'").all();
-    const itemMap = {};
-    for (const o of paidOrders) {
-      try {
-        const items = JSON.parse(o.items || '[]');
-        for (const item of items) {
-          const name = item.itemName || '其他';
-          itemMap[name] = (itemMap[name] || 0) + (item.quantity || 1);
-        }
-      } catch (e) { /* 忽略 */ }
-    }
-    const productSales = Object.entries(itemMap)
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count);
+    // 产品销量（已支付订单按项目统计；单品维度无法分摊订单级退款，故保留毛口径）
+    // 聚合下沉到 SQL（json_each）：不再把全部已付订单的 items 读进 JS 逐条 JSON.parse。
+    // json_valid + json_type 护栏等价于旧实现的 try/catch —— 非法 JSON / 非数组明细按空处理。
+    // 同时修正一处既有偏差：历史数据中存在「数组元素为 JSON 字符串」的双重编码行，
+    // 旧实现取 item.itemName 恒为 undefined，这些真实销量被整批计入「其他」；
+    // json_extract 对两种形态都能解析，故现在按真实项目名归类。
+    const productSales = db.prepare(`
+      SELECT COALESCE(NULLIF(json_extract(it.value, '$.itemName'), ''), '其他') AS name,
+             SUM(CASE WHEN json_extract(it.value, '$.quantity') > 0
+                      THEN json_extract(it.value, '$.quantity') ELSE 1 END) AS count
+      FROM orders o, json_each(CASE WHEN json_valid(o.items) AND json_type(o.items) = 'array'
+                                    THEN o.items ELSE '[]' END) AS it
+      WHERE o.status = 'paid'
+      GROUP BY name
+      ORDER BY count DESC
+    `).all().map((r) => ({ name: r.name, count: Number(r.count) }));
 
     // 近 30 天营收趋势：当月每日 vs 上月对应日（借鉴 trycompai/crm 的 AreaTrend 双序列）
-    const revLabels = [];
-    const revCurrent = [];
-    const revPrev = [];
-    const dayRev = (ds) => {
-      const row = db.prepare(`
-        SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
-        WHERE status = 'paid' AND date(paid_at/1000, 'unixepoch') = ?
-      `).get(ds);
-      return row?.total || 0;
-    };
+    // 口径与看板收入 KPI 一致：含已全额退款订单并冲减退款额，否则全额退款当天会凭空少一笔收入。
+    // 单次 GROUP BY 取代「逐日 prepare + 查询」：旧实现每天两次共 60 次编译，
+    // 且谓词 date(paid_at/1000,'unixepoch','localtime') = ? 不可用索引，等于 60 次全表扫描。
+    // 改为先按 paid_at 区间过滤（可用索引）再按同一表达式分组，编译与扫描各降为 1 次。
+    const revDays = [];
     for (let i = 29; i >= 0; i--) {
-      const d = new Date(Date.now() - i * 86400000);
-      const ds = formatDate(d.getTime());
-      revLabels.push(`${d.getMonth() + 1}/${d.getDate()}`);
-      revCurrent.push(dayRev(ds));
-      const prevD = new Date(d.getTime() - 30 * 86400000);
-      revPrev.push(dayRev(formatDate(prevD.getTime())));
+      const cur = new Date(Date.now() - i * 86400000);
+      const prev = new Date(cur.getTime() - 30 * 86400000);
+      revDays.push({
+        label: `${cur.getMonth() + 1}/${cur.getDate()}`,
+        cur: formatDate(cur.getTime()),
+        prev: formatDate(prev.getTime()),
+      });
     }
+    // 区间放宽取上界（当前时刻 +1 天）与下界（60 天前，早于所需最早一天 00:00）：
+    // 精确归属由 GROUP BY 的日期表达式决定，放宽区间不影响结果，只保证不漏。
+    const revMap = new Map(db.prepare(`
+      SELECT date(paid_at/1000, 'unixepoch', 'localtime') AS d,
+             COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) AS total
+      FROM orders
+      WHERE status IN ('paid', 'refunded') AND paid_at >= ? AND paid_at <= ?
+      GROUP BY d
+    `).all(Date.now() - 60 * 86400000, Date.now() + 86400000).map((r) => [r.d, r.total]));
+
+    const revLabels = revDays.map((d) => d.label);
+    const revCurrent = revDays.map((d) => revMap.get(d.cur) || 0);
+    const revPrev = revDays.map((d) => revMap.get(d.prev) || 0);
 
     res.json(success({
       attendanceTrend: { labels, data: attendanceData },
@@ -370,8 +382,8 @@ router.get('/export', adminOnly, (req, res) => {
     const range = (col) => {
       const parts = [];
       const params = [];
-      if (startDate) { parts.push(`date(${col}/1000, 'unixepoch') >= ?`); params.push(startDate); }
-      if (endDate) { parts.push(`date(${col}/1000, 'unixepoch') <= ?`); params.push(endDate); }
+      if (startDate) { parts.push(`date(${col}/1000, 'unixepoch', 'localtime') >= ?`); params.push(startDate); }
+      if (endDate) { parts.push(`date(${col}/1000, 'unixepoch', 'localtime') <= ?`); params.push(endDate); }
       return { sql: parts.length ? ` AND ${parts.join(' AND ')}` : '', params };
     };
 
@@ -424,28 +436,45 @@ router.get('/export', adminOnly, (req, res) => {
         // 销售排名 + 产品统计（自定义时间段，供看板导出）
         const dayFrom = startDate || '1970-01-01';
         const dayTo = endDate || formatDate(t);
-        const where = `WHERE status = 'paid' AND date(paid_at/1000, 'unixepoch') >= ? AND date(paid_at/1000, 'unixepoch') <= ?`;
+        // 金额口径：含已全额退款订单并冲减退款额（与看板 KPI 一致）
+        const where = `WHERE status IN ('paid', 'refunded') AND date(paid_at/1000, 'unixepoch', 'localtime') >= ? AND date(paid_at/1000, 'unixepoch', 'localtime') <= ?`;
+        // 产品统计另用窄口径：退款是订单级的，无法分摊到具体商品项，
+        // 纳入已全额退款订单会高估单品销量，故单品统计仍只取未退款订单的毛额。
+        const wherePaid = `WHERE status = 'paid' AND date(paid_at/1000, 'unixepoch', 'localtime') >= ? AND date(paid_at/1000, 'unixepoch', 'localtime') <= ?`;
         const rank = db.prepare(`
-          SELECT salesperson, COALESCE(SUM(payable_amount), 0) as amount, COUNT(*) as count
+          SELECT salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
           FROM orders ${where} AND salesperson != ''
           GROUP BY salesperson ORDER BY amount DESC
         `).all(dayFrom, dayTo);
-        const revenue = db.prepare(`SELECT COALESCE(SUM(payable_amount), 0) as amount, COUNT(*) as count FROM orders ${where}`).get(dayFrom, dayTo);
+        const revenue = db.prepare(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count FROM orders ${where}`).get(dayFrom, dayTo);
         const itemMap = {};
-        for (const o of db.prepare(`SELECT items FROM orders ${where}`).all(dayFrom, dayTo)) {
-          try {
-            const items = JSON.parse(o.items || '[]');
-            for (const i of items) {
-              const name = i.itemName || '未命名产品';
-              itemMap[name] = itemMap[name] || { count: 0, amount: 0 };
-              itemMap[name].count += 1;
-              itemMap[name].amount += Number(i.price || 0);
-            }
-          } catch (e) { /* 忽略 */ }
+        // 解析 items：历史数据存在「数组元素为 JSON 字符串」的双重编码，且元素未必是对象。
+        // 逐项兜底，避免整批计入「未命名产品」或金额恒为 0。
+        // 此前用不存在的 i.price 字段，导致单品金额恒为 0；现改用实收字段 totalPrice，
+        // 缺失时回退 unitPrice × 数量（面值），与看板商品统计口径一致。
+        const parseItems = (raw) => {
+          let arr;
+          try { arr = JSON.parse(raw || '[]'); } catch { return []; }
+          if (!Array.isArray(arr)) return [];
+          return arr
+            .map((x) => {
+              if (typeof x === 'string') { try { return JSON.parse(x); } catch { return null; } }
+              return (x && typeof x === 'object') ? x : null;
+            })
+            .filter(Boolean);
+        };
+        for (const o of db.prepare(`SELECT items FROM orders ${wherePaid}`).all(dayFrom, dayTo)) {
+          for (const i of parseItems(o.items)) {
+            const name = i.itemName || '未命名产品';
+            itemMap[name] = itemMap[name] || { count: 0, amount: 0 };
+            const qty = (typeof i.quantity === 'number' && i.quantity > 0) ? i.quantity : 1;
+            itemMap[name].count += qty;
+            itemMap[name].amount += Number(i.totalPrice || (i.unitPrice * qty) || 0);
+          }
         }
         const itemStats = Object.entries(itemMap).map(([itemName, v]) => ({ itemName, ...v })).sort((a, b) => b.amount - a.amount);
         const oneToOne = db.prepare(`
-          SELECT COALESCE(SUM(payable_amount), 0) as amount, COUNT(*) as count FROM orders
+          SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count FROM orders
           ${where} AND is_1v1 = 1
         `).get(dayFrom, dayTo);
         data = { revenue, ranking: rank, itemStats, oneToOne, startDate: dayFrom, endDate: dayTo };
@@ -462,21 +491,8 @@ router.get('/export', adminOnly, (req, res) => {
   }
 });
 
-// 轻量迁移：勿扰名单（营销抑制，借鉴 trycompai/crm 的 SuppressedContact）
-try {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS suppressions (
-      id TEXT PRIMARY KEY,
-      phone TEXT NOT NULL,
-      name TEXT DEFAULT '',
-      type TEXT DEFAULT 'marketing',
-      reason TEXT DEFAULT '',
-      created_by TEXT DEFAULT '',
-      created_at INTEGER
-    )
-  `);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_suppressions_phone ON suppressions(phone)');
-} catch (e) { /* 忽略 */ }
+// suppressions 表已收编至 migrations/014（此前在此处 CREATE TABLE IF NOT EXISTS，
+// 对已存在该表的库是静默空操作，老库拿不到新列）
 
 /**
  * GET /api/admin/suppressions — 勿扰名单列表
@@ -550,7 +566,7 @@ router.get('/teachers', staffRead, (req, res) => {
     const scheduleCountByTeacher = {};
     db.prepare(`
       SELECT teacher_id, COUNT(*) as count FROM schedules
-      WHERE status = 'scheduled' AND date >= date('now') GROUP BY teacher_id
+      WHERE status = 'scheduled' AND date >= date('now', 'localtime') GROUP BY teacher_id
     `).all().forEach((r) => { scheduleCountByTeacher[r.teacher_id] = r.count; });
     const list = teachers.map((t) => {
       const out = { ...t };

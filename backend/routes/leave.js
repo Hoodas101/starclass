@@ -9,6 +9,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, isCoachReq } = require('../utils');
+const { requireStaffPerm } = require('../middleware/authz');
 
 // 请假规则默认值（可在 Web 管理端「系统设置 → 请假规则」中配置）
 function getLeaveRules() {
@@ -132,42 +133,8 @@ router.post('/:id/cancel', (req, res) => {
   }
 });
 
-// 轻量迁移：请假记录表
-try {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS leave_requests (
-      id TEXT PRIMARY KEY,
-      student_id TEXT,
-      student_name TEXT,
-      schedule_id TEXT,
-      course_name TEXT,
-      date TEXT,
-      start_time TEXT,
-      reason TEXT,
-      status TEXT DEFAULT 'pending',
-      parent_openid TEXT,
-      parent_phone TEXT,
-      review_note TEXT DEFAULT '',
-      created_at INTEGER,
-      updated_at INTEGER
-    );
-  `);
-} catch (e) { /* 已存在 */ }
-
-// 轻量迁移：请假扣课幂等表（防止同一排期重复扣课）
-try {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS leave_deduction_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      schedule_id TEXT NOT NULL,
-      student_id TEXT NOT NULL,
-      card_id TEXT,
-      mode TEXT,
-      deducted_at INTEGER,
-      UNIQUE(schedule_id, student_id)
-    );
-  `);
-} catch (e) { /* 已存在 */ }
+// leave_requests 由 db/init.js 创建；leave_deduction_logs 建表已收编至 migrations/014
+// （此前两处 CREATE TABLE IF NOT EXISTS 分别在已存在时静默空操作）
 
 /**
  * POST /api/leave/apply
@@ -265,6 +232,7 @@ router.get('/my', (req, res) => {
 router.get('/', (req, res) => {
   try {
     if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可查看'));
+    if (!requireStaffPerm(req, res, 'leave', '请假审批')) return;
     const { status, startDate, endDate } = req.query;
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 20));
@@ -295,6 +263,7 @@ router.get('/', (req, res) => {
 router.put('/:id/approve', (req, res) => {
   try {
     if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可审批'));
+    if (!requireStaffPerm(req, res, 'leave', '请假审批')) return;
     const { action, note = '' } = req.body;
     if (!['approve', 'reject'].includes(action)) return res.json(fail('无效操作'));
 

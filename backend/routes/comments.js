@@ -9,24 +9,7 @@ const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, isCoachReq } = require('../utils');
 
-// 轻量迁移：点评表
-try {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS coach_comments (
-      id TEXT PRIMARY KEY,
-      student_id TEXT NOT NULL,
-      student_name TEXT,
-      schedule_id TEXT,
-      course_name TEXT,
-      date TEXT,
-      coach_id TEXT,
-      coach_name TEXT,
-      content TEXT,
-      created_at INTEGER,
-      updated_at INTEGER
-    );
-  `);
-} catch (e) { /* 已存在 */ }
+// coach_comments 建表已收编至 migrations/014
 
 function fmt(row) {
   return {

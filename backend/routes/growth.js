@@ -5,46 +5,16 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser, escapeLike } = require('../utils');
+const { generateId, success, fail, safeFail, now, parsePagination, hasPerm, getReqUser, escapeLike, isAdminReq } = require('../utils');
 const leadSuggestions = require('../utils/lead-suggestions');
-
-function isAdminReq(req) {
-  if (req.userRole === 'admin') return true;
-  const openid = getOpenId(req);
-  if (openid) {
-    const u = db.prepare('SELECT role FROM users WHERE openid = ?').get(openid);
-    return !!(u && u.role === 'admin');
-  }
-  return false;
-}
 
 // 增长中心权限：管理员或拥有「growth」权限的员工（销售等）
 function canGrowth(req) {
   return isAdminReq(req) || hasPerm(getReqUser(req), 'growth');
 }
 
-// 轻量迁移：线索表
-try {
-  db.exec(`CREATE TABLE IF NOT EXISTS leads (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    phone TEXT DEFAULT '',
-    source TEXT DEFAULT 'natural',
-    stage TEXT DEFAULT 'new',
-    intent_level INTEGER DEFAULT 3,
-    next_follow_at INTEGER,
-    note TEXT DEFAULT '',
-    salesperson TEXT DEFAULT '',
-    student_id TEXT DEFAULT '',
-    converted_at INTEGER,
-    status TEXT DEFAULT 'active',
-    created_at INTEGER,
-    updated_at INTEGER
-  )`);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage)');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status)');
-  db.prepare("ALTER TABLE leads ADD COLUMN stage_changed_at INTEGER DEFAULT 0").run();
-} catch (e) { /* 忽略 */ }
+// leads 表由 db/init.js 创建，stage_changed_at 列已收编至 migrations/014
+// （此前此处另有 CREATE TABLE / CREATE INDEX / ALTER，均为冗余或静默空操作）
 
 const STAGE_TEXT = { new: '新线索', contacted: '已联系', trial: '体验中', deal: '已成交', lost: '已流失' };
 
@@ -357,7 +327,7 @@ router.get('/renewal', (req, res) => {
     const warnIn = Math.max(1, parseInt(req.query.warnIn) || 15) * 86400000;
     const rows = db.prepare(`
       SELECT c.id, c.student_id, c.card_type_name, c.expires_at, c.status, s.name as student_name,
-        (SELECT COUNT(*) FROM attendances a WHERE a.student_id = c.student_id AND a.date >= date('now', '-30 days')) as recent_count
+        (SELECT COUNT(*) FROM attendances a WHERE a.student_id = c.student_id AND a.date >= date('now', 'localtime', '-30 days')) as recent_count
       FROM member_cards c
       JOIN students s ON s.id = c.student_id
       WHERE c.status IN ('active','paused')
@@ -393,7 +363,7 @@ router.get('/low-classes', (req, res) => {
     const list = db.prepare(`
       SELECT mc.id, mc.student_id, mc.card_type_name, mc.billing_mode, mc.remaining_classes, mc.expires_at, mc.status,
         s.name as student_name,
-        (SELECT COUNT(*) FROM attendances a WHERE a.student_id = mc.student_id AND a.date >= date('now', '-30 days')) as recent_count
+        (SELECT COUNT(*) FROM attendances a WHERE a.student_id = mc.student_id AND a.date >= date('now', 'localtime', '-30 days')) as recent_count
       FROM member_cards mc
       JOIN students s ON s.id = mc.student_id
       WHERE mc.status = 'active' AND mc.billing_mode = 'count' AND mc.remaining_classes <= ? AND mc.remaining_classes > 0

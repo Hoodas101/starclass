@@ -105,12 +105,17 @@ function generateLowClassReminders(nowMs = Date.now()) {
   } catch (e) { /* 使用默认值 */ }
 
   const weekMs = 7 * 86400000;
+  // expires_at > now：已过期的卡不该再收到「课时即将用尽，请续费」。
+  // 过期卡的续费诉求由「已到期」提醒承担，两者混发会让家长收到自相矛盾的通知。
+  // 本条件不依赖 expireOverdueCards 的调度时机（每日一次，存在最长 24h 的物化延迟），
+  // 故在此独立成立。
   const cards = db.prepare(`
     SELECT mc.*, pb.parent_openid
     FROM member_cards mc
     LEFT JOIN parent_bindings pb ON pb.student_id = mc.student_id AND pb.is_main = 1
     WHERE mc.status = 'active' AND mc.remaining_classes <= ? AND mc.remaining_classes > 0
-  `).all(threshold);
+      AND mc.expires_at IS NOT NULL AND mc.expires_at > ?
+  `).all(threshold, nowMs);
 
   let sent = 0;
   const { terms } = getTerms(db);

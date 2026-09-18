@@ -9,18 +9,8 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser, calcCardExpiresAt, formatDate, recordAudit } = require('../utils');
-
-// 管理员判断（兼容 JWT 与 x-openid 开发模式）
-function isAdminReq(req) {
-  if (req.userRole === 'admin') return true;
-  const openid = getOpenId(req);
-  if (openid) {
-    const u = db.prepare('SELECT role FROM users WHERE openid = ?').get(openid);
-    return !!(u && u.role === 'admin');
-  }
-  return false;
-}
+// 管理员判断统一来自 utils（此前各路由各自复制实现）
+const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser, calcCardExpiresAt, formatDate, recordAudit, isAdminReq } = require('../utils');
 
 // 销售权限：管理员或拥有「sales」权限的员工（销售）
 function canSales(req) {
@@ -301,10 +291,14 @@ router.post('/:id/pay', (req, res) => {
       if (!owned) return res.status(403).json(safeFail('无权操作该订单'));
     }
     if (order.status === 'cancelled' || order.status === 'refunded') return res.json(fail('订单已取消或已退款'));
-    // Self-mark-paid is a simulated-pay shortcut; once real WeChat Pay is
-    // live, set SIMULATED_PAY_DISABLED=1 so parents can't clear unpaid
-    // orders themselves. Admins are unaffected.
-    if (!isAdminReq(req) && process.env.SIMULATED_PAY_DISABLED === '1') {
+    // Self-mark-paid is a simulated-pay shortcut. Real WeChat Pay is not wired
+    // up yet, so an open shortcut would let parents settle orders with zero
+    // funds received. Therefore it is DISABLED BY DEFAULT in production
+    // (fail-closed). Set SIMULATED_PAY_DISABLED=0 to re-enable it explicitly
+    // (local dev / demo only). Admins are never affected.
+    const simulatedPayEnabled = process.env.SIMULATED_PAY_DISABLED === '0'
+      || (process.env.SIMULATED_PAY_DISABLED === undefined && process.env.NODE_ENV !== 'production');
+    if (!isAdminReq(req) && !simulatedPayEnabled) {
       return res.status(403).json(safeFail('该机构未开放自助支付，请联系机构收银'));
     }
 
@@ -710,9 +704,11 @@ router.get('/stats', (req, res) => {
     const month = today.slice(0, 7);
     const year = today.slice(0, 4);
     const q = (sql, ...p) => db.prepare(sql).get(...p).t;
-    const todayAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND date(paid_at/1000,'unixepoch')=?`, today);
-    const monthAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND strftime('%Y-%m', paid_at/1000,'unixepoch')=?`, month);
-    const yearAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND strftime('%Y', paid_at/1000,'unixepoch')=?`, year);
+    // 'localtime' 不可省略：today/month/year 由 formatDate() 按本机时区生成，
+    // 若 SQL 侧按 UTC 渲染，东八区 00:00–08:00 的订单会被算进前一天。
+    const todayAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND date(paid_at/1000,'unixepoch','localtime')=?`, today);
+    const monthAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND strftime('%Y-%m', paid_at/1000,'unixepoch','localtime')=?`, month);
+    const yearAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND strftime('%Y', paid_at/1000,'unixepoch','localtime')=?`, year);
     res.json(success({ today: todayAmount, month: monthAmount, year: yearAmount }));
   } catch (err) {
     console.error('[orders stats]', err);
@@ -735,8 +731,8 @@ router.get('/', (req, res) => {
 
     if (status) { where += ' AND status = ?'; params.push(status); }
     if (studentId) { where += ' AND student_id = ?'; params.push(studentId); }
-    if (startDate) { where += ' AND date(paid_at/1000, \'unixepoch\') >= ?'; params.push(startDate); }
-    if (endDate) { where += ' AND date(paid_at/1000, \'unixepoch\') <= ?'; params.push(endDate); }
+    if (startDate) { where += ' AND date(paid_at/1000, \'unixepoch\', \'localtime\') >= ?'; params.push(startDate); }
+    if (endDate) { where += ' AND date(paid_at/1000, \'unixepoch\', \'localtime\') <= ?'; params.push(endDate); }
 
     const total = db.prepare(`SELECT COUNT(*) as count FROM orders o ${where.replace('WHERE', 'WHERE')}`).get(...params).count;
     const list = db.prepare(`

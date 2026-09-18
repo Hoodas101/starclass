@@ -151,15 +151,28 @@ router.get('/monthly', (req, res) => {
 
     // 与 summary 同口径：含已全额退款（status='refunded'）订单，其 refunded_amount 在同月冲减，
     // 否则出现「summary 扣了、monthly 没扣」的跨报表矛盾。RFND 退款流水行 paid_at 为 NULL 天然不入此表。
+    // 收入/折扣按「订单支付月份」（paid_at）归属。
     const months = db.prepare(`
       SELECT
         strftime('%m', datetime(paid_at/1000, 'unixepoch', 'localtime')) as month,
         COUNT(CASE WHEN status = 'paid' THEN 1 END) as order_count,
         COALESCE(SUM(payable_amount), 0) as revenue,
-        COALESCE(SUM(discount_amount), 0) as discount,
-        COALESCE(SUM(refunded_amount), 0) as refunded
+        COALESCE(SUM(discount_amount), 0) as discount
       FROM orders
       WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
+      GROUP BY month
+      ORDER BY month
+    `).all(startMs, endMs);
+
+    // 退款单独按「退款发生月份」（orders.updated_at）归属，与 /summary 的 revenue.refunded 完全同口径。
+    // 若沿用 paid_at，跨月退款会落在原支付月，导致同一年内 summary 与 monthly 的退款额永远对不平。
+    const refundsByMonth = db.prepare(`
+      SELECT
+        strftime('%m', datetime(updated_at/1000, 'unixepoch', 'localtime')) as month,
+        COALESCE(SUM(refunded_amount), 0) as refunded
+      FROM orders
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND refunded_amount > 0
+        AND updated_at >= ? AND updated_at <= ?
       GROUP BY month
       ORDER BY month
     `).all(startMs, endMs);
@@ -180,18 +193,21 @@ router.get('/monthly', (req, res) => {
     // 合并数据
     const payMap = {};
     coachPayByMonth.forEach(p => { payMap[p.month] = p.total_pay; });
+    const refundMap = {};
+    refundsByMonth.forEach(r => { refundMap[r.month] = r.refunded; });
 
     const result = [];
     for (let m = 1; m <= 12; m++) {
       const mm = String(m).padStart(2, '0');
-      const data = months.find(d => d.month === mm) || { month: mm, order_count: 0, revenue: 0, discount: 0, refunded: 0 };
+      const data = months.find(d => d.month === mm) || { month: mm, order_count: 0, revenue: 0, discount: 0 };
       const coachPay = payMap[mm] || 0;
-      const net = data.revenue - data.refunded;
+      const refunded = refundMap[mm] || 0;
+      const net = data.revenue - refunded;
       result.push({
         month: mm,
         revenue: data.revenue || 0,
         discount: data.discount || 0,
-        refunded: data.refunded || 0,
+        refunded,
         netRevenue: net,
         coachPay,
         profit: net - coachPay,

@@ -169,21 +169,7 @@ async function batchSendFromNotifications() {
   return { sent, total: pending.length };
 }
 
-// 建推送日志表（幂等）
-try {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS subscribe_msg_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      notification_id TEXT NOT NULL,
-      openid TEXT NOT NULL,
-      template_key TEXT,
-      status TEXT,
-      error TEXT,
-      created_at INTEGER,
-      UNIQUE(notification_id, openid)
-    );
-  `);
-} catch (e) { /* 忽略 */ }
+// subscribe_msg_logs 建表已收编至 migrations/014
 
 module.exports = {
   isSubscriptionEnabled,

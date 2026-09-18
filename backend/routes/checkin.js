@@ -10,6 +10,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, formatDate, isCoachReq, isAdminReq, isStaffReq, canViewStudentData } = require('../utils');
+const { requireStaffPerm } = require('../middleware/authz');
 
 /**
  * POST /api/checkin/teacher — 教师批量签到确认
@@ -19,6 +20,7 @@ const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, n
 router.post('/teacher', (req, res) => {
   try {
     if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可确认签到'));
+    if (!requireStaffPerm(req, res, 'checkin', '点名签到')) return;
     const { scheduleId, attendances } = req.body;
     if (!scheduleId || !attendances?.length) return res.json(fail('缺少排期ID或签到数据'));
 
@@ -395,6 +397,8 @@ router.get('/records', (req, res) => {
     if (!studentId && !isStaffReq(req)) {
       return res.status(403).json(safeFail('无权查看全部签到记录'));
     }
+    // 员工查询需持有签到权限；家长（带 studentId）由下方归属校验控制，不受员工权限清单约束
+    if (!requireStaffPerm(req, res, 'checkin', '签到记录')) return;
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 20));
     const offset = (page - 1) * pageSize;
@@ -440,6 +444,8 @@ router.get('/today', (req, res) => {
     if (!studentId && !isStaffReq(req)) {
       return res.status(403).json(safeFail('无权查看全部签到状态'));
     }
+    // 员工查询需持有签到权限；家长（带 studentId）不受员工权限清单约束
+    if (!requireStaffPerm(req, res, 'checkin', '签到状态')) return;
 
     let where = 'WHERE a.date = ?';
     const params = [today];
@@ -546,6 +552,7 @@ function runAutoAbsent(dateStr) {
 router.post('/auto-absent', (req, res) => {
   try {
     if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可执行自动缺席'));
+    if (!requireStaffPerm(req, res, 'checkin', '自动缺席')) return;
     const result = runAutoAbsent(req.body?.date);
     res.json(success(result));
   } catch (err) {

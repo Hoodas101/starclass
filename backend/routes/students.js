@@ -12,7 +12,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, JWT_SECRET: QR_SECRET } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, isAdminReq, JWT_SECRET: QR_SECRET } = require('../utils');
 
 // member_no / archived / qr_exp 列已收编至 migrations/011。
 // 会员编号回填：只补空号（从现有最大编号继续），绝不重排已有编号——
@@ -49,16 +49,7 @@ function requireAuth(req, res, next) {
   next();
 }
 
-// 管理员判断（兼容 JWT 与 x-openid 开发模式）
-function isAdminReq(req) {
-  if (req.userRole === 'admin') return true;
-  if (req.openid) {
-    const u = db.prepare('SELECT role FROM users WHERE openid = ?').get(req.openid);
-    return !!(u && u.role === 'admin');
-  }
-  return false;
-}
-
+// 管理员判断统一来自 utils（此前本文件用 req.openid 自实现了一份，与全局中间件行为等价但属重复实现）
 // 成员查看权限：管理端员工或拥有「students」权限的员工（如销售）
 function canViewStudents(req) {
   return isStaffReq(req) || hasPerm(getReqUser(req), 'students');
@@ -237,12 +228,12 @@ router.get('/', (req, res) => {
         AND NOT EXISTS (SELECT 1 FROM member_cards mc2 WHERE mc2.student_id = s.id
           AND (mc2.status = 'active' AND mc2.expires_at > strftime('%s','now')*1000
             OR mc2.status IN ('paused','refunded')))
-        AND EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', '-30 days'))`;
+        AND EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', 'localtime', '-30 days'))`;
     } else if (status === 'churn') {
       where += ` AND EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id)
         AND NOT EXISTS (SELECT 1 FROM member_cards mc2 WHERE mc2.student_id = s.id
           AND mc2.status = 'active' AND mc2.expires_at > strftime('%s','now')*1000)
-        AND NOT EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', '-30 days'))`;
+        AND NOT EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', 'localtime', '-30 days'))`;
     }
     if (project) {
       where += ` AND EXISTS (
@@ -290,7 +281,7 @@ router.get('/', (req, res) => {
           WHEN EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id AND mc.status = 'paused') THEN 'paused'
           WHEN EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id AND mc.status = 'refunded') THEN 'refunded'
           WHEN EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id)
-            AND NOT EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', '-30 days')) THEN 'churn'
+            AND NOT EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', 'localtime', '-30 days')) THEN 'churn'
           WHEN EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id) THEN 'graduated'
           ELSE 'none'
         END) AS mem_status,
@@ -718,7 +709,7 @@ router.get('/:id/activities', requireAuth, (req, res) => {
       FROM attendances a
       LEFT JOIN schedules s ON s.id = a.schedule_id
       WHERE a.student_id = ?
-      ORDER BY COALESCE(a.date, datetime(a.checkin_time/1000, 'unixepoch')) DESC
+      ORDER BY COALESCE(a.date, datetime(a.checkin_time/1000, 'unixepoch', 'localtime')) DESC
       LIMIT 50
     `).all(id);
 

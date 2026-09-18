@@ -583,19 +583,21 @@ router.post('/refund', (req, res) => {
 });
 
 /**
- * GET /api/membership/expiring — 即将到期列表
- * Query: { days }（默认 30 天）
- */
-/**
  * GET /api/membership/deductions — 扣课明细
  * Query: { studentId, page, pageSize }
+ * 不带 studentId 时查询全机构流水，仅限管理端工作人员（与 /expiring 对齐）。
  */
 router.get('/deductions', (req, res) => {
   try {
     const { studentId } = req.query;
-    // 防越权：家长仅可查看自己绑定的成员；管理端工作人员可查看
-    if (studentId && !canViewStudentData(req, studentId)) {
-      return res.status(403).json(safeFail('无权查看该成员的扣课明细'));
+    // 防越权：指定成员时家长仅可查看自己绑定的成员；
+    // 不指定成员即全机构流水，必须限定为工作人员，否则任何登录家长都能拉全量。
+    if (studentId) {
+      if (!canViewStudentData(req, studentId)) {
+        return res.status(403).json(safeFail('无权查看该成员的扣课明细'));
+      }
+    } else if (!isCoachReq(req)) {
+      return res.status(403).json(safeFail('仅管理员或教练可查看全部扣课明细'));
     }
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const pageSize = Math.min(50, Math.max(1, parseInt(req.query.pageSize) || 10));
@@ -622,6 +624,10 @@ router.get('/deductions', (req, res) => {
   }
 });
 
+/**
+ * GET /api/membership/expiring — 即将到期列表
+ * Query: { days }（默认 30 天）
+ */
 router.get('/expiring', (req, res) => {
   try {
     // 全机构即将到期列表仅管理端工作人员可见（涉及成员隐私）

@@ -13,31 +13,7 @@ const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser } = require('../utils');
 const { generateRenewalNotifications } = require('../utils/renewal');
 
-// 轻量迁移：跟进任务表
-try {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS follow_ups (
-      id TEXT PRIMARY KEY,
-      target_type TEXT NOT NULL DEFAULT 'student',
-      target_id TEXT NOT NULL,
-      target_name TEXT DEFAULT '',
-      phone TEXT DEFAULT '',
-      task_type TEXT DEFAULT 'other',
-      reason TEXT DEFAULT '',
-      owner TEXT DEFAULT '',
-      due_at INTEGER NOT NULL,
-      priority INTEGER DEFAULT 0,
-      status TEXT DEFAULT 'pending',
-      note TEXT DEFAULT '',
-      completed_at INTEGER,
-      created_by TEXT DEFAULT '',
-      created_at INTEGER
-    )
-  `);
-  db.exec('CREATE INDEX IF NOT EXISTS idx_follow_ups_due ON follow_ups(due_at, status)');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_follow_ups_target ON follow_ups(target_type, target_id)');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_follow_ups_owner ON follow_ups(owner, status)');
-} catch (e) { /* 忽略 */ }
+// follow_ups 建表与索引已收编至 migrations/014
 
 function canFollowUp(req) {
   if (req.userRole === 'admin') return true;

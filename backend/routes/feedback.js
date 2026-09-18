@@ -9,33 +9,9 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, now, isAdminReq } = require('../utils');
 
-function isAdminReq(req) {
-  if (req.userRole === 'admin') return true;
-  const openid = getOpenId(req);
-  if (openid) {
-    const u = db.prepare('SELECT role FROM users WHERE openid = ?').get(openid);
-    return !!(u && u.role === 'admin');
-  }
-  return false;
-}
-
-// 轻量迁移：反馈表
-try {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS feedback (
-      id TEXT PRIMARY KEY,
-      user_id TEXT,
-      user_name TEXT,
-      content TEXT,
-      contact TEXT DEFAULT '',
-      status TEXT DEFAULT 'pending',
-      created_at INTEGER,
-      updated_at INTEGER
-    );
-  `);
-} catch (e) { /* 已存在 */ }
+// feedback 表由 db/init.js 创建（此前此处另有 CREATE TABLE IF NOT EXISTS，属冗余）
 
 /**
  * POST /api/feedback/apply

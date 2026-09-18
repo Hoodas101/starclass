@@ -13,6 +13,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, formatDate, getWeekDayDate, parsePagination, isAdminReq, isCoachReq, isStaffReq, canViewStudentData } = require('../utils');
+const { requireStaffPerm } = require('../middleware/authz');
 
 /**
  * 排期变更自动通知：向已报名学员的绑定家长发送站内通知
@@ -100,6 +101,7 @@ function ensureTempCourse() {
   router.post('/', (req, res) => {
   try {
     if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可创建排期'));
+    if (!requireStaffPerm(req, res, 'schedule', '排课')) return;
     const { courseId, courseName, teacherId, teacherName, classroomId, date, startTime, endTime, maxStudents, remark, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class } = req.body;
     if ((!courseId && !courseName) || !date || !startTime || !endTime) {
       return res.json(fail('活动名称、日期、开始时间、结束时间为必填'));
@@ -372,6 +374,7 @@ router.get('/coach', (req, res) => {
     } else if (user.role !== 'admin') {
       return res.status(403).json(safeFail('仅教练或管理员可查看今日课表'));
     }
+    if (!requireStaffPerm(req, res, 'schedule', '排课')) return;
 
     let list;
     if (teacherId) {
@@ -475,6 +478,7 @@ router.get('/coach/classes', (req, res) => {
     if (!openid) return res.status(401).json(safeFail('未登录'));
     const user = db.prepare('SELECT phone, role FROM users WHERE openid = ?').get(openid);
     if (!user || user.role !== 'coach') return res.status(403).json(safeFail('仅教练可查看本人课时明细'));
+    if (!requireStaffPerm(req, res, 'coachstats', '课时明细')) return;
     if (!user.phone) return res.json(fail('账号未绑定手机号'));
     const teacher = db.prepare("SELECT id, name FROM teachers WHERE phone = ?").get(user.phone);
     if (!teacher) return res.json(fail('尚未配置教练档案'));
@@ -533,6 +537,7 @@ router.get('/coach/stats', (req, res) => {
     if (user.role !== 'coach' && user.role !== 'admin') {
       return res.status(403).json(safeFail('仅教练或管理员可查看课时统计'));
     }
+    if (!requireStaffPerm(req, res, 'coachstats', '课时统计')) return;
     if (!user.phone) return res.json(fail('账号未绑定手机号'));
     const teacher = db.prepare("SELECT id, name FROM teachers WHERE phone = ?").get(user.phone);
     if (!teacher) return res.json(fail('尚未配置教练档案，请联系管理员'));
@@ -813,6 +818,7 @@ router.get('/:id', (req, res) => {
   router.put('/:id', (req, res) => {
   try {
     if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可修改排期'));
+    if (!requireStaffPerm(req, res, 'schedule', '排课')) return;
     const { id } = req.params;
     const { courseId, teacherId, classroomId, date, startTime, endTime, maxStudents, status, remark, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class } = req.body;
 

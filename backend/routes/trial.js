@@ -20,32 +20,7 @@ const TRIAL_LIMIT_MAX = 5;
 const trialIpLimits = new Map();
 const TRIAL_IP_LIMIT_MAX = 15;
 
-// 建表（幂等）
-db.exec(`
-  CREATE TABLE IF NOT EXISTS trial_bookings (
-    id TEXT PRIMARY KEY,
-    parent_openid TEXT,
-    parent_name TEXT DEFAULT '',
-    parent_phone TEXT DEFAULT '',
-    student_name TEXT NOT NULL,
-    student_age INTEGER,
-    student_gender TEXT DEFAULT '',
-    course_id TEXT,
-    course_name TEXT DEFAULT '',
-    preferred_date TEXT,
-    preferred_time TEXT DEFAULT '',
-    note TEXT DEFAULT '',
-    status TEXT DEFAULT 'pending',
-    assigned_schedule_id TEXT,
-    handled_by TEXT DEFAULT '',
-    handle_note TEXT DEFAULT '',
-    lead_id TEXT,
-    created_at INTEGER,
-    updated_at INTEGER
-  );
-  CREATE INDEX IF NOT EXISTS idx_trial_status ON trial_bookings(status);
-  CREATE INDEX IF NOT EXISTS idx_trial_phone ON trial_bookings(parent_phone);
-`);
+// trial_bookings 建表与索引已收编至 migrations/014
 
 /**
  * POST /api/trial/apply — 家长提交体验课预约

@@ -11,15 +11,7 @@ const { generateId, success, fail, safeFail, getOpenId, now, isAdminReq } = requ
 const { generateRenewalNotifications } = require('../utils/renewal');
 
 // priority / summary / category / is_broadcast / group_name 列已收编至 migrations/011
-// 轻量迁移：通知已读记录表（广播通知按用户独立记录）
-try {
-  db.exec(`CREATE TABLE IF NOT EXISTS notification_reads (
-    notification_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    read_at INTEGER,
-    PRIMARY KEY (notification_id, user_id)
-  )`);
-} catch (e) { /* 忽略 */ }
+// notification_reads 表由 db/init.js 与 migrations/001 创建（此前此处另有 CREATE TABLE，属冗余）
 
 // 判断当前用户是否已读某条通知
 function isReadFor(row, openid) {

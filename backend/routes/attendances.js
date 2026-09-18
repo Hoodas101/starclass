@@ -13,7 +13,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { success, fail, safeFail, parsePagination, isStaffReq, canViewStudentData } = require('../utils');
+const { success, fail, safeFail, parsePagination, isStaffReq, canViewStudentData, attendanceRate } = require('../utils');
 
 /**
  * 计算两个 HH:mm 时间字符串之间的分钟差（结束 > 开始才有效）
@@ -93,7 +93,9 @@ function computeSummary(rows) {
     if (r.status === 'present' || r.status === 'late') attendedMinutes += mins;
     totalMinutes += mins;
   }
-  const totalSessions = rows.length;
+  // 应到次数 = 实到 + 缺勤；已批准的请假不算「应到未到」，故不进分母。
+  // 必须与 attendanceRate 的分子/分母一致，否则页面上「出勤次数 ÷ 总次数」与「出勤率」两张卡互相矛盾。
+  const totalSessions = presentCount + lateCount + absentCount;
   const attendedSessions = presentCount + lateCount;
   return {
     totalSessions,
@@ -104,7 +106,7 @@ function computeSummary(rows) {
     leaveCount,
     attendedHours: Math.round((attendedMinutes / 60) * 10) / 10,
     totalHours: Math.round((totalMinutes / 60) * 10) / 10,
-    attendanceRate: totalSessions > 0 ? Math.round((attendedSessions / totalSessions) * 100) : 0,
+    attendanceRate: attendanceRate({ present: presentCount, late: lateCount, absent: absentCount }),
   };
 }
 

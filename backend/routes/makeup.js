@@ -22,29 +22,7 @@ const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, now, isCoachReq } = require('../utils');
 
-// 建表（幂等）
-db.exec(`
-  CREATE TABLE IF NOT EXISTS makeup_records (
-    id TEXT PRIMARY KEY,
-    student_id TEXT NOT NULL,
-    student_name TEXT,
-    original_schedule_id TEXT,
-    original_date TEXT,
-    original_course_name TEXT,
-    makeup_schedule_id TEXT NOT NULL,
-    makeup_date TEXT,
-    makeup_course_name TEXT,
-    type TEXT DEFAULT 'makeup',
-    status TEXT DEFAULT 'pending',
-    created_by TEXT DEFAULT '',
-    note TEXT DEFAULT '',
-    created_at INTEGER,
-    updated_at INTEGER
-  );
-  CREATE INDEX IF NOT EXISTS idx_makeup_student ON makeup_records(student_id);
-  CREATE INDEX IF NOT EXISTS idx_makeup_schedule ON makeup_records(makeup_schedule_id);
-  CREATE INDEX IF NOT EXISTS idx_makeup_status ON makeup_records(status);
-`);
+// makeup_records 建表与索引已收编至 migrations/014
 
 /**
  * GET /api/makeup/eligible — 可补课缺席列表
