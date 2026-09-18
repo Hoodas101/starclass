@@ -263,6 +263,8 @@ const todayText = computed(() => {
 const formatMoney = (v) => Number(v || 0).toLocaleString('zh-CN')
 
 const stats = ref([])
+const dashLoading = ref(false)
+const dashError = ref('')
 const salesData = ref({ monthRanking: [], weekRanking: [], yearRanking: [], itemStats: [], oneToOne: { amount: 0, count: 0 } })
 // localStorage 可能被旧版本写入损坏数据：解析失败时回退为空对象
 let savedWidgets = {}
@@ -717,12 +719,18 @@ const goStudents = () => {
 // 看板数据
 // ============================================
 const loadDashboard = async () => {
+  dashLoading.value = true
   try {
     const data = await getDashboard({ scope: dashboardScope.value })
     buildStats(data)
     salesData.value = data.sales || { monthRanking: [], weekRanking: [], yearRanking: [], itemStats: [], oneToOne: { amount: 0, count: 0 } }
+    dashError.value = ''
   } catch (e) {
+    // 看板主数据加载失败：写 error 状态由 ListErrorState 呈现并提供重试，不再重复弹 toast（拦截器已提示）
     stats.value = []
+    dashError.value = e?.message || '看板数据加载失败'
+  } finally {
+    dashLoading.value = false
   }
 }
 
