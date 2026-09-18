@@ -10,6 +10,8 @@
           placeholder="成员"
           clearable
           filterable
+          remote
+          :remote-method="loadStudentOptions"
           style="width: 150px"
           @change="onFilterChange"
         >
@@ -20,6 +22,8 @@
           placeholder="课程班级"
           clearable
           filterable
+          remote
+          :remote-method="loadCourseOptions"
           style="width: 160px"
           @change="onFilterChange"
         >
@@ -30,6 +34,8 @@
           placeholder="教练"
           clearable
           filterable
+          remote
+          :remote-method="loadTeacherOptions"
           style="width: 140px"
           @change="onFilterChange"
         >
@@ -148,9 +154,9 @@ import PageHeader from '@/components/PageHeader.vue'
 import {
   getAttendances,
   getAttendanceSummary,
-  getStudents,
-  getCourses,
-  getTeachers,
+  getStudentOptions,
+  getCourseOptions,
+  getTeacherOptions,
 } from '@/api/modules'
 import { fetchAllPages } from '@/utils/fetchAll'
 import { useSettingsStore } from '@/store/settings'
@@ -375,23 +381,30 @@ function onThemeChanged() {
   if (trendChart) renderTrend()
 }
 
-async function loadOptions() {
+// 下拉改为远程搜索（轻量 /options 端点），避免全量拉取
+async function loadStudentOptions(query = '') {
   try {
-    const stu = await getStudents({ pageSize: 500 })
-    studentOptions.value = stu.list || []
+    const res = await getStudentOptions({ q: query })
+    studentOptions.value = res.list || []
   } catch (e) { /* 无权限时跳过 */ }
+}
+async function loadCourseOptions(query = '') {
   try {
-    const cs = await getCourses({ pageSize: 500, includeInactive: true })
-    courseOptions.value = cs.list || []
+    const res = await getCourseOptions({ q: query })
+    courseOptions.value = res.list || []
   } catch (e) { /* 跳过 */ }
+}
+async function loadTeacherOptions(query = '') {
   try {
-    const tch = await getTeachers({ pageSize: 500 })
-    teacherOptions.value = tch.list || []
+    const res = await getTeacherOptions({ q: query })
+    teacherOptions.value = res.list || []
   } catch (e) { /* 跳过 */ }
 }
 
 onMounted(() => {
-  loadOptions()
+  loadStudentOptions()
+  loadCourseOptions()
+  loadTeacherOptions()
   loadData()
   window.addEventListener('resize', onResize)
   // 主题切换后按新 token 重绘（ECharts canvas 不读 CSS 变量）

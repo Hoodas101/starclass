@@ -330,6 +330,43 @@ router.get('/', (req, res) => {
 });
 
 /**
+ * GET /api/schedules/options — 排期轻量选项（用于调课等目标排期下拉）
+ * 返回 id 与合成 label（活动 | 日期 时间区间），支持 q 按活动名搜索，默认仅进行中排期。
+ * 必须放在 /schedules/:id 之前。
+ */
+router.get('/options', (req, res) => {
+  try {
+    const { q, status } = req.query;
+    let where = "WHERE status != 'cancelled'";
+    const params = [];
+    const st = status || 'scheduled';
+    where += ' AND status = ?';
+    params.push(st);
+    if (q) {
+      where += ' AND course_name LIKE ?';
+      params.push(`%${q}%`);
+    }
+    const rows = db.prepare(`
+      SELECT id, course_name, date, start_time, end_time, enrolled_count, max_students
+      FROM schedules ${where} ORDER BY date ASC, start_time ASC LIMIT 50
+    `).all(...params);
+    const list = rows.map((s) => ({
+      id: s.id,
+      course_name: s.course_name,
+      date: s.date,
+      start_time: s.start_time,
+      end_time: s.end_time,
+      enrolled_count: s.enrolled_count,
+      max_students: s.max_students,
+      label: `${s.course_name} | ${s.date} ${s.start_time}-${s.end_time}`,
+    }));
+    res.json(success({ list, total: list.length }));
+  } catch (err) {
+    res.status(500).json(safeFail('获取排期选项失败'));
+  }
+});
+
+/**
  * GET /api/schedules/my — 当前成员的课表
  */
 router.get('/my', (req, res) => {

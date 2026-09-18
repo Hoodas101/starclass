@@ -7,6 +7,7 @@ export const changePassword = (data) => request.post('/auth/changePassword', dat
 
 // 学员
 export const getStudents = (params) => request.get('/students', { params })
+export const getStudentOptions = (params) => request.get('/students/options', { params })
 export const getStudentDetail = (id) => request.get(`/students/${id}`)
 export const addStudent = (data) => request.post('/students', data)
 export const updateStudent = (id, data) => request.put(`/students/${id}`, data)
@@ -15,6 +16,7 @@ export const importStudents = (data) => request.post('/students/import', data)
 
 // 排课
 export const getSchedules = (params) => request.get('/schedules', { params })
+export const getScheduleOptions = (params) => request.get('/schedules/options', { params })
 export const addSchedule = (data) => request.post('/schedules', data)
 export const addRecursiveSchedule = (data) => request.post('/schedules/recursive', data)
 export const updateSchedule = (id, data) => request.put(`/schedules/${id}`, data)
@@ -23,12 +25,14 @@ export const getScheduleDetail = (id) => request.get(`/schedules/${id}`)
 
 // 排课资源（教师 / 场地 / 活动）
 export const getTeachers = (params) => request.get('/admin/teachers', { params })
+export const getTeacherOptions = (params) => request.get('/admin/teachers/options', { params })
 export const getStaffOptions = (params) => request.get('/admin/staff-options', { params })
 export const addTeacher = (data) => request.post('/admin/teachers', data)
 export const updateTeacher = (id, data) => request.put(`/admin/teachers/${id}`, data)
 export const deleteTeacher = (id) => request.delete(`/admin/teachers/${id}`)
 export const getClassrooms = (params) => request.get('/admin/classrooms', { params })
 export const getCourses = (params) => request.get('/admin/courses', { params })
+export const getCourseOptions = (params) => request.get('/admin/courses/options', { params })
 export const addCourse = (data) => request.post('/admin/courses', data)
 export const updateCourse = (id, data) => request.put(`/admin/courses/${id}`, data)
 export const deleteCourse = (id) => request.delete(`/admin/courses/${id}`)

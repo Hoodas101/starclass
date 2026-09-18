@@ -1024,6 +1024,31 @@ router.get('/courses', (req, res) => {
 });
 
 /**
+ * GET /api/admin/courses/options — 活动轻量选项（用于上课记录课程筛选等）
+ * 仅返回 id 与名称，支持 q 搜索；默认返回全部（含停用/归档），以对齐历史下拉行为。
+ * 必须放在 /courses/:id 之前。
+ */
+router.get('/courses/options', (req, res) => {
+  try {
+    const { q, includeInactive } = req.query;
+    let where = '';
+    const params = [];
+    // 历史下拉使用 includeInactive=true，故默认不过滤；仅当显式 includeInactive=0 时只取在售
+    if (includeInactive === '0') where = 'WHERE is_active = 1 AND archived = 0';
+    if (q) {
+      where += (where ? ' AND' : 'WHERE') + ' name LIKE ?';
+      params.push(`%${q}%`);
+    }
+    const list = db.prepare(`
+      SELECT id, name FROM courses ${where} ORDER BY created_at ASC LIMIT 50
+    `).all(...params);
+    res.json(success({ list, total: list.length }));
+  } catch (err) {
+    res.status(500).json(safeFail('获取活动选项失败'));
+  }
+});
+
+/**
  * POST /api/admin/courses — 新建活动
  */
 router.post('/courses', adminOnly, (req, res) => {

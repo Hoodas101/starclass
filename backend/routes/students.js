@@ -342,6 +342,33 @@ router.get('/', (req, res) => {
 });
 
 /**
+ * GET /api/students/options — 成员轻量选项（用于上课记录等筛选下拉）
+ * 仅返回 id 与姓名，支持 q 按姓名模糊搜索，默认不含归档成员。
+ * 必须放在 /:id 之前，否则会被 /:id 捕获。
+ */
+router.get('/options', (req, res) => {
+  try {
+    if (!canViewStudents(req)) return res.status(403).json(safeFail('无成员查看权限'));
+    const { q, includeArchived } = req.query;
+    let where = 'WHERE s.archived = 0';
+    const params = [];
+    if (includeArchived === '1') where = 'WHERE 1=1';
+    if (q) {
+      where += ' AND s.name LIKE ?';
+      params.push(`%${q}%`);
+    }
+    const list = db.prepare(`
+      SELECT s.id, s.name, s.member_no
+      FROM students s ${where}
+      ORDER BY s.created_at DESC LIMIT 50
+    `).all(...params);
+    res.json(success({ list, total: list.length }));
+  } catch (err) {
+    res.status(500).json(safeFail('获取成员选项失败'));
+  }
+});
+
+/**
  * GET /api/students/my — 当前家长绑定的成员
  */
 router.get('/my', (req, res) => {

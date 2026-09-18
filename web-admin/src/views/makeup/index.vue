@@ -28,13 +28,15 @@
             filterable
             clearable
             placeholder="选择原排期"
+            remote
+            :remote-method="loadRescheduleOptions"
             style="width: 340px"
             @change="loadOriginalStudents"
           >
             <el-option
               v-for="s in rescheduleScheduleOptions"
               :key="s.id"
-              :label="`${s.course_name} | ${s.date} ${s.start_time}-${s.end_time}`"
+              :label="s.label"
               :value="s.id"
             />
           </el-select>
@@ -171,7 +173,7 @@
       </el-descriptions>
       <el-form label-width="auto">
         <el-form-item label="目标排期">
-          <el-select v-model="rescheduleForm.newScheduleId" filterable placeholder="选择目标排期" style="width: 100%">
+          <el-select v-model="rescheduleForm.newScheduleId" filterable remote :remote-method="loadRescheduleOptions" placeholder="选择目标排期" style="width: 100%">
             <el-option
               v-for="s in rescheduleScheduleOptions"
               :key="s.id"
@@ -195,7 +197,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
-import { getMakeupEligible, assignMakeup, cancelMakeup, getMakeupRecords, getSchedules, getScheduleDetail, rescheduleStudent } from '@/api/modules'
+import { getMakeupEligible, assignMakeup, cancelMakeup, getMakeupRecords, getSchedules, getScheduleDetail, getScheduleOptions, rescheduleStudent } from '@/api/modules'
 
 defineProps({ embedded: Boolean })
 
@@ -325,10 +327,10 @@ async function handleCancel(row) {
 }
 
 // 调课：加载可选排期（进行中）
-async function loadRescheduleSchedules() {
+async function loadRescheduleOptions(query = '') {
   try {
-    const res = await getSchedules({ pageSize: 500 })
-    rescheduleScheduleOptions.value = (res.list || []).filter((s) => s.status === 'scheduled')
+    const res = await getScheduleOptions({ q: query })
+    rescheduleScheduleOptions.value = res.list || []
   } catch (e) {
     // 拦截器已提示业务/网络错误
   }
@@ -389,7 +391,7 @@ function refreshActive() {
   if (activeMode.value === 'assign') loadEligible()
   else if (activeMode.value === 'records') loadRecords()
   else if (activeMode.value === 'reschedule') {
-    loadRescheduleSchedules().then(() => {
+    loadRescheduleOptions().then(() => {
       if (rescheduleForm.originalScheduleId) loadOriginalStudents()
     })
   }
@@ -403,7 +405,7 @@ onMounted(() => {
 // 切换到「调课」模式时加载排期数据
 watch(activeMode, async (mode) => {
   if (mode === 'reschedule') {
-    await loadRescheduleSchedules()
+    await loadRescheduleOptions()
     if (rescheduleForm.originalScheduleId) await loadOriginalStudents()
   }
 })
