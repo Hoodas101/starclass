@@ -20,13 +20,15 @@ export function usePerm() {
   // localStorage 仅作 userInfo 尚未就绪时的兜底。
   const perms = computed(() => {
     let p = userStore.userInfo?.permissions
-    if (!(Array.isArray(p) && p.length)) {
+    // W6 修复：仅当 permissions 完全缺失（undefined/null）才回退 localStorage/角色默认；
+    // 显式空数组 [] 表示「已配置且无任何权限」，不可再膨胀成角色默认（否则「全部取消勾选」= 恢复默认）。
+    if (!Array.isArray(p)) {
       try {
         const cached = JSON.parse(localStorage.getItem('edu_user_info') || '{}')
         p = cached.permissions
       } catch { /* 忽略 */ }
     }
-    return Array.isArray(p) && p.length ? p : (DEFAULT_PERMS[role.value] || [])
+    return Array.isArray(p) ? p : (DEFAULT_PERMS[role.value] || [])
   })
   const has = (perm) =>
     role.value === 'admin' || perms.value.includes('*') || perms.value.includes(perm)

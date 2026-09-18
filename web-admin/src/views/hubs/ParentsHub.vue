@@ -27,7 +27,8 @@ const tabs = [
   { key: 'notifications', label: '通知中心', comp: NotificationsView, roles: ['admin'], perm: 'notice' },
   { key: 'feedback', label: '意见反馈', comp: FeedbackView, roles: ['admin'], perm: 'feedback' },
 ]
-const visibleTabs = computed(() => tabs.filter((t) => t.roles.includes(role.value) || has(t.perm)))
+// W1 修复：见 OperationsHub —— 角色命中 且 有权限 才显示标签页
+const visibleTabs = computed(() => tabs.filter((t) => t.roles.includes(role.value) && has(t.perm)))
 const activeTab = ref('parents')
 
 const syncUrl = () => {

@@ -20,7 +20,8 @@ export function hasPageAccess(role, perms, meta) {
   if (Array.isArray(roles) && roles.includes(role)) return true
   const perm = meta?.perm
   if (!perm) return false
-  const list = Array.isArray(perms) && perms.length ? perms : (DEFAULT_PERMS[role] || [])
+  // W6 修复：显式空数组 [] 视为「零权限」，不再回退角色默认（与 usePerm.js / 后端 resolvePerms 同语义）
+  const list = Array.isArray(perms) ? perms : (DEFAULT_PERMS[role] || [])
   return list.includes('*') || list.includes(perm)
 }
 

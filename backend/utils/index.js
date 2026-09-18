@@ -231,7 +231,7 @@ function resolvePerms(user) {
   if (user.permissions && typeof user.permissions === 'string' && user.permissions.trim()) {
     try {
       const arr = JSON.parse(user.permissions);
-      if (Array.isArray(arr) && arr.length) return arr;
+      if (Array.isArray(arr)) return arr;
     } catch (e) { /* 解析失败走默认 */ }
   }
   return DEFAULT_PERMS[user.role] || [];

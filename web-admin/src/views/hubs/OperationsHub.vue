@@ -33,7 +33,10 @@ const tabs = [
   { key: 'attendance', label: '上课记录', comp: AttendanceRecordsView, roles: ['admin', 'coach'], perm: 'checkin' },
   { key: 'makeup', label: '补课/调课', comp: MakeupView, roles: ['admin', 'coach'], perm: 'schedule' },
 ]
-const visibleTabs = computed(() => tabs.filter((t) => t.roles.includes(role.value) || has(t.perm)))
+// W1 修复：标签页可见性由「角色命中 或 有权限」改为「角色命中 且 有权限」。
+// 旧逻辑 roles||perm 让被取消某权限勾选的教练仍看到该标签页、点击即 403；
+// 新逻辑要求二者同时满足。admin 的 has() 恒返回 true，不受影响。
+const visibleTabs = computed(() => tabs.filter((t) => t.roles.includes(role.value) && has(t.perm)))
 const activeTab = ref('schedule')
 
 const syncUrl = () => router.replace({ query: { ...route.query, tab: activeTab.value } })

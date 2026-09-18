@@ -25,7 +25,8 @@ const tabs = [
   { key: 'staff', label: '员工', comp: StaffView, roles: ['admin'], perm: 'staff' },
   { key: 'coachstats', labelKey: 'instructor', comp: CoachStatsView, roles: ['admin', 'coach'], perm: 'coachstats' },
 ]
-const visibleTabs = computed(() => tabs.filter((t) => t.roles.includes(role.value) || has(t.perm)))
+// W1 修复：见 OperationsHub —— 角色命中 且 有权限 才显示标签页
+const visibleTabs = computed(() => tabs.filter((t) => t.roles.includes(role.value) && has(t.perm)))
 const activeTab = ref('staff')
 
 const syncUrl = () => router.replace({ query: { ...route.query, tab: activeTab.value } })

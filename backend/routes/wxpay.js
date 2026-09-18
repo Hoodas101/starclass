@@ -10,6 +10,7 @@ const router = express.Router();
 const db = require('../db');
 const { success, fail, safeFail, getOpenId, now } = require('../utils');
 const { isWechatPayEnabled, createPrepayOrder, verifyNotify } = require('../utils/wechat-pay');
+const { parseItems } = require('../utils/items');
 const ordersRoutes = require('./orders');
 
 /**
@@ -63,7 +64,7 @@ router.post('/create', async (req, res) => {
     const result = await createPrepayOrder({
       orderNo: order.order_no,
       amount: order.payable_amount,
-      description: order.items ? JSON.parse(order.items).map(i => i.itemName || i.name).join('、') : '教育服务',
+      description: parseItems(order.items).map(i => i.itemName || i.name).join('、') || '教育服务',
       openid: wxOpenid,
     });
 

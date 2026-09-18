@@ -9,6 +9,12 @@
  *   旧代码下两者都会放行（只看角色），故本用例在旧代码上必然失败。
  *   同时断言 isCoachReq 本身仍为真，证明「角色已通过、是权限键在起作用」。
  *
+ * 后续补充（同一主题的收口，仍按「固定角色、只改 permissions、比较 403 与否」判别）：
+ *   · W6 —— permissions='[]' 必须表示「显式零权限」而非回退角色默认（utils.resolvePerms），
+ *     与 permissions=''（未配置 → 角色默认）构成对照：前者 403、后者放行。
+ *   · W5-students —— 成员列表查看同样收敛到 'students' 权限键（原实现 isStaffReq || hasPerm
+ *     使任意员工角色都能看成员），自定义权限不含该键的教练必须 403，默认教练不受影响。
+ *
  * 运行：node tests/permission-keys-regression.cjs
  */
 process.env.DB_PATH = '/tmp/permission_keys_test.db';
@@ -24,6 +30,7 @@ const { now, isCoachReq, resolvePerms, DEFAULT_PERMS } = require('../utils');
 const schedulesRouter = require('../routes/schedules');
 const checkinRouter = require('../routes/checkin');
 const leaveRouter = require('../routes/leave');
+const studentsRouter = require('../routes/students');
 
 function getHandler(router, method, path) {
   for (const layer of router.stack) {
@@ -63,6 +70,8 @@ const seed = db.transaction(() => {
   mkUser('coach_limited', 'coach', JSON.stringify(['students']));      // 只有成员管理
   mkUser('coach_checkin', 'coach', JSON.stringify(['checkin']));      // 只有签到
   mkUser('coach_default', 'coach', '');                               // 未自定义 → 角色默认
+  mkUser('coach_empty_perms', 'coach', '[]');                         // W6：显式零权限
+  mkUser('coach_no_students', 'coach', JSON.stringify(['schedule', 'checkin', 'leave', 'coachstats'])); // W5：除 students 外全有
   mkUser('parent_p5', 'parent', '');
 });
 seed();
@@ -80,6 +89,7 @@ const POST_SCHEDULE = [schedulesRouter, 'post', '/'];
 const POST_CHECKIN = [checkinRouter, 'post', '/teacher'];
 const GET_LEAVE = [leaveRouter, 'get', '/'];
 const GET_COACH_STATS = [schedulesRouter, 'get', '/coach/stats'];
+const GET_STUDENTS = [studentsRouter, 'get', '/'];
 
 // ============================================================
 // 一、判别性自证：角色校验对两个 coach 都放行
@@ -138,6 +148,47 @@ console.log('\n\x1b[1m[四] 管理员与家长\x1b[0m');
   rec('家长不受员工权限清单约束（该层放行）', requireStaffPerm(parentReq, res, 'schedule', '排课') === true && res.statusCode === 200,
     `status=${res.statusCode}`);
   rec('家长权限清单为空（确认未被误配）', resolvePerms({ role: 'parent', permissions: '' }).length === 0);
+}
+
+// ============================================================
+// 五、W6：permissions='[]' 是「显式零权限」，不得回退角色默认
+// ============================================================
+console.log('\n\x1b[1m[五] W6 显式空权限数组「[]」= 零权限\x1b[0m');
+{
+  const parsed = resolvePerms({ role: 'coach', permissions: '[]' });
+  rec('resolvePerms(coach, "[]") 返回空数组（不回退角色默认）',
+    Array.isArray(parsed) && parsed.length === 0, `got=${JSON.stringify(parsed)}`);
+
+  const empty = { userRole: 'coach', openid: 'coach_empty_perms' };
+  const rEmpty = call(...POST_SCHEDULE, empty);
+  rec('显式零权限教练 → 创建排期 403', rEmpty.statusCode === 403, `status=${rEmpty.statusCode}`);
+
+  // 判别性对照：同一接口、同一角色，仅 permissions 由 '[]' 变为 ''（未配置）
+  const def = { userRole: 'coach', openid: 'coach_default' };
+  const rDef = call(...POST_SCHEDULE, def);
+  rec('未配置权限的默认教练 → 创建排期 200（未被 W6 误伤）', rDef.statusCode === 200, `status=${rDef.statusCode}`);
+}
+
+// ============================================================
+// 六、W5-students：成员列表按 'students' 权限键判定
+// ============================================================
+console.log('\n\x1b[1m[六] W5-students 成员查看权限收敛到 students 键\x1b[0m');
+{
+  const noStudents = { userRole: 'coach', openid: 'coach_no_students' };
+  const rNo = call(...GET_STUDENTS, noStudents);
+  rec('自定义权限不含 students 的教练 → GET /api/students 403', rNo.statusCode === 403, `status=${rNo.statusCode}`);
+
+  const hasStudents = { userRole: 'coach', openid: 'coach_limited' }; // permissions=['students']
+  const rHas = call(...GET_STUDENTS, hasStudents);
+  rec('自定义权限含 students 的教练 → GET /api/students 放行（非 403）', rHas.statusCode !== 403, `status=${rHas.statusCode}`);
+
+  const def = { userRole: 'coach', openid: 'coach_default' };
+  const rDef = call(...GET_STUDENTS, def);
+  rec('默认教练（未配置权限 → 角色默认含 students）→ GET /api/students 200', rDef.statusCode === 200, `status=${rDef.statusCode}`);
+
+  const admin = { userRole: 'admin', openid: 'admin_p5' };
+  const rAdmin = call(...GET_STUDENTS, admin);
+  rec('管理员 → GET /api/students 200', rAdmin.statusCode === 200, `status=${rAdmin.statusCode}`);
 }
 
 console.log(`\n\x1b[1m结果汇总：PASS ${passed}  FAIL ${failed}\x1b[0m`);

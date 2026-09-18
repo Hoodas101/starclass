@@ -336,7 +336,6 @@ const permOptions = [
   { key: 'checkin', label: '今日点名' },
   { key: 'leave', label: '请假审批' },
   { key: 'growth', label: '增长中心' },
-  { key: 'points', label: '积分管理' },
   { key: 'courses', label: '班级管理' },
   { key: 'notice', label: '发布通知' },
   { key: 'coachstats', label: t('instructor') + '课时' },

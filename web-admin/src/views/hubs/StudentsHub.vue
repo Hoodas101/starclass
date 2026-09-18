@@ -23,9 +23,12 @@ const { role, has } = usePerm()
 
 const tabs = [
   { key: 'students', labelKey: 'learner', comp: StudentsView, roles: ['admin', 'coach', 'sales'], perm: 'students' },
-  { key: 'points', label: '积分', comp: PointsView, roles: ['admin'], perm: 'points' },
+  // W2 修复：积分页后端实际由 'growth' 键守卫（growth.js 的 canGrowth），前端此前错用 'points' 键，
+  // 导致授予「积分管理」的员工打开积分页即 403。改为 'growth' 并放宽 roles 让销售可见（与 SalesHub 对齐）。
+  { key: 'points', label: '积分', comp: PointsView, roles: ['admin', 'sales'], perm: 'growth' },
 ]
-const visibleTabs = computed(() => tabs.filter((t) => t.roles.includes(role.value) || has(t.perm)))
+// W1 修复：见 OperationsHub —— 角色命中 且 有权限 才显示标签页
+const visibleTabs = computed(() => tabs.filter((t) => t.roles.includes(role.value) && has(t.perm)))
 const activeTab = ref('students')
 
 const syncUrl = () => router.replace({ query: { ...route.query, tab: activeTab.value } })

@@ -29,7 +29,9 @@ const tabs = [
   { key: 'finance', label: '财务报表', comp: FinanceView, roles: ['admin'], perm: 'dashboard' },
   { key: 'growth', label: '增长中心', comp: GrowthView, roles: ['admin', 'sales'], perm: 'growth' },
 ]
-const visibleTabs = computed(() => tabs.filter((t) => t.roles.includes(role.value) || has(t.perm)))
+// W1 修复：见 OperationsHub —— 角色命中 且 有权限 才显示标签页。
+// 顺带消解 W3：finance 标签页 roles:['admin']，销售即便持有 dashboard 也不会显示（财务报表纯管理员）。
+const visibleTabs = computed(() => tabs.filter((t) => t.roles.includes(role.value) && has(t.perm)))
 const activeTab = ref('orders')
 
 const syncUrl = () => router.replace({ query: { ...route.query, tab: activeTab.value } })

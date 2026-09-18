@@ -13,6 +13,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, isAdminReq, JWT_SECRET: QR_SECRET } = require('../utils');
+const { parseItems } = require('../utils/items');
 
 // member_no / archived / qr_exp 列已收编至 migrations/011。
 // 会员编号回填：只补空号（从现有最大编号继续），绝不重排已有编号——
@@ -50,9 +51,11 @@ function requireAuth(req, res, next) {
 }
 
 // 管理员判断统一来自 utils（此前本文件用 req.openid 自实现了一份，与全局中间件行为等价但属重复实现）
-// 成员查看权限：管理端员工或拥有「students」权限的员工（如销售）
+// 成员查看权限：按「students」权限键判定（管理员 resolvePerms 返回 ['*'] 恒通过；
+// DEFAULT_PERMS.coach / DEFAULT_PERMS.sales 均含 'students'，故未自定义权限的默认教练/销售不受影响；
+// 自定义权限数组中不含 'students' 的员工被拒）。家长走各调用点的 `bind` 分支，不经此函数。
 function canViewStudents(req) {
-  return isStaffReq(req) || hasPerm(getReqUser(req), 'students');
+  return hasPerm(getReqUser(req), 'students');
 }
 
 /**
@@ -499,7 +502,7 @@ router.get('/:id/timeline', requireAuth, (req, res) => {
         .map((r) => {
           let itemText = '';
           try {
-            const items = JSON.parse(r.items || '[]');
+            const items = parseItems(r.items);
             itemText = items.map((i) => i.itemName || '').filter(Boolean).join('、');
           } catch (e) { /* 忽略 */ }
           return { type: 'order', title: `购买「${itemText || '产品'}」`, detail: `金额 ¥${Number(r.payable_amount || 0).toLocaleString()}，状态：${r.status === 'paid' ? '已支付' : r.status}`, eventAt: r.paid_at || r.created_at, meta: { orderNo: r.order_no } };

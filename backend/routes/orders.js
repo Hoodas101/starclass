@@ -11,6 +11,7 @@ const router = express.Router();
 const db = require('../db');
 // 管理员判断统一来自 utils（此前各路由各自复制实现）
 const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser, calcCardExpiresAt, formatDate, recordAudit, isAdminReq } = require('../utils');
+const { parseItems } = require('../utils/items');
 
 // 销售权限：管理员或拥有「sales」权限的员工（销售）
 function canSales(req) {
@@ -37,7 +38,7 @@ const nextYearStartMs = (y) => new Date(`${Number(y) + 1}-01-01T00:00:00`).getTi
 // 解析订单项目文本
 function parseOrderItems(itemsJson) {
   try {
-    const items = JSON.parse(itemsJson || '[]');
+    const items = parseItems(itemsJson);
     return items.map((i) => i.itemName || i.name || '').filter(Boolean).join('、');
   } catch (e) {
     return '';
@@ -75,7 +76,9 @@ function settleOrder(order, paidAt) {
  */
 function grantOrderBenefits(order, paidAt) {
   const currentTime = paidAt || now();
-  const items = JSON.parse(order.items || '[]');
+  const items = parseItems(order.items);
+  // 解析为空但订单确有 items 原文 → 极可能是坏数据/双重编码异常，静默跳过会漏发会员卡与积分
+  if (order.items && parseItems(order.items).length === 0) console.error('grantOrderBenefits: 订单 items 解析为空，可能漏发权益', order && order.id);
   for (const item of items) {
     const productId = item.itemId;
     if (!productId) continue;
@@ -143,7 +146,7 @@ router.post('/', (req, res) => {
       orderItems = [{ itemType: 'membershipCard', itemId: cardTypeId, itemName: cardType.name, quantity: 1, unitPrice: cardType.price, totalPrice: cardType.price }];
       totalAmount = cardType.price;
     } else if (items?.length) {
-      totalAmount = items.reduce((sum, item) => sum + (item.unitPrice || item.price || 0) * (item.quantity || 1), 0);
+      totalAmount = items.reduce((sum, item) => sum + (item.unitPrice || 0) * (item.quantity || 1), 0);
     } else {
       return res.json(fail('缺少订单项或会员卡类型'));
     }
