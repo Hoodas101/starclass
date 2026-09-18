@@ -25,6 +25,9 @@ const { now, formatDate, generateId } = require('../utils');
 const ordersRouter = require('../routes/orders');
 const payrollRouter = require('../routes/payroll');
 const adminRouter = require('../routes/admin');
+// Batch2 新增：退费预览的 started 判定（F4）与扣课口径（F8）覆盖
+const membershipRouter = require('../routes/membership');
+const checkinRouter = require('../routes/checkin');
 // coach_comments 表由 routes/comments.js 在 require 时懒建（server.js 会全量加载路由）；
 // 课程级联删除会清理该表，故测试进程需先加载它。
 require('../routes/comments');
@@ -263,6 +266,136 @@ function expect(condition, label, detail) {
   expect(pts.balance === 45 && pts.total_earned === 45, '签到净发放回滚（45=50-5）', `${pts.balance}/${pts.total_earned}`);
   const left = db.prepare("SELECT COUNT(*) c FROM point_logs WHERE reference_id = 'sch_del7'").get().c;
   expect(left === 0, '关联积分流水已清理', String(left));
+}
+
+// ============================================================
+// F4. 退费预览的 started 判定：会员卡「支付即 activated_at」不得等同于「已开课」
+// ============================================================
+// 判别性：beforeStart=full + afterStart=percent 30%。未消耗课时的卡若被误判为已开课，
+// 会走 afterStart 扣 30% → 只退 700（少退 300）；已消耗的卡若被误判为未开课，
+// 会走 beforeStart 全额 → 多退。两侧都必须钉死。
+{
+  ins("INSERT OR REPLACE INTO settings (key, value) VALUES ('refund_rules', ?)", JSON.stringify({
+    beforeStart: 'full', beforeStartPercent: 10, afterStart: 'percent', afterStartPercent: 30,
+    needApproval: true, processDays: 7,
+  }));
+  const preview = (orderId) => {
+    const res = mockRes();
+    getHandler(ordersRouter, 'get', '/:id/refund-preview')(
+      mockReq({ userRole: 'admin', openid: 'admin7_openid', params: { id: orderId } }), res);
+    return res.body && res.body.data;
+  };
+  const mkPreviewFixture = (suffix, cardFields) => {
+    ins(`INSERT OR IGNORE INTO orders (id, order_no, student_id, order_type, payable_amount, discount_amount, refunded_amount, total_amount, status, paid_at, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `ord_f4${suffix}`, `OF4${suffix}`, 'stu_p7', 'membership', 1000, 0, 0, 1000, 'paid', t, t, t);
+    ins(`INSERT OR IGNORE INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name, total_classes, remaining_classes, used_classes, activated_at, expires_at, status, order_id, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `mc_f4${suffix}`, 'ct_p7', '次卡', cardFields.mode, 'stu_p7', '资金学员',
+      cardFields.total, cardFields.remaining, cardFields.used,
+      cardFields.activatedAt, cardFields.expiresAt, 'active', `ord_f4${suffix}`, t, t);
+    return preview(`ord_f4${suffix}`);
+  };
+
+  // (a) 次数卡：当日购卡、一次未用 → 未开课 → beforeStart=full → 全额 1000
+  const a = mkPreviewFixture('a', { mode: 'count', total: 10, remaining: 10, used: 0, activatedAt: t, expiresAt: t + 60 * 86400000 });
+  expect(!!a && a.started === false, 'F4 未消耗课时的次数卡 → started=false（旧实现因 activated_at 恒为 true）', a && String(a.started));
+  expect(a && a.amount === 1000, 'F4 未消耗课时的次数卡 → 全额退 1000（旧实现按 afterStart 扣 30% 只退 700）', a && `${a.amount}/${a.mode}`);
+  expect(a && /开课前/.test(a.reason || ''), 'F4 理由走 beforeStart 分支', a && a.reason);
+
+  // (b) 次数卡：已用 5/10 → 已开课 → afterStart=percent → 退 700
+  const b = mkPreviewFixture('b', { mode: 'count', total: 10, remaining: 5, used: 5, activatedAt: t - 10 * 86400000, expiresAt: t + 60 * 86400000 });
+  expect(!!b && b.started === true, 'F4 已消耗课时的次数卡 → started=true（未被误判成开课前而多退）', b && String(b.started));
+  expect(b && b.amount === 700, 'F4 已消耗课时的次数卡 → 按 afterStart 扣 30% 退 700', b && String(b.amount));
+
+  // (c) 时效卡：当日购卡（有效期未消耗）→ 全额；已过半 → 走 afterStart
+  const c1 = mkPreviewFixture('c', { mode: 'time', total: 0, remaining: 0, used: 0, activatedAt: t, expiresAt: t + 200 * 86400000 });
+  expect(!!c1 && c1.started === false && c1.amount === 1000, 'F4 当日未消耗的时效卡 → 全额 1000', c1 && JSON.stringify({ s: c1.started, a: c1.amount }));
+  const c2 = mkPreviewFixture('d', { mode: 'time', total: 0, remaining: 0, used: 0, activatedAt: t - 100 * 86400000, expiresAt: t + 100 * 86400000 });
+  expect(!!c2 && c2.started === true && c2.amount === 700, 'F4 已过半的时效卡 → started=true 且按 afterStart 退 700', c2 && JSON.stringify({ s: c2.started, a: c2.amount }));
+
+  // (d) 非会员卡订单（无卡）行为不变：仍走 beforeStart
+  ins(`INSERT OR IGNORE INTO orders (id, order_no, student_id, order_type, payable_amount, discount_amount, refunded_amount, total_amount, status, paid_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'ord_f4e', 'OF4E', 'stu_p7', 'retail', 300, 0, 0, 300, 'paid', t, t, t);
+  const e = preview('ord_f4e');
+  expect(!!e && e.started === false && e.amount === 300, 'F4 无会员卡订单行为不变（未开课全额 300）', e && JSON.stringify({ s: e.started, a: e.amount }));
+}
+
+// ============================================================
+// F8. 扣课口径：courses.consume_classes（默认 1）必须真的扣 N
+// ============================================================
+// 判别性：签到扣课路径旧实现硬编码 -1，配置「每次消耗 2 课时」的课程永远只扣 1；
+// 回滚路径同样只 +1。两侧一起错会让卡内余额被系统性高估。
+{
+  // 专用学员：扣课按 expires_at 最早的可扣卡选卡，复用 stu_p7 会命中前面夹具的卡
+  ins("INSERT OR IGNORE INTO students (id, name) VALUES ('stu_f8', '扣课学员')");
+  ins("INSERT OR IGNORE INTO courses (id, name, category, consume_classes, is_active, created_at) VALUES ('crs_f8', '双课时课', 'training', 2, 1, ?)", t);
+  ins(`INSERT OR IGNORE INTO schedules (id, course_id, course_name, teacher_id, date, start_time, end_time, status, enrolled_count, created_at, updated_at)
+       VALUES ('sch_f8', 'crs_f8', '双课时课', 'teacher_001', ?, '09:00', '10:00', 'scheduled', 0, ?, ?)`, today, t, t);
+  ins(`INSERT OR IGNORE INTO enrollments (id, schedule_id, student_id, student_name, course_id, course_name, status, enroll_type, created_at)
+       VALUES ('enr_f8', 'sch_f8', 'stu_f8', '资金学员', 'crs_f8', '双课时课', 'active', 'normal', ?)`, t);
+  ins(`INSERT OR IGNORE INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name, total_classes, remaining_classes, used_classes, activated_at, expires_at, status, order_id, created_at, updated_at)
+       VALUES ('mc_f8', 'ct_p7', '次卡', 'count', 'stu_f8', '资金学员', 10, 10, 0, ?, ?, 'active', NULL, ?, ?)`,
+    t - 86400000, t + 200 * 86400000, t, t);
+  const cardOf = () => db.prepare("SELECT remaining_classes, used_classes FROM member_cards WHERE id = 'mc_f8'").get();
+  const checkin = (status) => {
+    const res = mockRes();
+    getHandler(checkinRouter, 'post', '/teacher')(mockReq({
+      userRole: 'admin', openid: 'admin7_openid',
+      body: { scheduleId: 'sch_f8', attendances: [{ studentId: 'stu_f8', status }] },
+    }), res);
+    return res.body && res.body.data;
+  };
+
+  const before = cardOf();
+  expect(before.remaining_classes === 10 && before.used_classes === 0, 'F8 夹具：次数卡 10 次可用', JSON.stringify(before));
+
+  checkin('present');
+  const afterCk = cardOf();
+  expect(afterCk.remaining_classes === 8 && afterCk.used_classes === 2,
+    'F8 签到按 consume_classes=2 扣 2 课时（旧实现硬编码扣 1）', JSON.stringify(afterCk));
+
+  checkin('clear');
+  const afterClr = cardOf();
+  expect(afterClr.remaining_classes === 10 && afterClr.used_classes === 0,
+    'F8 清除点名回滚 2 课时（旧实现只 +1，每轮虚增 1 课时）', JSON.stringify(afterClr));
+
+  // 手工扣课未传 classes → 取课程 consume_classes
+  const resD = mockRes();
+  getHandler(membershipRouter, 'post', '/deduct')(mockReq({
+    userRole: 'admin', openid: 'admin7_openid', body: { scheduleId: 'sch_f8', studentId: 'stu_f8' },
+  }), resD);
+  const d = resD.body && resD.body.data;
+  const afterDeduct = cardOf();
+  expect(!!d && d.deducted === 2 && afterDeduct.remaining_classes === 8 && afterDeduct.used_classes === 2,
+    'F8 手工扣课未传 classes → 按 consume_classes=2 扣 2（旧实现默认 1）',
+    JSON.stringify({ resp: d, card: afterDeduct }));
+
+  // 余量不足 N：不得扣成负数，也不得部分扣减（否则回滚无法复原到同一数值）
+  db.prepare("UPDATE member_cards SET remaining_classes = 1, used_classes = 9 WHERE id = 'mc_f8'").run();
+  db.prepare("DELETE FROM deduction_logs WHERE schedule_id = 'sch_f8'").run();
+  checkin('present');
+  const afterShort = cardOf();
+  expect(afterShort.remaining_classes === 1 && afterShort.used_classes === 9,
+    'F8 余量不足以支付 N 课时时不扣课（不出现负余额，回滚保持对称）', JSON.stringify(afterShort));
+
+  // consume_classes = 0（course_temp 自定义临时活动）必须归一到 1，不能变成不扣课
+  ins("INSERT OR IGNORE INTO courses (id, name, category, consume_classes, is_active, created_at) VALUES ('crs_f8z', '临时活动', '临时', 0, 0, ?)", t);
+  ins(`INSERT OR IGNORE INTO schedules (id, course_id, course_name, teacher_id, date, start_time, end_time, status, enrolled_count, created_at, updated_at)
+       VALUES ('sch_f8z', 'crs_f8z', '临时活动', 'teacher_001', ?, '09:00', '10:00', 'scheduled', 0, ?, ?)`, today, t, t);
+  ins(`INSERT OR IGNORE INTO enrollments (id, schedule_id, student_id, student_name, course_id, course_name, status, enroll_type, created_at)
+       VALUES ('enr_f8z', 'sch_f8z', 'stu_f8', '资金学员', 'crs_f8z', '临时活动', 'active', 'normal', ?)`, t);
+  db.prepare("UPDATE member_cards SET remaining_classes = 10, used_classes = 0 WHERE id = 'mc_f8'").run();
+  db.prepare("DELETE FROM deduction_logs WHERE schedule_id = 'sch_f8z'").run();
+  const resZ = mockRes();
+  getHandler(checkinRouter, 'post', '/teacher')(mockReq({
+    userRole: 'admin', openid: 'admin7_openid',
+    body: { scheduleId: 'sch_f8z', attendances: [{ studentId: 'stu_f8', status: 'present' }] },
+  }), resZ);
+  const afterZ = cardOf();
+  expect(afterZ.remaining_classes === 9 && afterZ.used_classes === 1,
+    'F8 consume_classes=0（临时活动）归一为 1，签到仍扣 1 课时', JSON.stringify(afterZ));
 }
 
 // ---------- 输出 ----------

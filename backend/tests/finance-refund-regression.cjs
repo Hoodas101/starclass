@@ -228,6 +228,85 @@ function expect(condition, label, detail) {
   expect(rfnd.length === 2 && rfnd.every((x) => x.payable_amount <= 240), 'RFND 流水金额均受限', JSON.stringify(rfnd));
 }
 
+// E. 退卡（F6）：双重编码明细必须按真实成交价退，不得回退卡类型标价
+// 判别性：订单明细里第 1 条是**双重编码**（数组元素本身是 JSON 字符串），
+// 旧实现 items.find(i => i.itemId === card.card_type_id) 因元素是字符串必然落空
+// → 回退 cardType.price（600，且不打折）→ 600×5/10 = 300，多退 60。
+// 注：上方 seed 事务里的 ins 是闭包局部变量，此处需要模块级同名工具
+const ins = (sql, ...a) => db.prepare(sql).run(...a);
+{
+  ins(`INSERT INTO membership_cards (id, name, total_classes, valid_days, billing_mode, price, created_at)
+       VALUES ('ct_f6', 'F6季卡', 10, 200, 'count', 600, ?)`, t);
+  // 多明细：本卡标价行小计 600 + 搭售件 400 = 1000 标价，整单实付 800（8 折）
+  ins(`INSERT OR IGNORE INTO orders (id, order_no, student_id, order_type, items, payable_amount, discount_amount, refunded_amount, total_amount, status, paid_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'ord_f6', 'OF6001', 'stu_r1', 'membership',
+    JSON.stringify([
+      JSON.stringify({ itemType: 'membershipCard', itemId: 'ct_f6', itemName: 'F6季卡', quantity: 1, unitPrice: 600, totalPrice: 600 }),
+      { itemType: 'product', itemName: 'F6搭售件', quantity: 1, unitPrice: 400, totalPrice: 400 },
+    ]),
+    800, 200, 0, 1000, 'paid', t, t, t);
+  ins(`INSERT OR IGNORE INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name, total_classes, remaining_classes, used_classes, activated_at, expires_at, status, order_id, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'mc_f6', 'ct_f6', 'F6季卡', 'count', 'stu_r1', '退款学员', 10, 5, 5,
+    t - 10 * 86400000, t + 100 * 86400000, 'active', 'ord_f6', t, t);
+
+  // 自证：旧口径的读取方式（直接 JSON.parse 后按 itemId 找）确实找不到本卡明细
+  const rawItems = JSON.parse(db.prepare("SELECT items FROM orders WHERE id = 'ord_f6'").get().items);
+  const oldFound = rawItems.find((i) => i.itemId === 'ct_f6');
+  expect(oldFound === undefined, '自证：旧口径 items.find 对双重编码元素取不到 itemId（回退标价）', JSON.stringify(oldFound));
+
+  const h = getHandler(membershipRouter, 'post', '/refund');
+  const r = mockRes();
+  h(mockReq({ userRole: 'admin', body: { cardId: 'mc_f6', studentId: 'stu_r1', reason: '回归-双重编码退卡' } }), r);
+  const d = r.body && r.body.data;
+  expect(!!d, 'F6 双重编码多明细单退卡成功', r.body && r.body.message);
+  // 正确：600 × 800/1000 = 480（折后本卡成交价）→ 剩余 5/10 → 退 240
+  expect(d && d.refundAmount === 240,
+    'F6 双重编码多明细单按折后实付退 240（旧实现回退卡类型标价退 300）', d && String(d.refundAmount));
+}
+
+// F. 财务报表 by-product（F7）：双重编码明细按真实价格结构分摊，不得退化成均分
+// 判别性：旧实现用 it.type='object' 判定，双重编码元素被判否 → unit_price=0 → gross=0
+// → 整单落进「按项数均分」分支，两条明细各分 400 且都记在「未命名」下。
+{
+  const uniq = Math.random().toString(36).slice(2, 6);
+  const bigName = `F7高价卡_${uniq}`;
+  const smallName = `F7搭售件_${uniq}`;
+  ins(`INSERT OR IGNORE INTO orders (id, order_no, student_id, order_type, items, payable_amount, discount_amount, refunded_amount, total_amount, status, paid_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'ord_f7', 'OF7001', 'stu_r1', 'membership',
+    JSON.stringify([
+      JSON.stringify({ itemType: 'membershipCard', itemId: 'ct_f7', itemName: bigName, quantity: 1, unitPrice: 600, totalPrice: 600 }),
+      JSON.stringify({ itemType: 'product', itemId: 'p_f7', itemName: smallName, quantity: 1, unitPrice: 400, totalPrice: 400 }),
+    ]),
+    800, 200, 0, 1000, 'paid', t, t, t);
+  // 非法元素（裸字符串）不得让接口 500
+  ins(`INSERT OR IGNORE INTO orders (id, order_no, student_id, order_type, items, payable_amount, discount_amount, refunded_amount, total_amount, status, paid_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'ord_f7b', 'OF7002', 'stu_r1', 'membership', JSON.stringify(['篮球季卡']),
+    300, 0, 0, 300, 'paid', t, t, t);
+
+  const hp = getHandler(financeRouter, 'get', '/by-product');
+  const res = mockRes();
+  hp(mockReq({ userRole: 'admin', query: { startDate, endDate } }), res);
+  expect(res.statusCode === 200, 'F7 items 含裸字符串元素时 /by-product 仍返回 200', `status=${res.statusCode}`);
+  const list = (res.body && res.body.data && res.body.data.list) || [];
+  const big = list.find((x) => x.name === bigName);
+  const small = list.find((x) => x.name === smallName);
+  // 正确：800 × 600/1000 = 480、800 × 400/1000 = 320
+  expect(!!big && big.revenue === 480, 'F7 双重编码高价卡按真实价格分摊 480（旧实现均分 400）', JSON.stringify(big));
+  expect(!!small && small.revenue === 320, 'F7 双重编码搭售件按真实价格分摊 320（旧实现均分 400）', JSON.stringify(small));
+  expect((big ? big.revenue : 0) + (small ? small.revenue : 0) === 800,
+    'F7 两行分摊合计恒等于整单实付 800', `sum=${(big ? big.revenue : 0) + (small ? small.revenue : 0)}`);
+  // 「未命名」桶里只应剩裸字符串元素订单的 300（该单 gross=0 → 按项数均分给唯一一项）。
+  // 双重编码订单的 800 必须全部落到两个真实项目名下 —— 旧实现会把整单 800 归入「未命名」。
+  const unnamed = list.find((x) => x.name === '未命名');
+  expect(!!unnamed && unnamed.revenue === 300,
+    'F7 双重编码订单不再落入「未命名」（该桶只剩裸字符串订单的 300，旧实现为 800+300）',
+    JSON.stringify(unnamed));
+}
+
 // ---------- 输出 ----------
 console.log(results.join('\n'));
 if (failures) {

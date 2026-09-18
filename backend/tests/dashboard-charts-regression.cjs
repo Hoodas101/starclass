@@ -270,6 +270,88 @@ console.log('\n\x1b[1m[四] 非法明细的护栏\x1b[0m');
 }
 
 // ============================================================
+// 五、F1 看板「本月购买项目统计」金额口径 + F2 非法元素的页面级护栏
+// ============================================================
+// 判别性（逐条都能证明旧实现给出不同结果）：
+//   · F1 金额：旧实现 SUM(o.payable_amount) 在 json_each 展开后把**整单金额按明细条数
+//     重复累加**。下面 n1 同时出现在「单明细 1000」与「双明细 1000」两张单里，
+//     正确值 1000+600=1600，旧口径为 1000+1000=2000 —— 断言同时钉住 1600 且排除 2000。
+//   · F1 count：旧实现 COUNT(DISTINCT o.id) 是「笔数」，与 /export、/charts 的
+//     「件数（Σ quantity）」口径不一致；这里用 quantity=2 的双重编码单钉住件数=2。
+//   · F1 护栏：旧实现对非法元素直接 json_extract 会抛 malformed JSON，被外层 try/catch
+//     吞掉 → itemStats 变成**空数组**（统计整块静默消失）。故断言 itemStats 非空。
+//   · F2：同一份数据下 /charts 在旧实现里整条查询失败 → 500（整个图表页挂掉）。
+console.log('\n\x1b[1m[五] F1 看板单品金额/件数口径 + F2 非法元素护栏\x1b[0m');
+{
+  const u = Math.random().toString(36).slice(2, 6);
+  const n1 = `F1单卡_${u}`;
+  const n2 = `F1双卡_${u}`;
+  const n3 = `F1双重编码_${u}`;
+  const n4 = `F1折扣卡_${u}`;
+
+  // 数量刻意放大：看板 itemStats 有 LIMIT 5，而前面几节已往本月塞了不少探针订单，
+  // 夹具件数必须稳稳排在 Top5 内，否则断言会因截断而假红（与聚合逻辑无关）。
+  // 订单1：单明细 1000（10 件 × 100）
+  mkPaidOrder(JSON.stringify([{ itemName: n1, quantity: 10, unitPrice: 100, totalPrice: 1000 }]), 1000);
+  // 订单2：双明细，n1 占 600（6 件）、n2 占 400（4 件），整单实付 1000
+  mkPaidOrder(JSON.stringify([
+    { itemName: n1, quantity: 6, unitPrice: 100, totalPrice: 600 },
+    { itemName: n2, quantity: 4, unitPrice: 100, totalPrice: 400 },
+  ]), 1000);
+  // 订单3：双重编码，quantity=7 → 件数应为 7
+  mkPaidOrder(JSON.stringify([JSON.stringify({ itemName: n3, quantity: 7, unitPrice: 100, totalPrice: 700 })]), 700);
+  // 订单4：折扣单（标价 1000 / 实付 800）——单品统计刻意保留毛口径
+  {
+    const ts = Date.now();
+    const id = gen('ORD_F1DISC_');
+    db.prepare(`INSERT INTO orders (id, order_no, student_id, student_name, order_type, items,
+        total_amount, discount_amount, payable_amount, status, paid_at, refunded_amount, created_at, updated_at)
+      VALUES (?, ?, 'stu_chart_probe', '图表探针', 'membership', ?, 1000, 200, 800, 'paid', ?, 0, ?, ?)`)
+      .run(id, gen('F1D'), JSON.stringify([{ itemName: n4, quantity: 5, unitPrice: 200, totalPrice: 1000 }]), ts, ts, ts);
+    created.push(id);
+  }
+  // 订单5：合法数组 + 非法元素（旧实现下这一行会让整块统计抛错/整个图表页 500）
+  mkPaidOrder(JSON.stringify(['篮球季卡']), 300);
+
+  const dash = mockRes();
+  getHandler(adminRouter, 'get', '/dashboard')({ query: {}, headers: {}, userRole: '' }, dash);
+  const dashBody = dash.body && dash.body.data;
+  const itemStats = (dashBody && dashBody.sales && dashBody.sales.itemStats) || [];
+  const byItem = {};
+  for (const it of itemStats) byItem[it.itemName] = it;
+
+  rec('看板在含非法元素时仍返回 200', dash.statusCode === 200, `status=${dash.statusCode}`);
+  // 旧实现：非法元素让 SQL 抛错 → catch 吞掉 → itemStats 为空数组（整块静默消失）
+  rec('itemStats 非空（非法元素不再让整块统计静默消失）', itemStats.length > 0, `len=${itemStats.length}`);
+
+  const a1 = byItem[n1];
+  rec('F1 同一单品跨「单明细 + 双明细」两单的金额 = 1000 + 600 = 1600',
+    !!a1 && a1.amount === 1600, `got=${JSON.stringify(a1)}`);
+  rec('F1 金额不再按明细条数放大（旧口径为 2000 = 两张整单金额相加）',
+    !!a1 && a1.amount !== 2000, `got=${JSON.stringify(a1)}`);
+  rec('F1 count 为件数：n1 跨两单 10 + 6 = 16 件（旧口径为笔数 2）',
+    !!a1 && a1.count === 16, `got=${JSON.stringify(a1)}`);
+  rec('F1 双明细单的另一项金额 = 400（旧口径为整单 1000）',
+    !!byItem[n2] && byItem[n2].amount === 400 && byItem[n2].count === 4, `got=${JSON.stringify(byItem[n2])}`);
+  rec('F1 count 改为件数：双重编码 quantity=7 → count=7（旧口径为笔数 1）',
+    !!byItem[n3] && byItem[n3].count === 7 && byItem[n3].amount === 700, `got=${JSON.stringify(byItem[n3])}`);
+  rec('F1 折扣单按标价毛口径记 1000（与 CSV 导出单品金额同口径）',
+    !!byItem[n4] && byItem[n4].amount === 1000 && byItem[n4].count === 5, `got=${JSON.stringify(byItem[n4])}`);
+
+  // /charts 同一份数据：旧实现直接对非法元素 json_extract → 整条查询抛 malformed JSON → 500
+  const ch = callCharts('month');
+  rec('F2 /charts 在 items=["篮球季卡"] 存在时返回 200（旧实现整页 500）',
+    ch.statusCode === 200 && !!(ch.body && ch.body.data), `status=${ch.statusCode}`);
+  const ps = (ch.body && ch.body.data && ch.body.data.productSales) || [];
+  const psByName = {};
+  for (const p of ps) psByName[p.name] = p;
+  rec('F2 合法项在非法元素存在时仍按真实项目名归类（n1 件数=16）',
+    !!psByName[n1] && psByName[n1].count === 16, `got=${JSON.stringify(psByName[n1])}`);
+  rec('F2 非法元素降级进「其他」桶（件数 1），不再拖垮接口',
+    !!psByName['其他'] && psByName['其他'].count >= 1, `got=${JSON.stringify(psByName['其他'])}`);
+}
+
+// ============================================================
 // 收尾清理（仅测试库）
 // ============================================================
 for (const id of created) db.prepare('DELETE FROM orders WHERE id = ?').run(id);

@@ -12,6 +12,9 @@ const router = express.Router();
 const crypto = require('crypto');
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, isAdminReq, isCoachReq, canViewStudentData, calcCardExpiresAt } = require('../utils');
+// 订单明细解析 / 每次课消耗课时数：与签到扣课、导出报表共用同一实现
+const { parseItems, itemLineTotal } = require('../utils/items');
+const { resolveConsumeClasses } = require('../utils/deduction');
 
 // schema 列（paused_at/billing_mode/points_reward/product_type 等）已收编至 migrations/011；
 // 此处仅保留数据回填。
@@ -381,10 +384,16 @@ router.get('/my', (req, res) => {
 router.post('/deduct', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可扣课'));
-    const { scheduleId, studentId, cardId, classes = 1 } = req.body;
+    const { scheduleId, studentId, cardId, classes } = req.body;
     if (!scheduleId || !studentId) return res.json(fail('缺少参数'));
+    // 扣课数量：显式入参优先；未传时取排期所属课程的 courses.consume_classes（缺省 1）。
+    // 此前该字段默认 1，而签到扣课路径也硬编码 1 —— 两条路径都不读配置，
+    // 于是配置为「每次消耗 2 课时」的课程永远只扣 1，卡内余额被系统性高估。
+    // 两条路径现在统一走 utils/deduction.resolveConsumeClasses。
+    const n = (classes === undefined || classes === null || classes === '')
+      ? resolveConsumeClasses(scheduleId)
+      : Number(classes);
     // 扣课数量必须为正整数：负数会把「扣课」变成反向充值（remaining - (-N) = +N），凭空膨胀课时资产
-    const n = Number(classes);
     if (!Number.isInteger(n) || n <= 0) return res.json(fail('扣课数量必须为正整数'));
 
     // 幂等检查
@@ -429,6 +438,10 @@ router.post('/deduct', (req, res) => {
         WHERE id = ? AND remaining_classes >= ?
       `).run(n, n, now(), card.id, n);
       if (upd.changes === 0) return { err: '剩余训练时长不足' };
+      // 一次扣课只落一行流水：deduction_logs 上有 UNIQUE(schedule_id, student_id)，
+      // 消耗 N 课时无法写成 N 行（schema 不动）。用户看到的资产口径是卡上的
+      // remaining_classes / used_classes，两者已按 N 扣减；扣课回滚路径同样按
+      // courses.consume_classes 反向恢复 N，两边对称。
       db.prepare(`
         INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
         VALUES (?, ?, ?, ?)
@@ -474,42 +487,43 @@ router.post('/refund', (req, res) => {
       let orderId = null;
       let orderPayable = 0;
       let orderRefundedSoFar = 0;
+      // 整单折扣比例（实付 / 标价）：<1 表示整单有折扣，按标价退会超退
+      let discountRatio = 1;
       if (card.order_id) {
         orderId = card.order_id;
         const order = db.prepare('SELECT items, total_amount, payable_amount, refunded_amount FROM orders WHERE id = ?').get(card.order_id);
         if (order) {
           orderPayable = Number(order.payable_amount) || 0;
           orderRefundedSoFar = Number(order.refunded_amount) || 0;
-          try {
-            const items = JSON.parse(order.items || '[]');
-            // 必须精确匹配本卡商品：旧逻辑回退 items[0] 会把别的热价格算到本卡头上；
-            // 订单明细写入字段是 unitPrice（orders.js），旧逻辑读 it.price 永不命中，
-            // 再回退整单 payable_amount 会对多明细订单超退。
-            const it = items.find(i => i.itemId === card.card_type_id);
-            if (it) {
-              const qty = Number(it.quantity) || 1;
-              const unit = Number(it.unitPrice ?? it.price) || 0;
-              const total = Number(it.totalPrice) || 0;
-              let base = 0;
-              if (unit > 0) base = unit * qty;
-              else if (total > 0) base = total;
-              if (base > 0) {
-                // 按订单实付/原价比例折减：整单有折扣时按标价退会超退
-                const orderTotal = Number(order.total_amount) || 0;
-                paidPrice = (orderTotal > 0 && orderPayable > 0 && orderPayable < orderTotal)
-                  ? Math.round(base * orderPayable / orderTotal)
-                  : base;
-              }
-            }
-            // 单明细订单可安全回退整单实付
-            if (!paidPrice && items.length === 1 && orderPayable > 0) {
-              paidPrice = orderPayable;
-            }
-          } catch (e) { /* 忽略损坏数据 */ }
+          const orderTotal = Number(order.total_amount) || 0;
+          discountRatio = (orderTotal > 0 && orderPayable > 0 && orderPayable < orderTotal)
+            ? orderPayable / orderTotal : 1;
+          // items 解析统一走 utils/items：兼容「数组元素为 JSON 字符串」的双重编码形态。
+          // 旧实现直接 JSON.parse 后 items.find(i => i.itemId === card.card_type_id)，
+          // 双重编码时元素是字符串、根本没有 itemId，必然落空 → 退化为卡类型**标价**，
+          // 既忽略整单折扣也忽略真实实付，多明细订单会多退或少退。
+          const items = parseItems(order.items);
+          // 必须精确匹配本卡商品：旧逻辑回退 items[0] 会把别的商品价格算到本卡头上。
+          // 优先 itemId（orders.js 写入字段）；历史脏数据可能缺 itemId，退而按卡类型名匹配。
+          const it = items.find((i) => i.itemId && i.itemId === card.card_type_id)
+            || items.find((i) => i.itemName && i.itemName === card.card_type_name);
+          const base = it ? itemLineTotal(it) : 0;
+          if (base > 0) {
+            paidPrice = discountRatio < 1 ? Math.round(base * discountRatio) : base;
+          }
+          // 单明细订单可安全回退整单实付
+          if (!paidPrice && items.length === 1 && orderPayable > 0) {
+            paidPrice = orderPayable;
+          }
         }
       }
       const cardType = db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(card.card_type_id);
-      if (!paidPrice && cardType) paidPrice = Number(cardType.price) || 0;
+      // 最后兜底：连订单明细都拿不到时用卡类型标价，但仍按整单折扣比例折减
+      // （旧实现直接取标价，折扣单会按原价退 → 超退）
+      if (!paidPrice && cardType) {
+        const base = Number(cardType.price) || 0;
+        paidPrice = discountRatio < 1 ? Math.round(base * discountRatio) : base;
+      }
 
       // 计算退款金额（按计费模式：次数卡按剩余次数比例，时效卡按剩余有效期天数比例）
       // 时效卡分母为「已购总时长」：expires_at 在恢复时会顺延 pause_total_ms，

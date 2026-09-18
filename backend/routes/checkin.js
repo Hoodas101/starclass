@@ -11,6 +11,8 @@ const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, formatDate, isCoachReq, isAdminReq, isStaffReq, canViewStudentData } = require('../utils');
 const { requireStaffPerm } = require('../middleware/authz');
+// 每次课消耗的课时数（courses.consume_classes）：与手工扣课路径共用同一实现
+const { resolveConsumeClasses } = require('../utils/deduction');
 
 /**
  * POST /api/checkin/teacher — 教师批量签到确认
@@ -81,11 +83,14 @@ router.post('/teacher', (req, res) => {
           'SELECT * FROM deduction_logs WHERE schedule_id = ? AND student_id = ?'
         ).get(scheduleId, studentId);
         if (ded) {
+          // 回滚课时：恢复量与扣课时一致（courses.consume_classes），否则每次
+          // 「签到 → 改缺席/清除」都会让卡内课时凭空 +1（少扣多还）。
+          const back = resolveConsumeClasses(scheduleId);
           db.prepare(`
-            UPDATE member_cards SET remaining_classes = remaining_classes + 1,
-              used_classes = MAX(0, used_classes - 1), updated_at = ?
+            UPDATE member_cards SET remaining_classes = remaining_classes + ?,
+              used_classes = MAX(0, used_classes - ?), updated_at = ?
             WHERE id = ?
-          `).run(t, ded.card_id);
+          `).run(back, back, t, ded.card_id);
           db.prepare('DELETE FROM deduction_logs WHERE id = ?').run(ded.id);
         }
         db.prepare('DELETE FROM attendances WHERE schedule_id = ? AND student_id = ?')
@@ -128,11 +133,12 @@ router.post('/teacher', (req, res) => {
               'SELECT * FROM deduction_logs WHERE schedule_id = ? AND student_id = ?'
             ).get(scheduleId, studentId);
             if (ded) {
+              const back = resolveConsumeClasses(scheduleId);
               db.prepare(`
-                UPDATE member_cards SET remaining_classes = remaining_classes + 1,
-                  used_classes = MAX(0, used_classes - 1), updated_at = ?
+                UPDATE member_cards SET remaining_classes = remaining_classes + ?,
+                  used_classes = MAX(0, used_classes - ?), updated_at = ?
                 WHERE id = ?
-              `).run(now(), ded.card_id);
+              `).run(back, back, now(), ded.card_id);
               db.prepare('DELETE FROM deduction_logs WHERE id = ?').run(ded.id);
             }
           } else if (!oldIsEarn && newIsEarn) {
@@ -222,12 +228,18 @@ router.post('/teacher', (req, res) => {
 });
 
 /**
- * Deduct one class from a count card on first arrival.
+ * Deduct courses.consume_classes (default 1) from a count card on first arrival.
  * Shared with the teacher roll-call path; idempotent per (schedule, student);
  * must be called inside a transaction.
  * Also skips when a leave deduction has already been posted for the same
  * (schedule, student) — see T7: the two ledgers (deduction_logs /
  * leave_deduction_logs) must not deduct the same class twice.
+ *
+ * 课时数此前硬编码 1，配置为「每次消耗 2 课时」的课程永远只扣 1，卡内余额被高估。
+ * 现统一取排期所属课程的 courses.consume_classes（缺省 1，见 utils/deduction）。
+ * 卡内余量不足 N 时**不扣课**（而非部分扣减）：部分扣减会让「签到→改缺席」的回滚
+ * 无法复原到同一个数值（deduction_logs 无 count 列可记录实际扣减量），
+ * 宁可少扣一次也不能让课时余额被回滚路径虚增。
  */
 function applyArrivalDeduction(studentId, scheduleId, t) {
   const dedup = db.prepare('SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
@@ -247,17 +259,22 @@ function applyArrivalDeduction(studentId, scheduleId, t) {
     `).run(t, scheduleId, studentId);
     return;
   }
+  // 每次课消耗的课时数：courses.consume_classes，缺省 1（course_temp 的 0 也归一到 1）
+  const per = resolveConsumeClasses(scheduleId);
   const card = db.prepare(`
     SELECT * FROM member_cards
     WHERE student_id = ? AND status = 'active' AND billing_mode = 'count'
-      AND expires_at > ? AND remaining_classes > 0
+      AND expires_at > ? AND remaining_classes >= ?
     ORDER BY expires_at ASC LIMIT 1
-  `).get(studentId, t);
+  `).get(studentId, t, per);
   if (!card) return;
   db.prepare(`
-    UPDATE member_cards SET remaining_classes = remaining_classes - 1, used_classes = used_classes + 1, updated_at = ?
+    UPDATE member_cards SET remaining_classes = remaining_classes - ?, used_classes = used_classes + ?, updated_at = ?
     WHERE id = ?
-  `).run(t, card.id);
+  `).run(per, per, t, card.id);
+  // 一次扣课一行流水：deduction_logs 上有 UNIQUE(schedule_id, student_id)，
+  // 消耗 N 课时无法写成 N 行。用户看到的资产口径是卡上 remaining_classes / used_classes，
+  // 已按 N 扣减；回滚路径按同一个 resolveConsumeClasses 反向恢复 N。
   db.prepare(`
     INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
     VALUES (?, ?, ?, ?)

@@ -256,17 +256,24 @@ router.get('/by-product', (req, res) => {
     // E16：原实现把区间内每张订单的 items 整行读进 JS、逐条 JSON.parse 再在 JS 里做加权分摊，
     // 订单量上万后是纯 CPU + 内存开销。改为 SQL 侧 json_each 展开、按订单算 gross 后分摊，
     // 只把「已按产品名聚合好的行」带回 JS（与 /admin/charts 的 productSales 同一套路）。
-    // 分摊口径与旧实现逐字对应：
-    //   · gross = Σ(unitPrice×qty)（unitPrice 缺失回退 price，再缺失记 0）
-    //   · gross > 0 时按单项 itemValue/gross 占比分摊 payable_amount / refunded_amount
+    // 分摊口径：
+    //   · gross = Σ 行小计（totalPrice，缺失回退 unitPrice×qty，再缺失回退 price×qty，都没有记 0）
+    //   · gross > 0 时按单项 line_total/gross 占比分摊 payable_amount / refunded_amount
     //   · gross 非正时按订单项数均分
     //   · 非法 JSON / 非数组 items 统一按 '[]' 处理，等价于旧实现的 continue
-    //   · 元素必须自身是 JSON 对象才取字段（json_type = 'object'）。这是刻意保留旧实现的语义：
-    //     json_extract 对「数组元素为 JSON 字符串」的双重编码行会**自动下沉**解析出真实 itemName，
-    //     而旧 JS 实现取 item.itemName 恒为 undefined、把这类行记成「未命名」且标价计 0。
-    //     /admin/charts 的 productSales 已按前者（真实项目名）归类；本接口是财务报表，
-    //     口径变更会让历史月份的 by-product 与既有报表对不上，故此处显式保持旧口径不变。
-    //     （附带修正：旧实现在元素为 null 时会抛 TypeError 导致整个接口 500，此处按「未命名」处理。）
+    //
+    // F7 修正：此前用 `it.type = 'object'` 判定「元素是对象」，对**双重编码**行
+    // （数组元素本身是 JSON 字符串，历史数据真实存在）判否 → name 记「未命名」、
+    // unit_price 记 0 → gross 恒为 0 → 整单落进「按项数均分」分支，
+    // 与真实价格结构完全无关（高价卡与搭售小件各分一半），财务报表因此失真。
+    // 现改为先把元素归一为 ev（CASE WHEN json_valid(it.value) THEN it.value END）：
+    //   · 普通对象元素 → ev 即该对象；
+    //   · 双重编码元素 → ev 是合法 JSON 对象文本，json_extract 自动下沉解析，字段照常取到；
+    //   · 非法元素（如裸字符串 "篮球季卡"）→ ev = NULL，json_type(NULL)/json_extract(NULL,…)
+    //     均返回 NULL 且不抛错，落进「未命名 / line_total = 0」分支（旧实现直接对
+    //     je.value 调 json_type 会抛 malformed JSON 让整个接口 500）。
+    // 注意不能写 `json_valid(x) AND json_type(x)=…` —— SQLite 不保证 AND 求值顺序。
+    // 行小计优先 totalPrice（与 CSV 导出 sales 分支同一字段），使单品收入按真实价格结构分摊。
     // 四舍五入刻意留在 JS：SQL 的 round() 对负数是「远离零」，JS Math.round 是「向上」，
     // 而 net 可能为负，两者会在 .5 处产生分歧。
     const rows = db.prepare(`
@@ -281,32 +288,42 @@ router.get('/by-product', (req, res) => {
       exploded AS (
         SELECT v.id, v.payable_amount, v.refunded_amount,
                json_array_length(v.items_json) AS n_items,
-               CASE WHEN it.type = 'object'
-                    THEN COALESCE(NULLIF(json_extract(it.value, '$.itemName'), ''),
-                                  NULLIF(json_extract(it.value, '$.name'), ''), '未命名')
-                    ELSE '未命名' END AS name,
-               CASE WHEN it.type = 'object'
-                     AND CAST(json_extract(it.value, '$.quantity') AS REAL) > 0
-                    THEN CAST(json_extract(it.value, '$.quantity') AS REAL) ELSE 1 END AS qty,
-               CASE WHEN it.type = 'object'
-                    THEN COALESCE(CAST(json_extract(it.value, '$.unitPrice') AS REAL),
-                                  CAST(json_extract(it.value, '$.price') AS REAL), 0)
-                    ELSE 0 END AS unit_price
+               CASE WHEN json_valid(it.value) THEN it.value END AS ev
         FROM valid v, json_each(v.items_json) AS it
       ),
+      shaped AS (
+        SELECT id, payable_amount, refunded_amount, n_items, ev,
+               CASE WHEN json_type(ev) = 'object' AND CAST(json_extract(ev, '$.quantity') AS REAL) > 0
+                    THEN CAST(json_extract(ev, '$.quantity') AS REAL) ELSE 1 END AS qty,
+               CASE WHEN json_type(ev) = 'object'
+                    THEN COALESCE(NULLIF(json_extract(ev, '$.itemName'), ''),
+                                  NULLIF(json_extract(ev, '$.name'), ''), '未命名')
+                    ELSE '未命名' END AS name
+        FROM exploded
+      ),
+      weighted AS (
+        SELECT id, payable_amount, refunded_amount, n_items, name, qty,
+               CASE WHEN json_type(ev) = 'object'
+                    THEN COALESCE(NULLIF(CAST(json_extract(ev, '$.totalPrice') AS REAL), 0),
+                                  NULLIF(CAST(json_extract(ev, '$.unitPrice') AS REAL), 0) * qty,
+                                  NULLIF(CAST(json_extract(ev, '$.price') AS REAL), 0) * qty,
+                                  0)
+                    ELSE 0 END AS line_total
+        FROM shaped
+      ),
       per_order AS (
-        SELECT id, SUM(unit_price * qty) AS gross FROM exploded GROUP BY id
+        SELECT id, SUM(line_total) AS gross FROM weighted GROUP BY id
       )
-      SELECT e.name AS name,
-             SUM(e.qty) AS count,
-             SUM(CASE WHEN p.gross > 0 THEN e.payable_amount * (e.unit_price * e.qty / p.gross)
-                      WHEN e.n_items > 0 THEN e.payable_amount * 1.0 / e.n_items
+      SELECT w.name AS name,
+             SUM(w.qty) AS count,
+             SUM(CASE WHEN p.gross > 0 THEN w.payable_amount * (w.line_total / p.gross)
+                      WHEN w.n_items > 0 THEN w.payable_amount * 1.0 / w.n_items
                       ELSE 0 END) AS revenue,
-             SUM(CASE WHEN p.gross > 0 THEN e.refunded_amount * (e.unit_price * e.qty / p.gross)
-                      WHEN e.n_items > 0 THEN e.refunded_amount * 1.0 / e.n_items
+             SUM(CASE WHEN p.gross > 0 THEN w.refunded_amount * (w.line_total / p.gross)
+                      WHEN w.n_items > 0 THEN w.refunded_amount * 1.0 / w.n_items
                       ELSE 0 END) AS refunded
-      FROM exploded e JOIN per_order p ON p.id = e.id
-      GROUP BY e.name
+      FROM weighted w JOIN per_order p ON p.id = w.id
+      GROUP BY w.name
     `).all(start, end);
 
     const result = rows

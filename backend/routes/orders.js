@@ -371,12 +371,21 @@ function computeRefundSuggestion(order) {
   let unusedRatio = 1;
   let cardInfo = null;
   if (card) {
-    started = !!(card.activated_at && card.activated_at <= currentTime);
+    // 「是否已开课」的判据修正（此前 beforeStart 规则是死代码）：
+    // 会员卡在**支付瞬间**就写 activated_at（grantOrderBenefits），旧实现用
+    // `activated_at <= now` 判定 started，于是任何已付款的卡单一律 started=true，
+    // 「开课前全额退」这条规则永远走不到；当日购卡当日退会被按 afterStart
+    // （默认扣 20% 手续费）少退。现改为按**实际消耗**判定。
+    const activated = !!(card.activated_at && card.activated_at <= currentTime);
     const total = Number(card.total_classes) || 0;
     const remaining = Number(card.remaining_classes) || 0;
     if (card.billing_mode === 'count') {
+      const used = Number(card.used_classes) || 0;
       unusedRatio = total > 0 ? Math.max(0, Math.min(1, remaining / total)) : 1;
-      cardInfo = { mode: 'count', total, remaining, used: Number(card.used_classes) || 0 };
+      cardInfo = { mode: 'count', total, remaining, used };
+      // 次数卡：只有真正消耗过课时才算已开课。used_classes > 0 为主判据；
+      // remaining < total 作为兜底（历史脏数据可能只改了余量没记 used）。
+      started = used > 0 || (total > 0 && remaining < total);
     } else {
       // 时效制：扣除暂停时长
       let activeMs = currentTime - (card.activated_at || currentTime);
@@ -385,6 +394,11 @@ function computeRefundSuggestion(order) {
       const totalMs = (Number(card.expires_at) || currentTime) - (card.activated_at || currentTime);
       unusedRatio = totalMs > 0 ? Math.max(0, Math.min(1, (totalMs - Math.max(0, activeMs)) / totalMs)) : 1;
       cardInfo = { mode: 'time', activatedAt: card.activated_at, expiresAt: card.expires_at, unusedRatio: Math.round(unusedRatio * 100) };
+      // 时效卡没有「课时」概念，以有效期是否被真正消耗判定。判据与卡片信息里展示的
+      // unusedRatio 同精度（四舍五入到 1%）：仍显示 100% 未使用 → 视为尚未开课，
+      // 使「当日购卡当日退」走到 beforeStart 全额退；只要消耗了 ≥1% 即视为已开课，
+      // 避免中途退卡被误判成开课前而**全额**退（那是更严重的多退）。
+      started = activated && Math.round((1 - unusedRatio) * 100) > 0;
     }
   }
 

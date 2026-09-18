@@ -7,6 +7,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { success, fail, safeFail, generateId, getOpenId, formatDate, now, hashPassword, resolvePerms, hasPerm, getReqUser, attendanceRate, isAdminReq } = require('../utils');
+// 订单明细解析：导出 / 退卡 / 财务报表共用同一实现（此前各自复制，口径已分叉）
+const { parseItems, itemQuantity, itemLineTotal } = require('../utils/items');
 
 // E3：把 date(paid_at/1000,'unixepoch','localtime') 这类表达式谓词改写为 paid_at 的毫秒区间比较。
 // 函数包裹的列用不上索引 → 看板每次调用对 orders 全表扫描 13 次；016 迁移建的 idx_orders_paid_at
@@ -201,17 +203,48 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     // 本月购买项目统计（按订单项名称聚合，取 Top5）
     // 刻意保留 status='paid' 毛额口径：退款是订单级的，无法分摊到具体商品项，
     // 纳入已全额退款订单会高估单品热度（与 CSV 导出 sales 分支同一取舍）。
+    //
+    // 金额口径修正（此前被放大 N 倍）：json_each 展开后每个**明细项**一行，
+    // 旧实现 SUM(o.payable_amount) 于是把整单金额按明细条数重复累加 —— 一单 3 个明细
+    // 就让该单品多算 2 倍整单金额。现改为累加**该明细名的行小计**（totalPrice，
+    // 缺失回退 unitPrice×数量），与 CSV 导出 sales 分支、/charts productSales 同口径。
+    // count 同步改为「件数（Σ quantity）」：旧实现用 COUNT(DISTINCT o.id) 得到笔数，
+    // 与 /export、/charts 的件数口径互相打架，同一单品在三处报表上对不上。
+    //
+    // 元素护栏：items 数组里可能混入非对象元素（如 ["篮球季卡"]），直接 json_extract
+    // 会抛 malformed JSON 让整条查询失败，被下方 try/catch 吞成「本月无数据」——
+    // 统计不是降级而是**整块静默消失**。故先归一为 ev：非法元素 ev=NULL，
+    // json_type(NULL) 返回 NULL 且 json_extract(NULL,...) 返回 NULL，全程不抛错，
+    // 这类行自然被 item_name IS NOT NULL 过滤掉（与旧实现「非对象元素不产生统计」一致）。
+    // 双重编码（数组元素是 JSON 字符串）的 ev 仍是合法 JSON 文本，json_extract 会自动
+    // 下沉解析，故真实项目名照常归类，此处行为不变。
     let itemStats = [];
     try {
       itemStats = db.prepare(`
-        SELECT json_extract(je.value, '$.itemName') AS item_name,
-               COUNT(DISTINCT o.id) AS order_count,
-               SUM(o.payable_amount) AS amount
-        FROM orders o, json_each(o.items) je
-        WHERE o.status = 'paid'
-          AND o.paid_at >= ? AND o.paid_at < ?
-          ${spSql.replace('salesperson', 'o.salesperson')}
-          AND json_extract(je.value, '$.itemName') IS NOT NULL
+        WITH exploded AS (
+          SELECT CASE WHEN json_valid(je.value) THEN je.value END AS ev
+          FROM orders o, json_each(CASE WHEN json_valid(o.items) AND json_type(o.items) = 'array'
+                                         THEN o.items ELSE '[]' END) AS je
+          WHERE o.status = 'paid'
+            AND o.paid_at >= ? AND o.paid_at < ?
+            ${spSql.replace('salesperson', 'o.salesperson')}
+        ),
+        shaped AS (
+          SELECT ev,
+                 CASE WHEN json_type(ev) = 'object' AND CAST(json_extract(ev, '$.quantity') AS REAL) > 0
+                      THEN CAST(json_extract(ev, '$.quantity') AS REAL) ELSE 1 END AS qty
+          FROM exploded
+        )
+        SELECT json_extract(ev, '$.itemName') AS item_name,
+               SUM(qty) AS order_count,
+               SUM(CASE WHEN json_type(ev) = 'object'
+                        THEN COALESCE(NULLIF(CAST(json_extract(ev, '$.totalPrice') AS REAL), 0),
+                                      NULLIF(CAST(json_extract(ev, '$.unitPrice') AS REAL), 0) * qty,
+                                      NULLIF(CAST(json_extract(ev, '$.price') AS REAL), 0) * qty,
+                                      0)
+                        ELSE 0 END) AS amount
+        FROM shaped
+        WHERE json_extract(ev, '$.itemName') IS NOT NULL
         GROUP BY item_name
         ORDER BY order_count DESC, amount DESC
         LIMIT 5
@@ -336,15 +369,29 @@ router.get('/charts', dashboardGuard, (req, res) => {
     // json_extract 对两种形态都能解析，故现在按真实项目名归类。
     // E15：此前对「全部已付订单」做 json_each 展开，订单量上万后每次调用都要解析整表；
     // 产品热度本就是近期口径，收窄到时间窗（默认近 90 天，可用 startDate/endDate 覆盖），返回形状不变。
+    //
+    // 元素级护栏（F2）：数组本身合法但元素非法时（如 items=["篮球季卡"]），
+    // 旧实现对 je.value 直接 json_extract 会抛 malformed JSON，整条查询失败 →
+    // /charts 整体 500，图表页全挂。故先把元素归一为 ev（非法元素 ev=NULL）：
+    // json_type(NULL) / json_extract(NULL,path) 均返回 NULL 且不抛错，非法元素自然落入
+    // 既有的「其他」桶（件数仍计 1）。注意不能写 `json_valid(x) AND json_type(x)=...`
+    // —— SQLite 不保证 AND 的求值顺序，json_type 仍可能作用在非法文本上而抛错。
+    // 双重编码元素的 ev 是合法 JSON 对象文本，json_type(ev)='object' 成立，
+    // 仍按真实 itemName 归类，合法数据输出逐字不变。
     const psEnd = req.query.endDate || formatDate(Date.now());
     const psStart = req.query.startDate || formatDate(Date.now() - 89 * 86400000);
     const productSales = db.prepare(`
-      SELECT COALESCE(NULLIF(json_extract(it.value, '$.itemName'), ''), '其他') AS name,
-             SUM(CASE WHEN json_extract(it.value, '$.quantity') > 0
-                      THEN json_extract(it.value, '$.quantity') ELSE 1 END) AS count
-      FROM orders o, json_each(CASE WHEN json_valid(o.items) AND json_type(o.items) = 'array'
-                                    THEN o.items ELSE '[]' END) AS it
-      WHERE o.status = 'paid' AND o.paid_at >= ? AND o.paid_at < ?
+      WITH exploded AS (
+        SELECT CASE WHEN json_valid(it.value) THEN it.value END AS ev
+        FROM orders o, json_each(CASE WHEN json_valid(o.items) AND json_type(o.items) = 'array'
+                                      THEN o.items ELSE '[]' END) AS it
+        WHERE o.status = 'paid' AND o.paid_at >= ? AND o.paid_at < ?
+      )
+      SELECT COALESCE(NULLIF(CASE WHEN json_type(ev) = 'object'
+                                  THEN json_extract(ev, '$.itemName') END, ''), '其他') AS name,
+             SUM(CASE WHEN json_type(ev) = 'object' AND CAST(json_extract(ev, '$.quantity') AS REAL) > 0
+                      THEN CAST(json_extract(ev, '$.quantity') AS REAL) ELSE 1 END) AS count
+      FROM exploded
       GROUP BY name
       ORDER BY count DESC
     `).all(dayStartMs(psStart), dayEndMs(psEnd)).map((r) => ({ name: r.name, count: Number(r.count) }));
@@ -483,28 +530,17 @@ router.get('/export', adminOnly, (req, res) => {
         `).all(fromMs, toMs);
         const revenue = db.prepare(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count FROM orders ${where}`).get(fromMs, toMs);
         const itemMap = {};
-        // 解析 items：历史数据存在「数组元素为 JSON 字符串」的双重编码，且元素未必是对象。
+        // items 解析统一走 utils/items（与退卡退款、财务报表同一实现，口径不再分叉）。
+        // 历史数据存在「数组元素为 JSON 字符串」的双重编码，且元素未必是对象。
         // 逐项兜底，避免整批计入「未命名产品」或金额恒为 0。
-        // 此前用不存在的 i.price 字段，导致单品金额恒为 0；现改用实收字段 totalPrice，
+        // 此前用不存在的 i.price 字段，导致单品金额恒为 0；现用行小计 totalPrice，
         // 缺失时回退 unitPrice × 数量（面值），与看板商品统计口径一致。
-        const parseItems = (raw) => {
-          let arr;
-          try { arr = JSON.parse(raw || '[]'); } catch { return []; }
-          if (!Array.isArray(arr)) return [];
-          return arr
-            .map((x) => {
-              if (typeof x === 'string') { try { return JSON.parse(x); } catch { return null; } }
-              return (x && typeof x === 'object') ? x : null;
-            })
-            .filter(Boolean);
-        };
         for (const o of db.prepare(`SELECT items FROM orders ${wherePaid}`).all(fromMs, toMs)) {
           for (const i of parseItems(o.items)) {
             const name = i.itemName || '未命名产品';
             itemMap[name] = itemMap[name] || { count: 0, amount: 0 };
-            const qty = (typeof i.quantity === 'number' && i.quantity > 0) ? i.quantity : 1;
-            itemMap[name].count += qty;
-            itemMap[name].amount += Number(i.totalPrice || (i.unitPrice * qty) || 0);
+            itemMap[name].count += itemQuantity(i);
+            itemMap[name].amount += itemLineTotal(i);
           }
         }
         const itemStats = Object.entries(itemMap).map(([itemName, v]) => ({ itemName, ...v })).sort((a, b) => b.amount - a.amount);
