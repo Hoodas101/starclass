@@ -806,6 +806,16 @@ router.post('/:id/qrcode', requireAuth, (req, res) => {
     const qrContent = `CHECKIN:${id}:${nonce}:${exp}:${qrHash}`;
     db.prepare('UPDATE students SET qr_code = ?, qr_exp = ?, updated_at = ? WHERE id = ?').run(qrContent, exp, now(), id);
 
+    // 生成签到码即签发一次性签到凭证（60s 有效），属凭证签发动作，需留痕；凭证内容本身不写入审计
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'student',
+      entityId: id,
+      action: 'generate_qr',
+      actorId: actor.id,
+      actorRole: actor.role,
+    });
+
     res.json(success({
       studentId: student.id,
       qrCode: qrContent,
