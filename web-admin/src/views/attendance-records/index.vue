@@ -61,6 +61,8 @@
       </div>
     </div>
 
+    <ListErrorState v-if="!loading && error" :error="error" @retry="loadData" />
+    <template v-else>
     <!-- 汇总卡片 -->
     <div class="stat-cards">
       <div class="stat-card">
@@ -106,7 +108,7 @@
             <span v-else>-</span>
           </template>
         </el-table-column>
-        <el-table-column label="课时" width="90">
+        <el-table-column :label="t('session')" width="90">
           <template #default="{ row }">
             <span v-if="row.durationMin">{{ (row.durationMin / 60).toFixed(1).replace(/\.0$/, '') }}课时</span>
             <span v-else>-</span>
@@ -130,6 +132,7 @@
         />
       </div>
     </div>
+    </template>
   </div>
 </template>
 
@@ -233,8 +236,8 @@ async function loadData() {
     trend.value = sumRes.trend || []
     renderTrend()
   } catch (e) {
-    ElMessage.error('加载上课记录失败')
-    console.error(e)
+    // 列表加载失败：写 error 状态由 ListErrorState 呈现并提供重试，不再重复弹 toast（拦截器已提示业务/网络错误）
+    error.value = e?.message || '加载上课记录失败'
   } finally {
     loading.value = false
   }

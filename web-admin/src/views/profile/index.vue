@@ -72,10 +72,10 @@ import { useUserStore } from '@/store/user'
 import PageHeader from '@/components/PageHeader.vue'
 
 const userStore = useUserStore()
+const settingsStore = useSettingsStore()
 
-// 与后端 role 取值一一对应；未知角色直接显示原值，不臆造称呼
-const ROLE_LABELS = { admin: '管理员', coach: '教练', sales: '销售' }
-const roleLabel = computed(() => ROLE_LABELS[userStore.userRole] || userStore.userRole || '—')
+// 角色徽标称呼跟随机构术语方案（教培版显示「老师」、健身版显示「教练」等），与全站统一；未知角色回退原值
+const roleLabel = computed(() => settingsStore.roleLabel(userStore.userRole) || userStore.userRole || '—')
 const phone = computed(() => userStore.userInfo.phone || '')
 
 const passwordFormRef = ref(null)
