@@ -142,9 +142,11 @@ app.use((req, res, next) => {
     const token = authHeader.slice(7);
     const payload = verifyToken(token);
     if (payload && payload.openid) {
-      // token_version revocation: bump on disable / password change / role change
-      // to invalidate old tokens immediately. A missing user row is treated the
-      // same as a revoked token. DB read errors fail open (never mass-log everyone out).
+      // token_version 吊销：在禁用/改密/改角色时 bump，使旧 token 立即失效。
+      // 三种情形均 fail-closed：用户行缺失 / 账号停用 / 版本不符 → 401。
+      // 唯独「DB 读取异常」时 fail-open：宁可放过单请求也不因一次 DB 抖动全员登出
+      // （单机部署可用性优先）。代价是异常窗口内吊销静默失效，但 JWT 仍有效且角色未变，
+      // 风险可控；生产环境应保证 DB 可用性并监控下方告警。
       try {
         const u = db.prepare('SELECT token_version, status FROM users WHERE openid = ?').get(payload.openid);
         if (!u) {
@@ -158,7 +160,8 @@ app.use((req, res, next) => {
           return res.status(401).json({ code: 401, data: null, message: '登录状态已失效，请重新登录' });
         }
       } catch (e) {
-        console.error('[auth token_version]', e.message);
+        // 吊销校验因 DB 异常未能执行（fail-open）：记录告警，便于监控异常窗口
+        console.warn('[auth token_version] 吊销校验因 DB 异常跳过（fail-open）:', e.message);
       }
       req.openid = payload.openid;
       req.userRole = payload.role;
@@ -272,6 +275,15 @@ const server = app.listen(PORT, () => {
   ║  📋 API 文档: http://localhost:${PORT}/api/health ║
   ╚═══════════════════════════════════════════════╝
   `);
+  // 安全基线检查：关键安全配置仍为代码内默认值时给出明确告警（测试环境跳过）
+  if (process.env.NODE_ENV !== 'test') {
+    if (!process.env.STAFF_DEFAULT_PASSWORD) {
+      console.warn('[安全] 未设置 STAFF_DEFAULT_PASSWORD：员工初始/重置密码将使用默认 123456。生产环境请尽快在 .env 中设置强随机值（如 openssl rand -hex 16）。');
+    }
+    if (!process.env.JWT_SECRET) {
+      console.warn('[安全] 未显式设置 JWT_SECRET：已使用自动生成的随机密钥（backend/db/.jwt-secret）。多实例部署请显式设置共享值，否则各实例 token 互不兼容。');
+    }
+  }
 });
 
 // 端口占用等 server 级错误兜底：避免 EADDRINUSE 等直接使进程崩溃
