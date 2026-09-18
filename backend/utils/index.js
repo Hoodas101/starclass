@@ -14,7 +14,15 @@ const jwt = require('jsonwebtoken');
 // 伪造管理员 token）。未显式配置 JWT_SECRET 时：首次启动生成密码学随机密钥
 // 并持久化到 data.db 同目录（随数据卷备份、跨重启稳定），此后一直复用。
 // 多实例横向扩展部署仍应显式设置 JWT_SECRET 环境变量，让各实例共享同一密钥。
-const SECRET_FILE = path.join(__dirname, '../db/.jwt-secret');
+//
+// E11 修订：密钥持久化位置必须**跟随数据库位置（DB_PATH）**。原先写死在
+// backend/db/.jwt-secret，而 DB_PATH 可指向 /data/data.db 等挂载卷；一旦容器/数据卷
+// 迁移，密钥留在旧目录、新库无密钥 → 全员登录态丢失。现改为与 db/index.js 的
+// DB_PATH 解析保持一致：默认 backend/db/.jwt-secret（无变化），设置 DB_PATH 时落到其同目录。
+const SECRET_DB_PATH = process.env.DB_PATH
+  ? path.resolve(process.env.DB_PATH)
+  : path.join(__dirname, '../db/data.db');
+const SECRET_FILE = path.join(path.dirname(SECRET_DB_PATH), '.jwt-secret');
 function resolveJwtSecret() {
   const env = process.env.JWT_SECRET;
   if (env) return env;
@@ -25,7 +33,7 @@ function resolveJwtSecret() {
   const fresh = crypto.randomBytes(32).toString('hex');
   try {
     fs.writeFileSync(SECRET_FILE, fresh, { mode: 0o600 });
-    console.log('[安全] 未设置 JWT_SECRET，已生成随机密钥并持久化到 backend/db/.jwt-secret（请随数据库一起备份）');
+    console.log(`[安全] 未设置 JWT_SECRET，已生成随机密钥并持久化到 ${SECRET_FILE}（请随数据库一起备份）`);
   } catch (e) {
     // 文件系统只读等异常场景：退化为进程内存密钥（重启后所有登录态失效，但不伪造风险）
     console.warn('[安全] 无法持久化 JWT_SECRET（文件系统限制），本次使用内存密钥，重启后所有登录态将失效');
@@ -202,9 +210,12 @@ function isCoachReq(req) {
 }
 
 // === 员工权限模型：管理者 / 销售 / 教练 可自定义权限范围 ===
+// 默认权限必须与前端「按角色可见」的标签页保持一致（web-admin 的 hubs/*.vue 的 roles 字段），
+// 否则会出现「标签页按角色可见、接口却因缺少权限键而 403」的自相矛盾。
+// coachstats（教练课时）此前遗漏：课时标签页对 coach 角色可见，但默认权限里没有该键。
 const DEFAULT_PERMS = {
   admin: ['*'],
-  coach: ['students', 'schedule', 'checkin', 'leave'],
+  coach: ['students', 'schedule', 'checkin', 'leave', 'coachstats'],
   sales: ['dashboard', 'sales', 'students', 'growth'],
 };
 
@@ -371,6 +382,26 @@ function getActor(req) {
 // 审计写入工具（轻量、失败不影响主流程）
 const { recordAudit } = require('./audit');
 
+/**
+ * 到场率 —— 全站唯一实现（看板 / 趋势图 / 课时汇总 / 成员统计共用）。
+ *
+ * 口径定义：到场率 = (present + late) / (present + late + absent) × 100
+ *   - late（迟到）计入「已到场」：人到场了，不应拉低到场率
+ *   - leave（已批准的请假）不进分母：获批缺勤不属于「应到未到」
+ *
+ * 背景：此前该指标存在 4 份互不相同的实现（看板只算 present 作分子、
+ * 趋势图把 leave 算进分母、课时汇总把 leave 算进分母、成员统计用 present/total），
+ * 同一机构同一天会看到多个到场率。如需调整口径，改这一处即可全站生效。
+ *
+ * @param {{present?:number, late?:number, absent?:number}} counts 出勤状态计数
+ * @returns {number} 0-100 的整数百分比；无有效样本时返回 0
+ */
+function attendanceRate({ present = 0, late = 0, absent = 0 } = {}) {
+  const attended = (present || 0) + (late || 0);
+  const expected = attended + (absent || 0);
+  return expected > 0 ? Math.round((attended / expected) * 100) : 0;
+}
+
 module.exports = {
   JWT_SECRET,
   generateId,
@@ -398,4 +429,5 @@ module.exports = {
   calcCardExpiresAt,
   getWeekDayDate,
   parsePagination,
+  attendanceRate,
 };

@@ -10,16 +10,15 @@ const crypto = require('crypto');
 
 const { verifyToken } = require('./utils');
 const { generateClassReminders, generateLowClassReminders, generateRenewalReminders } = require('./utils/reminders');
+const { expireOverdueCards } = require('./utils/card-lifecycle');
 const { startScheduledBackup } = require('./utils/backup');
 const queue = require('./utils/queue');
 const worker = require('./utils/worker');
 const { batchSendFromNotifications, isSubscriptionEnabled } = require('./utils/subscribe-msg');
 const db = require('./db');
 
-// 轻量迁移：为已有库补充身体档案字段（已存在时静默忽略）
-try { db.prepare('ALTER TABLE students ADD COLUMN height REAL DEFAULT 0').run(); } catch (e) { /* 已存在 */ }
-try { db.prepare('ALTER TABLE students ADD COLUMN weight REAL DEFAULT 0').run(); } catch (e) { /* 已存在 */ }
-try { db.prepare('ALTER TABLE students ADD COLUMN bmi REAL DEFAULT 0').run(); } catch (e) { /* 已存在 */ }
+// students.height / weight / bmi 补列已收编至 migrations/014
+// （此前 3 处 try{ALTER}catch 在 require('./db') 之后执行，与迁移账本重复）
 
 // 路由
 const authRoutes = require('./routes/auth');
@@ -51,9 +50,21 @@ const PORT = process.env.PORT || 3001;
 // Reverse-proxy support: behind nginx/Caddy, req.ip is always 127.0.0.1 which
 // breaks per-IP rate limiting. TRUST_PROXY sets the number of trusted hops
 // (usually 1); unset means no proxy headers are trusted.
+//
+// 仅接受正整数跳数。0 / 负数 / 非数字（`TRUST_PROXY=0` 想显式关闭、或写成 `yes`）
+// 一律按「不信任任何代理头」处理 —— 与未设置同义，并打印告警。
+// 刻意**不**回退到 `true`（信任全部代理）：那会让 X-Forwarded-For 可被任意伪造，
+// 攻击者每请求换一个伪造 IP 即可绕过全局限流，同时污染审计日志的 IP 维度。
 if (process.env.TRUST_PROXY) {
-  const hops = parseInt(process.env.TRUST_PROXY);
-  app.set('trust proxy', Number.isInteger(hops) && hops > 0 ? hops : true);
+  const hops = parseInt(process.env.TRUST_PROXY, 10);
+  if (Number.isInteger(hops) && hops > 0) {
+    app.set('trust proxy', hops);
+  } else {
+    console.warn(
+      `[trust proxy] TRUST_PROXY="${process.env.TRUST_PROXY}" 不是正整数跳数，` +
+      '已按「不信任代理头」处理（req.ip 将取直连地址）。若确实位于反向代理之后，请设为 1。'
+    );
+  }
 }
 
 // CORS（限制来源）— 必须放在限流与认证之前，确保预检请求带正确响应头
@@ -109,12 +120,18 @@ app.use(bodyParser.urlencoded({ extended: true }));
 // === JWT 认证中间件（排除公开路由）===
 const PUBLIC_PATHS = ['/api/auth/login', '/api/auth/wx-login', '/api/auth/phone-login', '/api/health', '/api/trial/apply', '/api/wxpay/notify', '/api/terms'];
 app.use((req, res, next) => {
+  // Express 路由默认大小写不敏感：'/API/schedules/pay' 仍会解析到
+  // '/api/schedules/pay' 处理器。鉴权守卫必须用同样的口径，否则大写路径会
+  // 跳过鉴权却仍命中受保护路由（P0-1：URL 大小写绕过鉴权）。
+  const p = req.path.toLowerCase();
   // 仅保护 API 路由，静态资源与 SPA 页面直接放行
-  if (!req.path.startsWith('/api')) return next();
-  if (PUBLIC_PATHS.some(p => req.path.startsWith(p))) return next();
+  if (!p.startsWith('/api')) return next();
+  // 精确匹配公开路径：用 startsWith 会令 "/api/auth/loginX" 等非预期路径也公开，
+  // 一旦未来新增以公开前缀开头的私密路由即被误暴露。下列均为已注册的精确端点。
+  if (PUBLIC_PATHS.includes(p)) return next();
   // GET /api/settings is public: org branding (site name / logo / terms) is
   // needed by the login page. Writes still require auth.
-  if (req.method === 'GET' && req.path === '/api/settings') return next();
+  if (req.method === 'GET' && p === '/api/settings') return next();
 
   // Verify JWT — the only trusted identity source. Client-supplied
   // x-openid / ?openid= / body.openid are never trusted.
@@ -173,7 +190,8 @@ app.use(express.static(path.join(__dirname, '../web-admin/dist')));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // SPA 路由回退：管理端 history 模式刷新 / 直达子页面时不 404
-app.get(/^\/(?!api\/|assets\/|favicon\.ico).*/, (req, res) => {
+// 加 i 标志，与上面鉴权守卫及 Express 默认的大小写不敏感路由保持一致。
+app.get(/^\/(?!api\/|assets\/|favicon\.ico).*/i, (req, res) => {
   res.sendFile(path.join(__dirname, '../web-admin/dist/index.html'));
 });
 
@@ -223,7 +241,22 @@ app.use('/api', (req, res) => {
 });
 
 // 统一错误处理（不暴露内部细节）
+// 框架层 4xx 必须原样透出：body-parser 的非法 JSON（400）、超限（413）、
+// 不支持的编码（415）都是**客户端**错误，此前一律被压成 500，导致
+//   (a) 客户端格式错误被计入服务端故障，掩盖真实故障；
+//   (b) 前端只显示「服务器开小差了」，排查方向被误导。
+// 本应用路由从不调用 next(err)，到达此处的错误均来自框架中间件，故 err.status 可信。
+const CLIENT_ERR_MSG = {
+  400: '请求格式有误，请检查后重试',
+  413: '请求内容过大，请缩减后重试',
+  415: '不支持的请求编码格式',
+};
 app.use((err, req, res, next) => {
+  const status = Number(err.status || err.statusCode) || 500;
+  if (status >= 400 && status < 500) {
+    console.warn('[Client Error]', status, err.type || err.message);
+    return res.status(status).json({ code: status, data: null, message: CLIENT_ERR_MSG[status] || '请求有误，请检查后重试' });
+  }
   console.error('[Server Error]', err);
   res.status(500).json({ code: 500, data: null, message: '服务器开小差了，请稍后重试' });
 });
@@ -334,6 +367,26 @@ function scheduleReminder(type, initialDelayMs, intervalMs) {
   setTimeout(fire, initialDelayMs);
   setInterval(fire, intervalMs);
 }
+
+// ============================================
+// 会员卡过期状态流转
+// status 的语义是「该卡当前是否有效」，但此前只有 leave.js 一处会写 'expired'，
+// 已过期的卡长期停留在 'active'，使只按 status 过滤的查询（学员会员状态、
+// 低课时提醒、取消订单回收卡、线索续费建议）把过期卡当作有效卡。
+// 启动时先跑一次，保证首次提醒看到的 status 即为真值；此后每日一次。
+// 该流转是幂等 UPDATE（第二次 WHERE 已无匹配行），不经任务队列也不会重复处理，
+// 多实例并存同样安全。
+// ============================================
+function runCardExpirySweep() {
+  try {
+    const { expired } = expireOverdueCards(Date.now());
+    if (expired > 0) console.log(`[CardExpiry] ${expired} 张会员卡已置为过期`);
+  } catch (err) {
+    console.error('[CardExpiry] 过期流转失败:', err.message);
+  }
+}
+runCardExpirySweep();
+setInterval(runCardExpirySweep, 24 * 3600 * 1000);
 
 scheduleReminder('renewal_reminder', 30 * 1000, 24 * 3600 * 1000);
 scheduleReminder('low_class_reminder', 45 * 1000, 24 * 3600 * 1000);

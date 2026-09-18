@@ -63,10 +63,12 @@ function runMigrations(db) {
       console.log(`[Migrations] 已执行: ${file}`);
       applied++;
     } catch (err) {
-      // 如果是 "duplicate column" 错误，说明列已存在（从旧版升级），标记为已执行
-      if (err.message && err.message.includes('duplicate column name')) {
-        console.log(`[Migrations] 跳过（列已存在）: ${file}`);
-        insertMigration.run(file, Date.now());
+      // 仅“列/索引已存在”属于可安全视为“已应用”的幂等场景（迁移使用 IF NOT EXISTS 时本不应触发）。
+      // 其余任何异常一律 fail-loud —— 绝不静默记账，否则会出现「DDL 已回滚、迁移却标记为已完成」，
+      // 导致下次启动跳过、真实 schema 缺失。记账动作包在独立事务里，保证原子落库。
+      if (err.message && /duplicate (column|index) name/i.test(err.message)) {
+        console.warn(`[Migrations] ${file}：目标列/索引已存在，视为已应用并记账`);
+        db.transaction(() => { insertMigration.run(file, Date.now()); })();
       } else {
         console.error(`[Migrations] 失败: ${file}`, err.message);
         throw err;
