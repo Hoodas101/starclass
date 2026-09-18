@@ -13,7 +13,18 @@ const failures = [];
 let bearerToken = ''; // 登录后写入，用于生产环境 Bearer 认证
 const tokensByOpenid = {}; // openid → token，按用户身份精确认证
 
-async function api(name, method, path, body, openid, allow = []) {
+/**
+ * 发起一次请求并记录断言结果。
+ *
+ * @param {string[]} allow      预期成功、但消息可能非 `code:0` 时的可接受消息
+ *                              （如幂等重复提交「已报名该活动」）
+ * @param {boolean} expectFail  该用例预期**被拒绝**（越权/校验类）。
+ *                              置 true 时只有 `code !== 0` 才算通过；若同时给出
+ *                              `allow`，则拒绝消息还必须命中该列表。
+ *                              旧实现在两种语义下都用 `code===0 || allow.includes(message)`，
+ *                              于是越权用例在**真的越权成功**时反而记为 PASS —— 假绿。
+ */
+async function api(name, method, path, body, openid, allow = [], expectFail = false) {
   const headers = { 'Content-Type': 'application/json' };
   const token = openid ? (tokensByOpenid[openid] || bearerToken) : bearerToken;
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -25,12 +36,16 @@ async function api(name, method, path, body, openid, allow = []) {
       body: body ? JSON.stringify(body) : undefined,
     });
     const json = await res.json();
-    const ok = json.code === 0 || allow.includes(json.message);
+    const ok = expectFail
+      ? json.code !== 0 && (allow.length === 0 || allow.includes(json.message))
+      : (json.code === 0 || allow.includes(json.message));
     if (ok) {
       pass++;
     } else {
       fail++;
-      failures.push(`${name}: ${json.message || res.status}`);
+      failures.push(expectFail
+        ? `${name}: 预期被拒绝但请求成功（code=${json.code}）`
+        : `${name}: ${json.message || res.status}`);
     }
     return json;
   } catch (err) {
@@ -42,8 +57,9 @@ async function api(name, method, path, body, openid, allow = []) {
 
 // 登录重试（限流时短暂等待后重试）
 async function login(phone, role) {
+  let res = { code: 1 }; // 循环外声明：三次全失败时下方 return res 曾因 const 块作用域抛 ReferenceError
   for (let i = 0; i < 3; i++) {
-    const res = await api(`${role}登录`, 'POST', '/auth/login', {
+    res = await api(`${role}登录`, 'POST', '/auth/login', {
       phone,
       role,
       password: role === 'parent' ? '' : '123456'
@@ -53,7 +69,7 @@ async function login(phone, role) {
       if (res.data.openid) tokensByOpenid[res.data.openid] = res.data.token;
     }
     if (res.code === 0 || res.data?.openid) return res;
-    await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+    if (i < 2) await new Promise((r) => setTimeout(r, 1500 * (i + 1))); // 末次失败无需再等
   }
   return res;
 }
@@ -126,7 +142,10 @@ if (sid) {
 }
 
 console.log('== 权限隔离 ==');
-await api('家长访问管理接口(应拒绝)', 'GET', '/admin/dashboard', null, pOpenid, ['仅管理员可访问管理接口']);
+// expectFail=true：本例断言的是「家长访问管理接口必须被拒绝」。
+// 传入的 allow 列表此时语义为「可接受的拒绝消息」，必须精确命中，
+// 避免「换了别的错误也算过」。
+await api('家长访问管理接口(应拒绝)', 'GET', '/admin/dashboard', null, pOpenid, ['仅管理员可访问管理接口'], true);
 
 console.log('== 家长沟通与反馈 ==');
 const parents = await api('获取家长列表', 'GET', '/admin/parents', null, aOpenid);

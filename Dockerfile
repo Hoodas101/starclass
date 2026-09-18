@@ -19,6 +19,9 @@ COPY web-admin/package.json web-admin/package-lock.json ./web-admin/
 RUN cd web-admin && npm ci
 COPY backend ./backend
 COPY web-admin ./web-admin
+# 纵深防御：即使 .dockerignore 被绕过，也确保本地密钥/数据库不会进入镜像层。
+# 容器首次启动会自行生成新的 JWT 密钥。
+RUN rm -f backend/db/.jwt-secret backend/db/data.db backend/db/data.db-wal backend/db/data.db-shm
 RUN cd web-admin && npm run build
 
 # ---------- Runtime ----------
@@ -28,6 +31,13 @@ WORKDIR /app/backend
 ENV NODE_ENV=production
 ENV DB_PATH=/data/data.db
 ENV PORT=3001
+# 时区：SQL 中的 'localtime' 修饰符依赖系统时区库解析 TZ。
+# Debian slim 默认不含 tzdata，若不安装，TZ 会解析失败并静默回落到 UTC，
+# 导致「今日收入 / 今日课表」按 UTC 日切分（东八区 00:00–08:00 的数据算到前一天）。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+ENV TZ=Asia/Shanghai
 
 # 命名卷以镜像内属主初始化，先建目录（data/uploads/backups）再降权；
 # /app/backend 本身也要 chown，否则 node 用户启动时无法在运行时创建子目录

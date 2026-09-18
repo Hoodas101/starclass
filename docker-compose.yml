@@ -19,6 +19,8 @@ services:
       # 容器内强制生产模式；未设 JWT_SECRET 时自动生成随机密钥存入数据卷
       # （多实例部署请显式设置共享的 JWT_SECRET）
       NODE_ENV: production
+      # 时区：决定「今日/本月」的日切分口径，须与机构所在时区一致（镜像内已装 tzdata）
+      TZ: "${TZ:-Asia/Shanghai}"
       # SQLite 放在命名卷上，容器重建不丢数据
       DB_PATH: /data/data.db
     env_file:

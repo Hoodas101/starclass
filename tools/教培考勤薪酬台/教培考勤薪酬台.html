@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>教培考勤薪酬台</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --card:#ffffff; --ink:#1f2329; --sub:#8a9099;
+    --line:#e8eaed; --brand:#2f6bff; --brand2:#eaf1ff;
+    --ok:#16a34a; --warn:#d97706; --red:#dc2626; --soft:#f0f4ff;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--ink);font-size:15px;line-height:1.5;}
+  header{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid var(--line);}
+  .bar{display:flex;align-items:center;gap:10px;padding:12px 16px;}
+  .bar h1{font-size:17px;margin:0;font-weight:700;}
+  .bar .tip{font-size:12px;color:var(--sub);margin-left:auto;}
+  nav{display:flex;overflow-x:auto;padding:0 8px 8px;border-bottom:1px solid var(--line);background:#fff;}
+  nav button{flex:0 0 auto;border:none;background:transparent;padding:10px 14px;font-size:14px;
+             color:var(--sub);border-bottom:2px solid transparent;white-space:nowrap;cursor:pointer;}
+  nav button.active{color:var(--brand);border-bottom-color:var(--brand);font-weight:600;}
+  main{padding:14px;max-width:760px;margin:0 auto;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px;}
+  .card h2{font-size:15px;margin:0 0 12px;}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;}
+  .field{flex:1 1 140px;min-width:120px;margin-bottom:10px;}
+  label{display:block;font-size:12px;color:var(--sub);margin-bottom:4px;}
+  input,select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;
+               font-size:15px;background:#fff;color:var(--ink);}
+  input:focus,select:focus{outline:none;border-color:var(--brand);background:var(--soft);}
+  button.btn{background:var(--brand);color:#fff;border:none;border-radius:10px;padding:10px 16px;
+             font-size:15px;font-weight:600;cursor:pointer;}
+  button.btn.ghost{background:#fff;color:var(--brand);border:1px solid var(--brand);}
+  button.btn.sm{padding:7px 12px;font-size:13px;}
+  button.btn.danger{background:#fff;color:var(--red);border:1px solid var(--red);}
+  .pill{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:var(--brand2);color:var(--brand);}
+  .pill.jz{background:#fff1e6;color:#c2620a;} .pill.qz{background:#e7f6ee;color:#15803d;}
+  .pill.yd{background:#f3e8ff;color:#7e22ce;}
+  .list{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;}
+  .chip{display:flex;align-items:center;gap:6px;background:var(--soft);border:1px solid var(--line);
+        border-radius:999px;padding:6px 10px;font-size:13px;}
+  .chip .x{cursor:pointer;color:var(--sub);font-weight:700;}
+  .stu-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:8px;}
+  .stu{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:10px;
+       padding:10px 12px;cursor:pointer;user-select:none;background:#fff;}
+  .stu.on{background:var(--brand2);border-color:var(--brand);color:var(--brand);font-weight:600;}
+  .stu .dot{width:18px;height:18px;border-radius:6px;border:2px solid var(--line);flex:0 0 auto;}
+  .stu.on .dot{background:var(--brand);border-color:var(--brand);}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px;}
+  th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);}
+  th{color:var(--sub);font-weight:600;font-size:12px;}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;}
+  .muted{color:var(--sub);font-size:12px;}
+  .stat{display:flex;gap:10px;flex-wrap:wrap;}
+  .stat .b{flex:1 1 100px;background:var(--soft);border-radius:12px;padding:12px;}
+  .stat .b .v{font-size:24px;font-weight:700;color:var(--brand);}
+  .stat .b .k{font-size:12px;color:var(--sub);}
+  .seg{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;}
+  .seg button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:6px 12px;font-size:13px;color:var(--sub);cursor:pointer;}
+  .seg button.on{background:var(--brand);color:#fff;border-color:var(--brand);}
+  .save-line{display:flex;gap:10px;align-items:center;margin-top:12px;}
+  .toast{position:fixed;left:50%;bottom:30px;transform:translateX(-50%);background:#1f2329;color:#fff;
+         padding:10px 18px;border-radius:999px;font-size:14px;opacity:0;transition:.25s;z-index:50;pointer-events:none;}
+  .toast.show{opacity:1;}
+  .empty{color:var(--sub);text-align:center;padding:20px 0;font-size:13px;}
+  .hr{height:1px;background:var(--line);margin:12px 0;}
+  details{margin-top:8px;} summary{cursor:pointer;color:var(--brand);font-size:13px;}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar"><h1>教培考勤薪酬台</h1><span class="tip">数据存本机 · 不上传</span></div>
+  <nav id="nav">
+    <button data-tab="attend" class="active">考勤录入</button>
+    <button data-tab="stats">统计看板</button>
+    <button data-tab="salary">薪酬核算</button>
+    <button data-tab="setup">基础设置</button>
+    <button data-tab="data">数据</button>
+  </nav>
+</header>
+<main>
+
+  <!-- 考勤录入 -->
+  <section id="tab-attend">
+    <div class="card">
+      <h2>本节课信息</h2>
+      <div class="row">
+        <div class="field"><label>日期</label><input type="date" id="a-date"></div>
+        <div class="field"><label>时间段</label><input type="text" id="a-time" placeholder="如 上午/10:00"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>班级 / 课次</label>
+          <select id="a-class"></select></div>
+        <div class="field"><label>授课教练</label>
+          <select id="a-coach"></select></div>
+      </div>
+      <div class="field" id="a-price-wrap" style="display:none;">
+        <label>本节课售价（一对一填）</label><input type="number" id="a-price" placeholder="如 200"></div>
+      <div class="muted" id="a-coach-type"></div>
+    </div>
+
+    <div class="card">
+      <h2>勾选出勤学员 <span class="pill" id="a-count">0 人</span></h2>
+      <input type="text" id="a-search" placeholder="搜索学员姓名…" style="margin-bottom:8px;">
+      <div class="stu-grid" id="a-students"></div>
+      <div class="save-line">
+        <button class="btn" id="a-save">保存本节课考勤</button>
+        <button class="btn ghost sm" id="a-clear">清空勾选</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 统计看板 -->
+  <section id="tab-stats" style="display:none;">
+    <div class="card">
+      <h2>概览（按月份）</h2>
+      <div class="seg" id="stats-month"></div>
+      <div class="stat">
+        <div class="b"><div class="v" id="s-month-class">0</div><div class="k">当月课次</div></div>
+        <div class="b"><div class="v" id="s-month-renci">0</div><div class="k">当月出勤人次</div></div>
+        <div class="b"><div class="v" id="s-month-stu">0</div><div class="k">当月上课学员数</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>每节课出勤</h2>
+      <div class="seg" id="stats-sess-month"></div>
+      <div id="stats-sess"></div>
+    </div>
+    <div class="card">
+      <h2>学员上课统计</h2>
+      <div class="seg" id="stats-stu-month"></div>
+      <div id="stats-stu"></div>
+    </div>
+    <div class="card">
+      <h2>教练授课统计</h2>
+      <div class="seg" id="stats-coach-month"></div>
+      <div id="stats-coach"></div>
+    </div>
+  </section>
+
+  <!-- 薪酬核算 -->
+  <section id="tab-salary" style="display:none;">
+    <div class="card">
+      <h2>教练薪酬（按月份）</h2>
+      <div class="seg" id="salary-month"></div>
+      <div id="salary-list"></div>
+      <div class="hr"></div>
+      <div class="stat">
+        <div class="b"><div class="v" id="sal-total">0</div><div class="k">当月教练薪酬合计</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>薪酬规则</h2>
+      <p class="muted" style="margin:0;line-height:1.8;">
+        · <b>兼职教练</b>：每节课出勤 &lt;15 人 → 80 元/节；≥15 人 → 120 元/节（按节计）<br>
+        · <b>全职教练</b>：5 元/人（按出勤人数计）<br>
+        · <b>一对一</b>：本节课售价 × 40%（按节计）
+      </p>
+    </div>
+  </section>
+
+  <!-- 基础设置 -->
+  <section id="tab-setup" style="display:none;">
+    <div class="card">
+      <h2>学员名单</h2>
+      <div class="row">
+        <div class="field"><label>添加学员</label><input type="text" id="set-stu" placeholder="学员姓名"></div>
+        <div class="field" style="flex:0 0 auto;"><button class="btn" id="set-stu-add">添加</button></div>
+      </div>
+      <div class="list" id="set-stu-list"></div>
+    </div>
+    <div class="card">
+      <h2>教练与类型</h2>
+      <div class="row">
+        <div class="field"><label>教练姓名</label><input type="text" id="set-coach" placeholder="教练姓名"></div>
+        <div class="field" style="flex:0 0 140px;"><label>类型</label>
+          <select id="set-coach-type">
+            <option value="兼职">兼职</option>
+            <option value="全职">全职</option>
+            <option value="一对一">一对一</option>
+          </select></div>
+        <div class="field" style="flex:0 0 auto;"><button class="btn" id="set-coach-add">添加</button></div>
+      </div>
+      <div class="list" id="set-coach-list"></div>
+    </div>
+    <div class="card">
+      <h2>班级 / 课次模板</h2>
+      <div class="row">
+        <div class="field"><label>班级名称</label><input type="text" id="set-cls" placeholder="如 篮球启蒙班"></div>
+        <div class="field" style="flex:0 0 auto;"><button class="btn" id="set-cls-add">添加</button></div>
+      </div>
+      <div class="list" id="set-cls-list"></div>
+      <p class="muted" style="margin-top:8px;">班级只是预设标签，勾选考勤时直接选，省去每次手填。</p>
+    </div>
+  </section>
+
+  <!-- 数据 -->
+  <section id="tab-data" style="display:none;">
+    <div class="card">
+      <h2>数据管理</h2>
+      <p class="muted">数据只存在你这台设备的浏览器里（localStorage），不上传任何服务器。换设备/清缓存会丢，记得定期导出备份。</p>
+      <div class="row" style="margin-top:8px;">
+        <button class="btn ghost sm" id="data-export">导出备份(JSON)</button>
+        <button class="btn ghost sm" id="data-import">导入备份</button>
+        <input type="file" id="data-import-file" accept="application/json" style="display:none;">
+      </div>
+      <div class="hr"></div>
+      <details>
+        <summary>载入示例数据（先看效果）</summary>
+        <p class="muted">会覆盖当前数据，仅用于体验。点下方按钮载入 3 名教练、若干学员和 8 月几节课。</p>
+        <button class="btn sm" id="data-demo">载入示例</button>
+      </details>
+      <div class="hr"></div>
+      <button class="btn danger sm" id="data-reset">清空全部数据</button>
+    </div>
+  </section>
+
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const KEY='jiaopei_data_v1';
+const $=id=>document.getElementById(id);
+const fmt=n=>(+n).toLocaleString('zh-CN');
+const monthOf=d=>d.slice(0,7);
+function today(){const t=new Date();const p=x=>String(x).padStart(2,'0');return t.getFullYear()+'-'+p(t.getMonth()+1)+'-'+p(t.getDate());}
+
+let DB=load();
+function load(){try{return JSON.parse(localStorage.getItem(KEY))||seed();}catch(e){return seed();}}
+function save(){localStorage.setItem(KEY,JSON.stringify(DB));}
+function seed(){return {students:[],coaches:[],classes:[],sessions:[]};}
+function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7);}
+function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),1600);}
+
+/* ---------- 导航 ---------- */
+$('nav').addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return;
+  document.querySelectorAll('#nav button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  const tab=b.dataset.tab;
+  document.querySelectorAll('main section').forEach(s=>s.style.display='none');
+  $('tab-'+tab).style.display='block';
+  if(tab==='stats')renderStats();
+  if(tab==='salary')renderSalary();
+  if(tab==='setup')renderSetup();
+});
+
+/* ---------- 设置：学员 ---------- */
+$('set-stu-add').onclick=()=>{
+  const v=$('set-stu').value.trim();if(!v)return;
+  DB.students.push({id:uid(),name:v});$('set-stu').value='';save();renderSetup();fillSelects();toast('已添加学员');
+};
+$('set-coach-add').onclick=()=>{
+  const v=$('set-coach').value.trim();if(!v)return;
+  DB.coaches.push({id:uid(),name:v,type:$('set-coach-type').value});$('set-coach').value='';save();renderSetup();fillSelects();toast('已添加教练');
+};
+$('set-cls-add').onclick=()=>{
+  const v=$('set-cls').value.trim();if(!v)return;
+  DB.classes.push({id:uid(),name:v});$('set-cls').value='';save();renderSetup();fillSelects();toast('已添加班级');
+};
+function renderSetup(){
+  $('set-stu-list').innerHTML=DB.students.length?DB.students.map(s=>`<span class="chip">${s.name}<span class="x" data-d="stu" data-id="${s.id}">×</span></span>`).join(''):'<span class="muted">暂无学员</span>';
+  $('set-coach-list').innerHTML=DB.coaches.length?DB.coaches.map(c=>`<span class="chip">${c.name} <span class="pill ${clsType(c.type)}">${c.type}</span><span class="x" data-d="coach" data-id="${c.id}">×</span></span>`).join(''):'<span class="muted">暂无教练</span>';
+  $('set-cls-list').innerHTML=DB.classes.length?DB.classes.map(c=>`<span class="chip">${c.name}<span class="x" data-d="cls" data-id="${c.id}">×</span></span>`).join(''):'<span class="muted">暂无班级</span>';
+}
+function clsType(t){return t==='兼职'?'jz':t==='全职'?'qz':'yd';}
+document.addEventListener('click',e=>{
+  const x=e.target.closest('.x');if(!x)return;
+  const {d,id}=x.dataset;
+  if(d==='stu')DB.students=DB.students.filter(s=>s.id!==id);
+  if(d==='coach'){DB.coaches=DB.coaches.filter(c=>c.id!==id);DB.sessions=DB.sessions.filter(s=>s.coachId!==id);}
+  if(d==='cls'){DB.classes=DB.classes.filter(c=>c.id!==id);DB.sessions=DB.sessions.filter(s=>s.classId!==id);}
+  save();renderSetup();fillSelects();toast('已删除');
+});
+
+/* ---------- 下拉填充 ---------- */
+function fillSelects(){
+  $('a-class').innerHTML='<option value="">未选</option>'+DB.classes.map(c=>`<option value="${c.id}">${c.name}</option>`).join('');
+  $('a-coach').innerHTML='<option value="">未选</option>'+DB.coaches.map(c=>`<option value="${c.id}">${c.name}（${c.type}）</option>`).join('');
+}
+$('a-coach').onchange=()=>{
+  const c=DB.coaches.find(x=>x.id===$('a-coach').value);
+  $('a-coach-type').innerHTML=c?`教练类型：<b>${c.type}</b>`+'（'+(c.type==='一对一'?'本节课填售价，薪酬=售价×40%':c.type==='全职'?'薪酬=出勤人数×5元':'薪酬按节：<15人80元 / ≥15人120元')+'）':'';
+  $('a-price-wrap').style.display=(c&&c.type==='一对一')?'block':'none';
+};
+
+/* ---------- 考勤录入 ---------- */
+let checked=new Set();
+$('a-date').value=today();
+function renderStudents(){
+  const q=$('a-search').value.trim();
+  const list=DB.students.filter(s=>s.name.includes(q));
+  $('a-students').innerHTML=list.length?list.map(s=>`<div class="stu ${checked.has(s.id)?'on':''}" data-id="${s.id}"><span class="dot"></span>${s.name}</div>`).join(''):'<div class="empty">没有匹配学员，去“基础设置”添加</div>';
+  $('a-count').textContent=checked.size+' 人';
+}
+$('a-students').addEventListener('click',e=>{
+  const el=e.target.closest('.stu');if(!el)return;
+  const id=el.dataset.id;
+  if(checked.has(id))checked.delete(id);else checked.add(id);
+  renderStudents();
+});
+$('a-search').oninput=renderStudents;
+$('a-clear').onclick=()=>{checked.clear();renderStudents();};
+$('a-save').onclick=()=>{
+  const date=$('a-date').value||today();
+  const time=$('a-time').value.trim();
+  const classId=$('a-class').value;
+  const coachId=$('a-coach').value;
+  if(!coachId){toast('请选择授课教练');return;}
+  if(checked.size===0){toast('请勾选出勤学员');return;}
+  const coach=DB.coaches.find(c=>c.id===coachId);
+  const cls=DB.classes.find(c=>c.id===classId);
+  if(coach.type==='一对一' && checked.size!==1){toast('一对一每节课只能 1 名学员');return;}
+  if(coach.type==='一对一' && !$('a-price').value){toast('请填本节课售价');return;}
+  DB.sessions.push({
+    id:uid(),date,time,classId,className:cls?cls.name:'',coachId,coachName:coach.name,
+    coachType:coach.type,price:coach.type==='一对一'?(+$('a-price').value||0):0,
+    present:[...checked]
+  });
+  save();checked.clear();renderStudents();
+  $('a-time').value='';$('a-price').value='';$('a-search').value='';
+  toast('已保存 '+checked.size+' 人本节课');
+};
+
+/* ---------- 统计 ---------- */
+function months(){const s=[...new Set(DB.sessions.map(x=>monthOf(x.date)))];s.sort();return s;}
+function sessionsOf(m){return DB.sessions.filter(x=>monthOf(x.date)===m);}
+function segHtml(cur,list,id){
+  if(!list.length)return '<span class="muted">暂无数据</span>';
+  return list.map(m=>`<button data-m="${m}" class="${m===cur?'on':''}" onclick="pickMonth('${id}','${m}')">${m}</button>`).join('');
+}
+let curStatsMonth=null,curSalaryMonth=null;
+function pickMonth(view,m){if(view==='stats'){curStatsMonth=m;renderStats();}else{curSalaryMonth=m;renderSalary();}}
+
+function renderStats(){
+  const ms=months();if(!ms.length){['stats-month','stats-sess-month','stats-stu-month','stats-coach-month'].forEach(i=>$(i).innerHTML='<span class="muted">还没有考勤记录</span>');
+    ['stats-sess','stats-stu','stats-coach'].forEach(i=>$(i).innerHTML='<div class="empty">先去“考勤录入”记一节课</div>');return;}
+  if(!curStatsMonth||!ms.includes(curStatsMonth))curStatsMonth=ms[ms.length-1];
+  const m=curStatsMonth,ss=sessionsOf(m);
+  $('stats-month').innerHTML=segHtml(m,ms,'stats');
+  $('stats-sess-month').innerHTML=segHtml(m,ms,'stats');
+  $('stats-stu-month').innerHTML=segHtml(m,ms,'stats');
+  $('stats-coach-month').innerHTML=segHtml(m,ms,'stats');
+  // 概览
+  const renci=ss.reduce((a,s)=>a+s.present.length,0);
+  const stuSet=new Set();ss.forEach(s=>s.present.forEach(p=>stuSet.add(p)));
+  $('s-month-class').textContent=ss.length;
+  $('s-month-renci').textContent=renci;
+  $('s-month-stu').textContent=stuSet.size;
+  // 每节课
+  $('stats-sess').innerHTML=ss.length?`<table><thead><tr><th>日期</th><th>时间段</th><th>班级</th><th>教练</th><th class="num">出勤</th></tr></thead><tbody>${
+    ss.slice().sort((a,b)=>a.date<b.date?-1:1).map(s=>`<tr><td>${s.date}</td><td>${s.time||'-'}</td><td>${s.className||'-'}</td><td>${s.coachName}</td><td class="num">${s.present.length}</td></tr>`).join('')
+  }</tbody></table>`:'<div class="empty">本月无记录</div>';
+  // 学员
+  const cnt={};ss.forEach(s=>s.present.forEach(p=>cnt[p]=(cnt[p]||0)+1));
+  const rows=Object.entries(cnt).map(([id,n])=>[DB.students.find(x=>x.id===id)?.name||'(已删)',n]).sort((a,b)=>b[1]-a[1]);
+  $('stats-stu').innerHTML=rows.length?`<table><thead><tr><th>学员</th><th class="num">当月上课次数</th></tr></thead><tbody>${
+    rows.map(r=>`<tr><td>${r[0]}</td><td class="num">${r[1]}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">本月无记录</div>';
+  // 教练
+  const cc={};ss.forEach(s=>{const k=s.coachId;if(!cc[k])cc[k]={name:s.coachName,type:s.coachType,cls:new Set(),ren:0};cc[k].cls.add(s.id);cc[k].ren+=s.present.length;});
+  const crows=Object.values(cc);
+  $('stats-coach').innerHTML=crows.length?`<table><thead><tr><th>教练</th><th>类型</th><th class="num">课数</th><th class="num">人次</th></tr></thead><tbody>${
+    crows.map(c=>`<tr><td>${c.name}</td><td><span class="pill ${clsType(c.type)}">${c.type}</span></td><td class="num">${c.cls.size}</td><td class="num">${c.ren}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">本月无记录</div>';
+}
+
+/* ---------- 薪酬 ---------- */
+function sessionPay(s){
+  const n=s.present.length;
+  if(s.coachType==='兼职')return n<15?80:120;
+  if(s.coachType==='全职')return n*5;
+  if(s.coachType==='一对一')return (s.price||0)*0.4;
+  return 0;
+}
+function renderSalary(){
+  const ms=months();if(!ms.length){$('salary-month').innerHTML='<span class="muted">还没有考勤记录</span>';$('salary-list').innerHTML='<div class="empty">先去记几节课</div>';$('sal-total').textContent='0';return;}
+  if(!curSalaryMonth||!ms.includes(curSalaryMonth))curSalaryMonth=ms[ms.length-1];
+  const m=curSalaryMonth,ss=sessionsOf(m);
+  $('salary-month').innerHTML=segHtml(m,ms,'salary');
+  const agg={};
+  ss.forEach(s=>{if(!agg[s.coachId])agg[s.coachId]={name:s.coachName,type:s.coachType,cls:0,ren:0,pay:0};
+    agg[s.coachId].cls++;agg[s.coachId].ren+=s.present.length;agg[s.coachId].pay+=sessionPay(s);});
+  const rows=Object.values(agg).sort((a,b)=>b.pay-a.pay);
+  let total=0;
+  $('salary-list').innerHTML=rows.length?`<table><thead><tr><th>教练</th><th>类型</th><th class="num">课数</th><th class="num">人次</th><th class="num">当月薪酬</th></tr></thead><tbody>${
+    rows.map(r=>{total+=r.pay;return `<tr><td>${r.name}</td><td><span class="pill ${clsType(r.type)}">${r.type}</span></td><td class="num">${r.cls}</td><td class="num">${r.ren}</td><td class="num">¥${fmt(r.pay.toFixed(2))}</td></tr>`;}).join('')
+  }</tbody></table>`:'<div class="empty">本月无记录</div>';
+  $('sal-total').textContent='¥'+fmt(total.toFixed(2));
+}
+
+/* ---------- 数据 ---------- */
+$('data-export').onclick=()=>{
+  const blob=new Blob([JSON.stringify(DB,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='教培考勤薪酬备份_'+today()+'.json';a.click();toast('已导出备份');
+};
+$('data-import').onclick=()=>$('data-import-file').click();
+$('data-import-file').onchange=e=>{
+  const f=e.target.files[0];if(!f)return;const r=new FileReader();
+  r.onload=()=>{try{DB=JSON.parse(r.result);save();fillSelects();renderSetup();toast('导入成功');}catch(err){toast('文件格式错误');}};
+  r.readAsText(f);
+};
+$('data-reset').onclick=()=>{if(confirm('确定清空全部数据？此操作不可恢复（建议先导出备份）。')){DB=seed();save();fillSelects();renderSetup();toast('已清空');}};
+$('data-demo').onclick=()=>{
+  DB={
+    students:['小明','小红','小刚','小丽','小强','小美','小军','小燕','小杰','小玲','小涛','小静','小宇','小彤','小波','小芸'].map(n=>({id:uid(),name:n})),
+    coaches:[
+      {id:'c1',name:'王教练',type:'兼职'},
+      {id:'c2',name:'李教练',type:'全职'},
+      {id:'c3',name:'张老师',type:'一对一'}
+    ],
+    classes:[
+      {id:'k1',name:'篮球启蒙班'},
+      {id:'k2',name:'体能训练班'},
+      {id:'k3',name:'一对一私教'}
+    ],
+    sessions:[]
+  };
+  const mk=(d,t,cls,coach,n,price)=>{
+    const st=DB.students.slice(0,n).map(s=>s.id);
+    const c=DB.coaches.find(x=>x.id===coach);
+    DB.sessions.push({id:uid(),date:d,time:t,classId:cls,className:DB.classes.find(x=>x.id===cls).name,coachId:coach,coachName:c.name,coachType:c.type,price:price||0,present:st});
+  };
+  mk('2026-08-03','上午','k1','c1',12);
+  mk('2026-08-05','下午','k2','c1',16);
+  mk('2026-08-07','上午','k1','c2',9);
+  mk('2026-08-09','上午','k2','c2',14);
+  mk('2026-08-10','下午','k3','c3',1,200);
+  mk('2026-08-11','上午','k1','c1',18);
+  mk('2026-08-12','上午','k2','c2',11);
+  mk('2026-08-12','下午','k3','c3',1,260);
+  save();fillSelects();renderSetup();toast('示例已载入，去“统计看板/薪酬核算”看效果');
+};
+
+/* ---------- 初始化 ---------- */
+fillSelects();renderStudents();renderSetup();
+</script>
+</body>
+</html>

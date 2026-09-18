@@ -12,7 +12,7 @@
     "dev:web": "cd web-admin && npm run dev",
     "build:web": "cd web-admin && npm run build",
     "smoke": "node smoke-test.mjs",
-    "test": "cd backend && node tests/class-module.test.js && node tests/audit-regression.cjs && node tests/lead-suggestions-regression.cjs && node tests/queue-regression.cjs && node tests/p2-fixes.test.js && node tests/finance-refund-regression.cjs && node tests/finance-payroll-regression.cjs && node tests/full-system.test.js",
+    "test": "node backend/tests/run-all.cjs",
     "test:backend": "node backend/tests/full-system.test.js",
     "verify": "node tools/verify-all.mjs",
     "install:all": "cd backend && npm install && cd ../web-admin && npm install"

@@ -16,6 +16,8 @@ web-admin/dist
 backend/db/data.db
 backend/db/data.db-wal
 backend/db/data.db-shm
+# JWT 签名密钥：由容器首次启动时自行生成。若随镜像分发，持有者可离线伪造管理员 Token。
+backend/db/.jwt-secret
 backend/uploads
 backend/backups
 backups
@@ -29,4 +31,5 @@ design
 .DS_Store
 backend.pid
 webadmin.pid
-backend/tests/reports
+# 测试代码不进生产镜像（避免在容器内对生产库执行测试写操作）
+backend/tests

@@ -23,6 +23,10 @@ echo -e "${NC}"
 
 cd "$(dirname "$0")"
 
+# 监听端口：与 server.js 读取的 PORT 保持一致，供健康检查复用
+PORT="${PORT:-3001}"
+export PORT
+
 # ─── 0. 环境检查 ───
 if ! command -v node >/dev/null 2>&1; then
   echo -e "${YELLOW}✗ 未检测到 Node.js，请先安装（>= 18）：https://nodejs.org${NC}"
@@ -51,10 +55,27 @@ echo -e "${GREEN}✓ 依赖安装完成${NC}"
 # ─── 2. 初始化数据库（已存在则跳过，绝不覆盖已有数据）───
 echo -e "\n${BOLD}━━━ [2/4] 初始化数据库 ━━━${NC}"
 if [ ! -f "backend/db/data.db" ]; then
-  (cd backend && node db/init.js && node db/seed.js)
-  echo -e "${GREEN}✓ 数据库已初始化 + 示例数据就绪${NC}"
+  (cd backend && node db/init.js)
+  if [ "${SEED_DEMO_DATA:-0}" = "1" ]; then
+    # 演示数据含固定口令账号（13800000001 / 123456），仅用于本地评估，切勿在公网环境使用
+    (cd backend && SEED_FORCE=1 node db/seed.js)
+    echo -e "${YELLOW}✓ 已灌入演示数据（管理员 13800000001 / 123456，请立即改密）${NC}"
+  else
+    # 生产默认：只创建管理员，口令随机生成且仅打印这一次
+    (cd backend && node db/create-admin.js)
+    echo -e "${GREEN}✓ 数据库已初始化，管理员账号已生成（口令见上方，仅显示一次）${NC}"
+    echo -e "${YELLOW}  如需演示数据：SEED_DEMO_DATA=1 bash deploy.sh${NC}"
+  fi
 else
   echo -e "${GREEN}✓ 检测到已有数据库，跳过初始化（数据不会被动）${NC}"
+  # 升级前备份：迁移或启动失败时可回滚
+  if [ -f "tools/backup.sh" ]; then
+    if bash tools/backup.sh >/dev/null 2>&1; then
+      echo -e "${GREEN}✓ 已创建部署前备份（backend/backups/）${NC}"
+    else
+      echo -e "${YELLOW}⚠ 部署前备份失败，建议确认磁盘空间后再继续${NC}"
+    fi
+  fi
 fi
 
 # ─── 3. 构建管理端 ───
@@ -71,26 +92,38 @@ NODE_ENV=production nohup node backend/server.js > backend.log 2>&1 &
 echo $! > backend.pid
 
 # 健康检查轮询（最多约 15 秒，兼容慢机器冷启动）
-HEALTH="✗ 未通过，请查看日志：tail -50 backend.log"
+HEALTH_OK=0
 for _ in $(seq 1 15); do
-  if curl -sf http://localhost:3001/api/health >/dev/null 2>&1; then
-    HEALTH="✓"
+  if curl -sf "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then
+    HEALTH_OK=1
     break
   fi
   sleep 1
 done
 
+# 健康检查失败必须让脚本以非零码退出，否则 CI / 运维无法据此判定部署失败
+if [ "$HEALTH_OK" != "1" ]; then
+  echo -e "\n${YELLOW}✗ 部署失败：${NC}健康检查未通过（15 秒内 http://localhost:${PORT}/api/health 无响应）"
+  echo -e "${YELLOW}  请查看日志：tail -50 backend.log${NC}"
+  echo -e "${YELLOW}  若为数据库迁移失败，可用 backend/backups/ 中的部署前备份回滚。${NC}"
+  exit 1
+fi
+
 echo -e "\n${BOLD}${CYAN}"
 echo "  ╔═══════════════════════════════════════════════╗"
 echo "  ║  ✅ 部署完成！                                 ║"
 echo "  ║                                               ║"
-echo "  ║  🖥️  管理后台：http://localhost:3001           ║"
-echo "  ║      账号 13800000001 / 123456（示例数据）     ║"
-echo "  ║  ⚙️  后端 API：http://localhost:3001/api       ║"
+echo "  ║  🖥️  管理后台：http://localhost:${PORT}           ║"
+if [ "${SEED_DEMO_DATA:-0}" = "1" ]; then
+echo "  ║      账号 13800000001 / 123456（演示数据）     ║"
+else
+echo "  ║      账号与随机口令见上方输出（请立即改密）    ║"
+fi
+echo "  ║  ⚙️  后端 API：http://localhost:${PORT}/api       ║"
 echo "  ║                                               ║"
 echo "  ║  🛑 停止：bash stop-all.sh                     ║"
 echo "  ║  📖 部署上线（域名/HTTPS）：                  ║"
 echo "  ║     见《部署上线说明.md》                       ║"
 echo "  ╚═══════════════════════════════════════════════╝"
 echo -e "${NC}"
-echo -e "健康检查：http://localhost:3001/api/health ${GREEN}${HEALTH}${NC}"
+echo -e "健康检查：http://localhost:${PORT}/api/health ${GREEN}✓${NC}"

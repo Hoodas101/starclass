@@ -172,9 +172,9 @@ curl http://localhost:3001/api/health
 | Node 版本要求？ | **>= 18**（推荐 20/22）。装好后再跑 `bash deploy.sh` |
 | 依赖安装报错 / better-sqlite3 编译失败？ | 缺编译环境：macOS 执行 `xcode-select --install`；Linux 执行 `apt install build-essential python3` |
 | 端口 3001 被占用？ | 先 `bash stop-all.sh`；仍占用则 `export PORT=3002 && bash start-all.sh` |
-| 忘记管理员密码？ | 删除示例库重来（`rm backend/db/data.db*` → `npm run init:db && npm run seed`）；正式数据请勿删库，在后台「系统设置 → 账号安全」修改 |
+| 忘记管理员密码？ | 执行 `node backend/db/create-admin.js` 重置（可指定 `--phone` / `--password`，不指定则生成随机强口令并打印一次）。**切勿用 `npm run seed` 重置**——seed 会先清空全部业务表再写入示例数据，真实数据将不可恢复 |
 | 想清空示例数据正式使用？ | 管理后台逐个删除演示学员/订单即可，或删 `backend/db/data.db*` 后只跑 `npm run init:db`（不 seed）从零录入 |
-| 换电脑 / 迁移服务器？ | 拷走 `backend/db/data.db` + `backend/uploads/` 两个位置，新机重跑 `bash deploy.sh` 后放回数据文件即可 |
+| 换电脑 / 迁移服务器？ | 先 `bash tools/backup.sh` 生成一致性快照，再拷走快照 + `backend/uploads/`，新机重跑 `bash deploy.sh` 后放回。**WAL 模式下直接 `cp backend/db/data.db` 会丢掉尚未 checkpoint 的最近写入** |
 | 三端小程序怎么获取？ | 家长 / 教练 / 管理端小程序为付费商业扩展，不在本仓库内；在 Issues 留言联系获取部署授权 |
 | 不配微信小程序能用吗？ | 能。Web 工作台手机号 + 密码登录全功能可用；后端预留 `WX_APPID`/`WX_SECRET` 供小程序扩展对接 |
 

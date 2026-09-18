@@ -3,10 +3,32 @@
  * 运行全部自动化验证套件并输出汇总报告。
  * 用法：node tools/verify-all.mjs   （或 npm run verify）
  * 前置：后端运行在 http://localhost:3001（./start-all.sh 或 backend/node server.js）
+ *
+ * ⚠ 本脚本会向目标数据库写入测试数据，并在收尾阶段物理删除测试残留。
+ *   生产环境（NODE_ENV=production）下默认拒绝执行，需显式确认：
+ *     VERIFY_DB_CONFIRM=1 npm run verify
  */
 import { execFileSync } from 'child_process';
 
 const root = new URL('..', import.meta.url).pathname;
+
+// ── 安全闸门 ──────────────────────────────────────────────────────────
+// 本脚本是「写入 + 删除」型测试夹具，不能在生产库上静默运行。
+// 判据与 P0-1（自助支付）、data-hygiene 保持一致：NODE_ENV=production 即视为生产环境。
+const CONFIRMED = process.env.VERIFY_DB_CONFIRM === '1';
+if (process.env.NODE_ENV === 'production' && !CONFIRMED) {
+  console.error('[Verify] 已拒绝执行：当前为生产环境（NODE_ENV=production）。');
+  console.error('[Verify] 本脚本会写入测试数据并删除测试残留，在生产库上运行可能损坏真实业务数据。');
+  console.error('[Verify] 如确认目标库可被测试写入，请显式确认：');
+  console.error('[Verify]   VERIFY_DB_CONFIRM=1 npm run verify');
+  process.exit(2);
+}
+
+// 数据卫生步骤必须显式 --apply 才会真正清理（其默认是 dry-run）；
+// 已确认的生产环境同时透传 --allow-production，避免被 data-hygiene 的护栏拦下。
+const HYGIENE_ARGS = ['tools/data-hygiene.mjs', '--apply'];
+if (CONFIRMED) HYGIENE_ARGS.push('--allow-production');
+
 const run = (cmd, args, cwd = root) => {
   const t0 = Date.now();
   try {
@@ -19,7 +41,7 @@ const run = (cmd, args, cwd = root) => {
 };
 
 const suites = [
-  { name: '测试数据卫生检查', fn: () => run('node', ['tools/data-hygiene.mjs']) },
+  { name: '测试数据卫生检查', fn: () => run('node', HYGIENE_ARGS) },
   { name: '冒烟测试（39 项）', fn: () => run('node', ['smoke-test.mjs']) },
   { name: '管理端 API 全流程（30 项）', fn: () => run('node', ['tools/admin-api-flow.mjs']) },
   { name: '业务剧本（全链路 21 项）', fn: () => run('node', ['tools/business-flow-test.mjs']) },
@@ -40,8 +62,8 @@ const suites = [
   { name: 'Web 交互流审计', fn: () => run('node', ['tools/web-flow-audit.mjs']) },
 ];
 // 收尾清理：流程测试会创建临时数据（排期/通知/积分/请假等），在验收结束后再跑一次数据卫生，
-// 保证演示数据库在「验收完成」后立即恢复干净状态
-const FINAL_CLEANUP = { name: '收尾数据清理', fn: () => run('node', ['tools/data-hygiene.mjs']) };
+// 保证演示数据库在「验收完成」后立即恢复干净状态（--apply 见上方 HYGIENE_ARGS）
+const FINAL_CLEANUP = { name: '收尾数据清理', fn: () => run('node', HYGIENE_ARGS) };
 // 全库一致性审计：必须在收尾清理之后执行（前置套件会创建并清理测试数据）
 const DB_INTEGRITY = { name: '全库跨表一致性审计（12 项）', fn: () => run('node', ['tools/db-integrity-test.mjs']) };
 

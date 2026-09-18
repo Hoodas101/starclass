@@ -7,6 +7,15 @@
 #   DOMAIN=example.com docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
 
 services:
+  # 本叠加层的唯一用途就是「app 位于 Caddy 之后」，因此这里替 app 声明可信代理跳数。
+  # 不设的后果：Caddy 反代下 req.ip 恒为 Caddy 容器 IP，全体用户共享同一个限流桶——
+  # 全局 600 次/分钟、登录 100 次/15 分钟，早高峰家长集中登录即可锁死全站登录，
+  # 且审计日志的 IP 维度全部失真。`:-1` 表示默认信任 1 跳，
+  # 若在 Caddy 之前还有一层代理（如云负载均衡），用 TRUST_PROXY=2 覆盖。
+  app:
+    environment:
+      TRUST_PROXY: "${TRUST_PROXY:-1}"
+
   caddy:
     image: caddy:2
     restart: unless-stopped

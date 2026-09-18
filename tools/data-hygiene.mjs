@@ -2,10 +2,92 @@
  * 测试数据卫生检查
  * 防止自动化测试残留累积污染演示数据（排期/通知/课程）。
  * 超过阈值即失败，提示清理。
+ *
+ * ── 安全约束（重要）────────────────────────────────────────────
+ * 本脚本会物理删除数据，因此：
+ *   1) 默认 DRY-RUN：只检查、只报告，不写入任何数据。
+ *   2) 需显式 `--apply` 才真正执行清理。
+ *   3) `--apply` 执行前自动做一次数据库备份（backend/backups/pre-hygiene-*.db）。
+ *   4) 生产环境（NODE_ENV=production）或未指定 DB_PATH 时，`--apply` 必须
+ *      同时给出 `--allow-production`，避免在生产机上误跑。
+ *
+ * 注意：清理规则多为启发式模式匹配（如 `%测试%`、`status='cancelled'`），
+ * 无法百分之百区分测试残留与真实业务数据。因此「先备份、后清理」不可省略。
+ *
+ * 用法：
+ *   node tools/data-hygiene.mjs                              # 只检查（dry-run，默认）
+ *   node tools/data-hygiene.mjs --apply                      # 开发库执行清理（自动备份）
+ *   node tools/data-hygiene.mjs --apply --allow-production   # 生产环境执行清理
+ *   DB_PATH=/tmp/copy.db node tools/data-hygiene.mjs --apply # 对副本清理（推荐）
  */
 import { createRequire } from 'module'
+import path from 'path'
+import fs from 'fs'
 const require = createRequire(import.meta.url)
-const db = require(process.cwd() + '/backend/db')
+
+const APPLY = process.argv.includes('--apply')
+const ALLOW_PRODUCTION = process.argv.includes('--allow-production')
+// 报告用动词：dry-run 下不得宣称「已清理」
+const TAG = APPLY ? '已清理' : '待清理'
+// 自愈/重算类报告的动词前缀（后接「清理 / 重算 / 校正」），同样不得在 dry-run 下谎报
+const HEAL = APPLY ? '已' : '待'
+const DB_FILE = process.env.DB_PATH
+  ? path.resolve(process.env.DB_PATH)
+  : path.join(process.cwd(), 'backend/db/data.db')
+
+const realDb = require(process.cwd() + '/backend/db')
+
+// ── 护栏 1：生产环境 / 默认库需显式放行 ──
+// 判据与 P0-1（自助支付）保持一致：NODE_ENV=production 即视为生产环境。
+// 容器部署同时设置了 NODE_ENV=production 与 DB_PATH=/data/data.db，
+// 因此不能只用「DB_PATH 是否为空」来判断，否则容器内会绕过该护栏。
+if (APPLY && !ALLOW_PRODUCTION && (process.env.NODE_ENV === 'production' || !process.env.DB_PATH)) {
+  console.error(`[Hygiene] 已拒绝执行：目标为 ${DB_FILE}`)
+  console.error(`[Hygiene] 原因：${process.env.NODE_ENV === 'production' ? 'NODE_ENV=production' : '未指定 DB_PATH（默认库通常承载真实业务数据）'}`)
+  console.error('[Hygiene] 该库清理不可逆。请二选一：')
+  console.error('[Hygiene]   a) 确认要清理：node tools/data-hygiene.mjs --apply --allow-production')
+  console.error('[Hygiene]   b) 更推荐：先复制副本，再 DB_PATH=/tmp/copy.db node tools/data-hygiene.mjs --apply')
+  process.exit(2)
+}
+
+// ── 护栏 2：写入前自动备份，误删可回滚 ──
+if (APPLY) {
+  try {
+    const backupDir = path.join(process.cwd(), 'backend/backups')
+    fs.mkdirSync(backupDir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const target = path.join(backupDir, `pre-hygiene-${stamp}.db`)
+    await realDb.backup(target)
+    console.log(`[Hygiene] 已备份：${path.relative(process.cwd(), target)}`)
+  } catch (e) {
+    console.error('[Hygiene] 备份失败，已中止清理：', e.message)
+    process.exit(2)
+  }
+}
+
+// ── 护栏 3：dry-run 拦截写操作（读操作照常，检查逻辑依赖真实数据）──
+const WRITE_RE = /^\s*(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|VACUUM)\b/i
+const db = APPLY ? realDb : new Proxy(realDb, {
+  get(target, prop) {
+    if (prop === 'prepare') {
+      return (sql, ...rest) => {
+        const stmt = target.prepare(sql, ...rest)
+        if (!WRITE_RE.test(sql)) return stmt
+        return new Proxy(stmt, {
+          get(s, p) {
+            if (p === 'run') return () => ({ changes: 0 })
+            const v = s[p]
+            return typeof v === 'function' ? v.bind(s) : v
+          },
+        })
+      }
+    }
+    const v = target[prop]
+    return typeof v === 'function' ? v.bind(target) : v
+  },
+})
+
+console.log(`[Hygiene] 模式：${APPLY ? 'APPLY（将写入数据库）' : 'DRY-RUN（只检查，加 --apply 执行清理）'}`)
 
 let issues = 0
 
@@ -38,18 +120,27 @@ if (auditScheds.length) {
   db.prepare(`DELETE FROM attendances WHERE schedule_id IN (${ph})`).run(...ids)
   db.prepare(`DELETE FROM leave_requests WHERE schedule_id IN (${ph})`).run(...ids)
   db.prepare(`DELETE FROM schedules WHERE id IN (${ph})`).run(...ids)
-  console.log(`✓ 排期数据卫生（自动清理审计测试排课 ${auditScheds.length} 条）`)
+  console.log(`✓ 排期数据卫生（${TAG}审计测试排课 ${auditScheds.length} 条）`)
 }
 
 // 性别数据归一化：兼容历史英文值（male/female），统一为中文（男/女）存储
-const genderFix = db.prepare(`UPDATE students SET gender='男' WHERE gender='male'`).run()
+// 待修正条数用 SELECT 统计（而非 UPDATE 的 changes），使 dry-run 下报告同样准确
+const genderPending =
+  db.prepare(`SELECT count(*) c FROM students WHERE gender IN ('male','female')`).get().c +
+  db.prepare(`SELECT count(*) c FROM teachers WHERE gender IN ('male','female')`).get().c
+db.prepare(`UPDATE students SET gender='男' WHERE gender='male'`).run()
 db.prepare(`UPDATE students SET gender='女' WHERE gender='female'`).run()
 db.prepare(`UPDATE teachers SET gender='男' WHERE gender='male'`).run()
 db.prepare(`UPDATE teachers SET gender='女' WHERE gender='female'`).run()
 const genderRemain = db.prepare(`SELECT count(*) c FROM students WHERE gender NOT IN ('男','女')`).get().c +
   db.prepare(`SELECT count(*) c FROM teachers WHERE gender NOT IN ('男','女')`).get().c
-if (genderRemain > 0) { console.log(`✗ 性别字段存在异常值 ${genderRemain} 条`); issues++ }
-else console.log(`✓ 性别数据归一化（male/female → 男/女，修正 ${genderFix.changes} 条）`)
+if (genderRemain > 0) {
+  // dry-run 下更新被拦截，异常值仍在，此时按「待清理」报告，不判为失败
+  if (APPLY) { console.log(`✗ 性别字段存在异常值 ${genderRemain} 条`); issues++ }
+  else console.log(`✓ 性别数据归一化（${TAG} ${genderPending} 条）`)
+} else {
+  console.log(`✓ 性别数据归一化（male/female → 男/女，${TAG} ${genderPending} 条）`)
+}
 
 // 学生数据卫生：清理自动化测试残留学员。DELETE /students/:id 是软删除（status='refunded'），
 // 全面测试/签到测试等套件跑完后学员行仍留在库里，按 created_at DESC 会占据成员列表首位，污染演示数据。
@@ -73,7 +164,7 @@ if (testStudents.length) {
     try { db.prepare(`DELETE FROM ${t} WHERE student_id IN (${ph})`).run(...sids) } catch (e) { /* 表无该列时跳过 */ }
   }
   db.prepare(`DELETE FROM students WHERE id IN (${ph})`).run(...sids)
-  console.log(`✓ 学生数据卫生（自动清理测试学员 ${testStudents.length} 人）`)
+  console.log(`✓ 学生数据卫生（${TAG}测试学员 ${testStudents.length} 人）`)
 } else {
   console.log('✓ 学生数据卫生（无测试学员残留）')
 }
@@ -93,7 +184,7 @@ if (testOrders.length) {
   db.prepare(`DELETE FROM member_cards WHERE order_id IN (${oph})`).run(...oids)
   db.prepare(`DELETE FROM payments WHERE order_id IN (${oph})`).run(...oids)
   db.prepare(`DELETE FROM orders WHERE id IN (${oph})`).run(...oids)
-  console.log(`✓ 订单数据卫生（自动清理测试销售订单 ${testOrders.length} 条）`)
+  console.log(`✓ 订单数据卫生（${TAG}测试销售订单 ${testOrders.length} 条）`)
 } else {
   console.log('✓ 订单数据卫生（残留 0 条）')
 }
@@ -123,7 +214,7 @@ if (tempCourses.length) {
     db.prepare(`DELETE FROM schedules WHERE id IN (${sph})`).run(...sids)
   }
   db.prepare(`DELETE FROM courses WHERE id IN (${ph})`).run(...ids)
-  console.log(`✓ 课程数据卫生（自动清理临时课程 ${tempCourses.length} 条）`)
+  console.log(`✓ 课程数据卫生（${TAG}临时课程 ${tempCourses.length} 条）`)
 }
 
 // 自动清理自动化测试创建的产品（测试时效卡/测试次卡/坏卡）
@@ -135,7 +226,7 @@ if (tempCards.length) {
   const ids = tempCards.map((c) => c.id)
   db.prepare(`DELETE FROM member_cards WHERE card_type_id IN (${ph})`).run(...ids)
   db.prepare(`DELETE FROM membership_cards WHERE id IN (${ph})`).run(...ids)
-  console.log(`✓ 产品数据卫生（自动清理测试产品 ${tempCards.length} 条）`)
+  console.log(`✓ 产品数据卫生（${TAG}测试产品 ${tempCards.length} 条）`)
 } else {
   console.log('✓ 产品数据卫生（残留 0 条）')
 }
@@ -147,7 +238,7 @@ const notices = db.prepare(`
 if (notices > 0) {
   // 冒烟测试每次运行会产生「冒烟测试通知」，自动清理防止累积污染
   db.prepare(`DELETE FROM notifications WHERE title LIKE '%测试%' OR title LIKE 'E2E%' OR title LIKE '全检%'`).run()
-  console.log(`✓ 通知数据卫生（自动清理 ${notices} 条测试通知）`)
+  console.log(`✓ 通知数据卫生（${TAG} ${notices} 条测试通知）`)
 } else {
   console.log(`✓ 通知数据卫生（残留 0 条）`)
 }
@@ -164,7 +255,7 @@ if (testNoticeContent > 0) {
     WHERE content LIKE '%剧本测试班%' OR content LIKE '%测试班-%'
        OR content LIKE '%验证课%' OR content LIKE '%审计%' OR content LIKE '%AUDIT%'
   `).run()
-  console.log(`✓ 通知数据卫生（自动清理引用测试排课的通知 ${testNoticeContent} 条）`)
+  console.log(`✓ 通知数据卫生（${TAG}引用测试排课的通知 ${testNoticeContent} 条）`)
 }
 
 // 清理请假审批通知：对应请假记录已删除（自动化测试残留）时清理
@@ -181,7 +272,7 @@ if (orphanLeaveNotices > 0) {
       AND template_id LIKE 'LEAVE_%'
       AND SUBSTR(template_id, 7) NOT IN (SELECT id FROM leave_requests)
   `).run()
-  console.log(`✓ 通知数据卫生（自动清理请假审批测试通知 ${orphanLeaveNotices} 条）`)
+  console.log(`✓ 通知数据卫生（${TAG}请假审批测试通知 ${orphanLeaveNotices} 条）`)
 }
 
 // 自动清理积分流水中的测试标记（E2E / AUDIT / 测试），防止积分明细被测试数据淹没
@@ -194,7 +285,7 @@ if (testLogs > 0) {
     DELETE FROM point_logs
     WHERE reason LIKE 'E2E%' OR reason LIKE '%AUDIT%' OR reason LIKE '%测试%' OR reason LIKE 'AUDIT%'
   `).run()
-  console.log(`✓ 积分数据卫生（自动清理测试流水 ${testLogs} 条）`)
+  console.log(`✓ 积分数据卫生（${TAG}测试流水 ${testLogs} 条）`)
 } else {
   console.log('✓ 积分数据卫生（残留 0 条）')
 }
@@ -210,7 +301,7 @@ if (orphanCheckinLogs > 0) {
     DELETE FROM point_logs WHERE type = 'checkin' AND reference_id != ''
       AND reference_id NOT IN (SELECT id FROM schedules)
   `).run()
-  console.log(`✓ 积分关联自愈（清理孤儿签到积分 ${orphanCheckinLogs} 条）`)
+  console.log(`✓ 积分关联自愈（${HEAL}清理孤儿签到积分 ${orphanCheckinLogs} 条）`)
 }
 const orphanEarnLogs = db.prepare(`
   SELECT COUNT(*) c FROM point_logs
@@ -223,7 +314,7 @@ if (orphanEarnLogs > 0) {
     WHERE type = 'earn' AND (reason IN ('转介绍奖励','线索成交奖励','批量积分奖励'))
       AND (reference_id IS NULL OR reference_id = '')
   `).run()
-  console.log(`✓ 积分关联自愈（清理无来源测试奖励积分 ${orphanEarnLogs} 条）`)
+  console.log(`✓ 积分关联自愈（${HEAL}清理无来源测试奖励积分 ${orphanEarnLogs} 条）`)
 }
 const orphanPurchaseLogs = db.prepare(`
   SELECT COUNT(*) c FROM point_logs
@@ -236,7 +327,7 @@ if (orphanPurchaseLogs > 0) {
     WHERE reason LIKE '购买「%」赠送积分' AND reference_id LIKE 'order_%'
       AND reference_id NOT IN (SELECT 'order_' || id FROM orders)
   `).run()
-  console.log(`✓ 积分关联自愈（清理孤儿订单赠送积分 ${orphanPurchaseLogs} 条）`)
+  console.log(`✓ 积分关联自愈（${HEAL}清理孤儿订单赠送积分 ${orphanPurchaseLogs} 条）`)
 }
 // 按真实流水重算账户（refund 日志为取消订单时已回滚的原奖励，不再计入余额）
 const pointAccounts = db.prepare('SELECT student_id FROM points').all()
@@ -253,7 +344,7 @@ for (const { student_id } of pointAccounts) {
   }
 }
 if (recomputed > 0) {
-  console.log(`✓ 积分账户自愈（按真实流水重算 ${recomputed} 个账户）`)
+  console.log(`✓ 积分账户自愈（按真实流水${HEAL}重算 ${recomputed} 个账户）`)
 }
 
 // 积分流水余额快照自愈：按时间顺序重算每条流水的余额快照，保证明细页与账户余额一致
@@ -274,7 +365,7 @@ for (const { student_id } of pointStudents) {
   }
 }
 if (snapshotUpdated > 0) {
-  console.log(`✓ 积分流水快照自愈（重算 ${snapshotUpdated} 条余额快照）`)
+  console.log(`✓ 积分流水快照自愈（${HEAL}重算 ${snapshotUpdated} 条余额快照）`)
 }
 
 // 反馈数据卫生：清理自动化测试产生的反馈（冒烟/测试/E2E/AUDIT 标记）
@@ -287,7 +378,7 @@ if (testFeedbacks > 0) {
     DELETE FROM feedback
     WHERE content LIKE '冒烟测试%' OR content LIKE '%E2E%' OR content LIKE '%AUDIT%' OR content LIKE '%测试反馈%'
   `).run()
-  console.log(`✓ 反馈数据卫生（自动清理测试反馈 ${testFeedbacks} 条）`)
+  console.log(`✓ 反馈数据卫生（${TAG}测试反馈 ${testFeedbacks} 条）`)
 } else {
   console.log('✓ 反馈数据卫生（残留 0 条）')
 }
@@ -305,7 +396,7 @@ if (cancelledLeaveAtt > 0) {
       SELECT id FROM schedules WHERE status = 'cancelled'
     )
   `).run()
-  console.log(`✓ 出勤数据卫生（自动清理已取消排期的请假签到 ${cancelledLeaveAtt} 条）`)
+  console.log(`✓ 出勤数据卫生（${TAG}已取消排期的请假签到 ${cancelledLeaveAtt} 条）`)
 } else {
   console.log('✓ 出勤数据卫生（残留 0 条）')
 }
@@ -316,7 +407,7 @@ const cancelledEnrollments = db.prepare(
 ).get().c
 if (cancelledEnrollments > 0) {
   db.prepare("DELETE FROM enrollments WHERE status = 'cancelled'").run()
-  console.log(`✓ 报名数据卫生（自动清理已取消报名 ${cancelledEnrollments} 条）`)
+  console.log(`✓ 报名数据卫生（${TAG}已取消报名 ${cancelledEnrollments} 条）`)
 } else {
   console.log('✓ 报名数据卫生（残留 0 条）')
 }
@@ -333,8 +424,9 @@ for (const [name, cleanSql, checkSql] of orphanChecks) {
   const before = db.prepare(checkSql).get().c
   if (before > 0) {
     db.prepare(cleanSql).run()
-    const after = db.prepare(checkSql).get().c
-    console.log(`✓ 关联完整性：${name} 已自动清理 ${before - after} 条`)
+    // dry-run 下写入被拦截，before === after，若直接报 before-after 会误显示为 0 条
+    const removed = APPLY ? before - db.prepare(checkSql).get().c : before
+    console.log(`✓ 关联完整性：${name} ${TAG} ${removed} 条`)
   } else {
     console.log(`✓ 关联完整性：${name} 0 条`)
   }
@@ -352,7 +444,7 @@ if (orphanRefundedCards > 0) {
     WHERE status IN ('refunded','cancelled')
       AND (order_id = '' OR order_id NOT IN (SELECT id FROM orders))
   `).run()
-  console.log(`✓ 会员卡数据卫生（自动清理孤儿退款/取消卡 ${orphanRefundedCards} 条）`)
+  console.log(`✓ 会员卡数据卫生（${TAG}孤儿退款/取消卡 ${orphanRefundedCards} 条）`)
 } else {
   console.log('✓ 会员卡数据卫生（残留 0 条）')
 }
@@ -370,43 +462,44 @@ if (driftCount > 0) {
       SELECT COUNT(*) FROM enrollments e WHERE e.schedule_id = schedules.id AND e.status = 'active'
     ), updated_at = ?
   `).run(Date.now())
-  console.log(`✓ 报名计数自愈（校正 ${driftCount} 条排期报名数）`)
+  console.log(`✓ 报名计数自愈（${HEAL}校正 ${driftCount} 条排期报名数）`)
 } else {
   console.log('✓ 报名计数自愈（无漂移）')
 }
 
 // 测试残留通知清理：自动化测试取消测试排课时生成的活动取消/变更通知，
-// 其排课已被清理，继续留在家长通知列表会造成干扰，按内容特征自动删除
-const staleNotices = db.prepare(`
-  DELETE FROM notifications
-  WHERE (title = '活动取消通知' OR title = '今日训练取消通知' OR title = '活动变更通知')
+// 其排课已被清理，继续留在家长通知列表会造成干扰，按内容特征删除。
+// 先 SELECT 统计再删除：dry-run 下 DELETE 被护栏 3 拦截，若用 .changes 会把待清理项误报为 0。
+const staleNoticeWhere = `
+  (title = '活动取消通知' OR title = '今日训练取消通知' OR title = '活动变更通知')
     AND (
       content LIKE '%优化验证课%' OR content LIKE '%管理端深化测试课%'
       OR content LIKE '%剧本测试%' OR content LIKE '%测试班-%'
       OR content LIKE '%验证课msm%' OR content LIKE '%审计%'
       OR content LIKE '%多孩%' OR content LIKE '%首页验证%'
     )
-`).run().changes
+`
+const staleNotices = db.prepare(`SELECT COUNT(*) c FROM notifications WHERE ${staleNoticeWhere}`).get().c
 if (staleNotices > 0) {
-  console.log(`✓ 通知数据卫生（自动清理测试活动取消/变更通知 ${staleNotices} 条）`)
+  db.prepare(`DELETE FROM notifications WHERE ${staleNoticeWhere}`).run()
+  console.log(`✓ 通知数据卫生（${TAG}测试活动取消/变更通知 ${staleNotices} 条）`)
 } else {
   console.log('✓ 通知数据卫生（无测试取消通知残留）')
 }
 
 // 通知去重自愈：同一用户同一标题同一内容只保留最新一条（自动化测试循环产生的重复通知）
-const dupNotices = db.prepare(`
-  DELETE FROM notifications
-  WHERE id IN (
-    SELECT n.id FROM notifications n
-    JOIN (
-      SELECT user_id, title, content, MAX(created_at) keep_id, COUNT(*) c
-      FROM notifications GROUP BY user_id, title, content HAVING c > 1
-    ) d ON d.user_id = n.user_id AND d.title = n.title AND d.content = n.content
-    WHERE n.created_at != d.keep_id
-  )
-`).run().changes
+const dupNoticeIds = `
+  SELECT n.id FROM notifications n
+  JOIN (
+    SELECT user_id, title, content, MAX(created_at) keep_id, COUNT(*) c
+    FROM notifications GROUP BY user_id, title, content HAVING c > 1
+  ) d ON d.user_id = n.user_id AND d.title = n.title AND d.content = n.content
+  WHERE n.created_at != d.keep_id
+`
+const dupNotices = db.prepare(`SELECT COUNT(*) c FROM notifications WHERE id IN (${dupNoticeIds})`).get().c
 if (dupNotices > 0) {
-  console.log(`✓ 通知去重自愈（清理重复通知 ${dupNotices} 条）`)
+  db.prepare(`DELETE FROM notifications WHERE id IN (${dupNoticeIds})`).run()
+  console.log(`✓ 通知去重自愈（${TAG}重复通知 ${dupNotices} 条）`)
 } else {
   console.log('✓ 通知去重自愈（无重复通知）')
 }
@@ -429,7 +522,7 @@ if (testTeachers.length) {
         AND role IN ('coach','sales')
     `).run(...phones)
   }
-  console.log(`✓ 教练数据卫生（自动清理测试教练 ${testTeachers.length} 人）`)
+  console.log(`✓ 教练数据卫生（${TAG}测试教练 ${testTeachers.length} 人）`)
 } else {
   console.log('✓ 教练数据卫生（无测试教练残留）')
 }
@@ -454,7 +547,7 @@ if (dupScheds > 0) {
       )
     )
   `).run()
-  console.log(`✓ 排期去重自愈（清理重复排期 ${dupScheds} 条）`)
+  console.log(`✓ 排期去重自愈（${HEAL}清理重复排期 ${dupScheds} 条）`)
 } else {
   console.log('✓ 排期去重自愈（无重复排期）')
 }
@@ -471,10 +564,13 @@ if (testGenericNotices > 0) {
     WHERE title IN ('活动取消通知','课时不足提醒','会员即将到期提醒','活动变更通知')
       AND (content LIKE '%测试%' OR content LIKE '%提醒调试%')
   `).run()
-  console.log(`✓ 测试通知清理（清理通用标题测试通知 ${testGenericNotices} 条）`)
+  console.log(`✓ 测试通知清理（${HEAL}清理通用标题测试通知 ${testGenericNotices} 条）`)
 } else {
   console.log('✓ 测试通知清理（无残留）')
 }
 
+if (!APPLY) {
+  console.log('[Hygiene] DRY-RUN 结束：以上标记「待清理」的条目尚未写入数据库，加 --apply 执行清理。')
+}
 console.log(issues ? `数据卫生检查失败，共 ${issues} 项` : '✓ 数据卫生检查通过')
 process.exit(issues ? 1 : 0)
