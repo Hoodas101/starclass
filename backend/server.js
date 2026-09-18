@@ -487,4 +487,28 @@ function runSubscribeMsgPush() {
 setTimeout(runSubscribeMsgPush, 60 * 1000);
 setInterval(runSubscribeMsgPush, 10 * 60 * 1000);
 
+// 优雅关闭（SIGTERM / SIGINT）。Docker exec-form CMD 下 node 是 PID 1，不注册处理器则
+// `docker stop` 的 SIGTERM 不被处理，10s 后被 SIGKILL；注册后才会优雅关闭。
+// 顺序：停止接受新连接 → 等在途请求 → WAL checkpoint → db.close()。
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log('[shutdown] 收到 ' + signal + '，开始优雅关闭...');
+  const forceTimer = setTimeout(function () {
+    console.error('[shutdown] 超时，强制退出');
+    try { db.close(); } catch (e) { console.error('[shutdown] db.close 失败:', e.message); }
+    process.exit(1);
+  }, 8000);
+  forceTimer.unref();
+  server.close(function () {
+    clearTimeout(forceTimer);
+    try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch (e) { console.error('[shutdown] wal_checkpoint 失败:', e.message); }
+    try { db.close(); console.log('[shutdown] 数据库已关闭，退出'); } catch (e) { console.error('[shutdown] db.close 失败:', e.message); }
+    process.exit(0);
+  });
+}
+process.on('SIGTERM', function () { shutdown('SIGTERM'); });
+process.on('SIGINT', function () { shutdown('SIGINT'); });
+
 module.exports = app;

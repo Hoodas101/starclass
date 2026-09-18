@@ -10,6 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const Database = require('better-sqlite3');
 const db = require('../db');
 
 // 备份目录跟随 DB_PATH 所在目录：
@@ -20,6 +21,12 @@ const DB_PATH = process.env.DB_PATH
   : path.join(__dirname, '..', 'db', 'data.db');
 const BACKUP_DIR = path.join(path.dirname(DB_PATH), 'backups');
 
+// 异地副本目录（可选）：本地备份校验通过后复制一份过去，规避「备份与数据库同盘，
+// 单盘损坏即全丢」。未配置时该特性完全关闭，不影响任何既有行为。
+const OFFSITE_DIR = process.env.BACKUP_OFFSITE_DIR
+  ? path.resolve(process.env.BACKUP_OFFSITE_DIR)
+  : '';
+
 // 备份文件统一前缀（backup_ 为定时/手动备份；restore-backup- 为整库还原前的安全网备份）
 const BACKUP_PREFIXES = ['backup_', 'restore-backup-'];
 const isBackupFile = (f) => f.endsWith('.db') && BACKUP_PREFIXES.some((p) => f.startsWith(p));
@@ -27,6 +34,56 @@ const isBackupFile = (f) => f.endsWith('.db') && BACKUP_PREFIXES.some((p) => f.s
 // 确保备份目录存在
 if (!fs.existsSync(BACKUP_DIR)) {
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
+}
+
+/**
+ * 校验备份文件是否可用（坏备份不得冒充成功）
+ *
+ * - .db：用 better-sqlite3 独立打开并执行 PRAGMA integrity_check，
+ *   仅当返回 'ok' 才通过；打开失败 / 结果非 ok 均判定为坏备份。
+ * - 其他归档：退化为「存在 + 文件大小 > 0」的基本校验。
+ *
+ * @returns {{ ok: boolean, size?: number, error?: string }}
+ */
+function verifyBackupFile(filepath) {
+  try {
+    if (!fs.existsSync(filepath)) return { ok: false, error: '备份文件不存在' };
+
+    const stat = fs.statSync(filepath);
+    if (stat.size <= 0) return { ok: false, error: '备份文件大小为 0' };
+
+    if (filepath.endsWith('.db')) {
+      const probe = new Database(filepath, { readonly: true, fileMustExist: true });
+      try {
+        const result = probe.pragma('integrity_check', { simple: true });
+        if (result !== 'ok') return { ok: false, error: `integrity_check 未通过: ${result}` };
+      } finally {
+        probe.close(); // 必须关闭，否则后续 unlink 可能失败
+      }
+    }
+
+    return { ok: true, size: stat.size };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
+ * 把已校验通过的备份复制到异地目录（fail-safe）
+ *
+ * 未配置 BACKUP_OFFSITE_DIR 时直接跳过；目录不存在会自动创建；
+ * 任何失败（不可写 / 磁盘满等）只打日志，绝不抛出，不影响本地备份与业务主流程。
+ */
+function copyToOffsite(filepath, filename) {
+  if (!OFFSITE_DIR) return;
+  try {
+    if (!fs.existsSync(OFFSITE_DIR)) fs.mkdirSync(OFFSITE_DIR, { recursive: true });
+    const dest = path.join(OFFSITE_DIR, filename);
+    fs.copyFileSync(filepath, dest);
+    console.log(`[Backup] 异地副本已写入: ${dest}`);
+  } catch (e) {
+    console.error('[Backup] 异地副本失败（不影响本地备份）:', e.message);
+  }
 }
 
 /**
@@ -61,13 +118,24 @@ async function createBackup() {
     // 使用 better-sqlite3 v11+ 的 backup API（在线热备份，不阻塞读写，返回 Promise）
     await db.backup(filepath);
 
-    const stat = fs.statSync(filepath);
-    console.log(`[Backup] 数据库备份完成: ${filename} (${(stat.size / 1024 / 1024).toFixed(2)} MB)`);
+    // 完整性校验：坏备份不得冒充成功。校验不通过则删除该文件并返回失败。
+    const check = verifyBackupFile(filepath);
+    if (!check.ok) {
+      console.error(`[Backup] 完整性校验失败，判定为坏备份: ${filename} - ${check.error}`);
+      try { fs.unlinkSync(filepath); } catch (e) { /* 忽略删除失败 */ }
+      return { success: false, error: `完整性校验失败: ${check.error}` };
+    }
 
-    // 清理旧备份
+    const size = check.size;
+    console.log(`[Backup] 数据库备份完成: ${filename} (${(size / 1024 / 1024).toFixed(2)} MB) 完整性校验通过`);
+
+    // 异地副本（fail-safe，失败不影响主流程）
+    copyToOffsite(filepath, filename);
+
+    // 清理旧备份（本地 + 异地）
     cleanOldBackups();
 
-    return { success: true, filename, size: stat.size };
+    return { success: true, filename, size };
   } catch (err) {
     console.error('[Backup] 备份失败:', err.message);
     return { success: false, error: err.message };
@@ -75,30 +143,43 @@ async function createBackup() {
 }
 
 /**
- * 清理超出保留数量的旧备份
+ * 清理指定目录中超出保留数量的旧备份（通用，可作用于本地或异地目录）
+ */
+function cleanDir(dir, retention) {
+  let files;
+  try {
+    files = fs.readdirSync(dir)
+      .filter(isBackupFile)
+      .map(f => ({
+        name: f,
+        path: path.join(dir, f),
+        mtime: fs.statSync(path.join(dir, f)).mtime.getTime(),
+      }))
+      .sort((a, b) => b.mtime - a.mtime); // 新→旧
+  } catch (e) {
+    console.error(`[Backup] 读取备份目录失败 ${dir}:`, e.message);
+    return;
+  }
+
+  if (files.length <= retention) return;
+
+  for (const f of files.slice(retention)) {
+    try {
+      fs.unlinkSync(f.path);
+      console.log(`[Backup] 清理旧备份: ${f.path}`);
+    } catch (e) { /* 忽略删除失败 */ }
+  }
+}
+
+/**
+ * 清理超出保留数量的旧备份（本地备份目录 + 异地副本目录）
  */
 function cleanOldBackups() {
   const config = getBackupConfig();
   const retention = Math.max(1, config.retention || 30);
 
-  const files = fs.readdirSync(BACKUP_DIR)
-    .filter(isBackupFile)
-    .map(f => ({
-      name: f,
-      path: path.join(BACKUP_DIR, f),
-      mtime: fs.statSync(path.join(BACKUP_DIR, f)).mtime.getTime(),
-    }))
-    .sort((a, b) => b.mtime - a.mtime); // 新→旧
-
-  if (files.length > retention) {
-    const toDelete = files.slice(retention);
-    for (const f of toDelete) {
-      try {
-        fs.unlinkSync(f.path);
-        console.log(`[Backup] 清理旧备份: ${f.name}`);
-      } catch (e) { /* 忽略删除失败 */ }
-    }
-  }
+  cleanDir(BACKUP_DIR, retention);
+  if (OFFSITE_DIR && OFFSITE_DIR !== BACKUP_DIR) cleanDir(OFFSITE_DIR, retention);
 }
 
 /**

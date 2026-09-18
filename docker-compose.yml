@@ -29,6 +29,10 @@ services:
       # 上传的图片等附件跨重建保留
       - uploads:/app/backend/uploads
       - data:/data
+      # 异地备份（可选）：本地备份默认落在 data 卷的 /data/backups，与数据库同盘。
+      # 需异机/异盘副本时，取消下行注释挂载宿主机目录，并在 .env 里设置
+      # BACKUP_OFFSITE_DIR=/offsite-backups（env_file 会自动注入该变量）。
+      # - /mnt/offsite-backups:/offsite-backups
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]

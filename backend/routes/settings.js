@@ -404,10 +404,12 @@ router.get('/backups', (req, res) => {
 /**
  * POST /api/settings/backups/create — 立即创建备份（仅管理员）
  */
-router.post('/backups/create', (req, res) => {
+router.post('/backups/create', async (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json({ code: 403, data: null, message: '仅管理员可创建备份' });
-    const result = createBackup();
+    // createBackup 是 async：必须 await，否则拿到的是 Promise，
+    // result.success 恒为 undefined，接口会永远返回「备份失败」（含校验结果也拿不到）
+    const result = await createBackup();
     if (result.success) {
       res.json(success(result));
     } else {
