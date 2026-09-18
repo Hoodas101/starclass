@@ -137,22 +137,30 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     `).get(dayStartMs(prevWeekStart), dayEndMs(prevWeekEnd), ...spParams);
     const prevWeekRevenue = prevWeekRevenueRow?.total || 0;
 
-    // 本月收入
+    // 本月净收入（口径与财务统一：收入按支付月归属，退款按退款发生月归属）
     const monthStart = today.slice(0, 7); // YYYY-MM
     const monthRevenueRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND paid_at >= ? AND paid_at < ?${spSql}
+      SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at < ?${spSql}
     `).get(monthStartMs(monthStart), nextMonthStartMs(monthStart), ...spParams);
-    const monthRevenue = monthRevenueRow?.total || 0;
+    const monthRefundRow = db.prepare(`
+      SELECT COALESCE(SUM(refunded_amount), 0) as total FROM orders
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND refunded_amount > 0 AND updated_at >= ? AND updated_at < ?${spSql}
+    `).get(monthStartMs(monthStart), nextMonthStartMs(monthStart), ...spParams);
+    const monthRevenue = (monthRevenueRow?.total || 0) - (monthRefundRow?.total || 0);
 
-    // 上月收入
+    // 上月净收入（同口径，保证环比可比）
     const prevMonthKey = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1);
     const prevMonthStart = `${prevMonthKey.getFullYear()}-${String(prevMonthKey.getMonth() + 1).padStart(2, '0')}`;
     const prevMonthRevenueRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND paid_at >= ? AND paid_at < ?${spSql}
+      SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at < ?${spSql}
     `).get(monthStartMs(prevMonthStart), nextMonthStartMs(prevMonthStart), ...spParams);
-    const prevMonthRevenue = prevMonthRevenueRow?.total || 0;
+    const prevMonthRefundRow = db.prepare(`
+      SELECT COALESCE(SUM(refunded_amount), 0) as total FROM orders
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND refunded_amount > 0 AND updated_at >= ? AND updated_at < ?${spSql}
+    `).get(monthStartMs(prevMonthStart), nextMonthStartMs(prevMonthStart), ...spParams);
+    const prevMonthRevenue = (prevMonthRevenueRow?.total || 0) - (prevMonthRefundRow?.total || 0);
 
     // 本年 / 去年收入
     const yearRevenueRow = db.prepare(`
