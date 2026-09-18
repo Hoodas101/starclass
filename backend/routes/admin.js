@@ -6,7 +6,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { success, fail, safeFail, generateId, getOpenId, formatDate, now, hashPassword, resolvePerms, hasPerm, getReqUser, attendanceRate, isAdminReq } = require('../utils');
+const { success, fail, safeFail, generateId, getOpenId, getActor, recordAudit, formatDate, now, hashPassword, resolvePerms, hasPerm, getReqUser, attendanceRate, isAdminReq } = require('../utils');
 // 订单明细解析：导出 / 退卡 / 财务报表共用同一实现（此前各自复制，口径已分叉）
 const { parseItems, itemQuantity, itemLineTotal } = require('../utils/items');
 
@@ -595,6 +595,16 @@ router.post('/suppressions', adminOnly, (req, res) => {
       INSERT INTO suppressions (id, phone, name, type, reason, created_by, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(id, phone, name, type, reason, getOpenId(req) || '', now());
+    // 勿扰名单影响营销触达范围，需留痕（手机号为敏感信息，不写入审计）
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'suppression',
+      entityId: id,
+      action: 'create',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { name, type, reason },
+    });
     res.json(success({ id }));
   } catch (err) {
     res.status(500).json(safeFail('添加勿扰失败'));
@@ -608,6 +618,15 @@ router.delete('/suppressions/:id', adminOnly, (req, res) => {
   try {
     const result = db.prepare('DELETE FROM suppressions WHERE id = ?').run(req.params.id);
     if (result.changes === 0) return res.json(fail('勿扰记录不存在'));
+    // 移出勿扰名单会恢复营销触达，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'suppression',
+      entityId: req.params.id,
+      action: 'delete',
+      actorId: actor.id,
+      actorRole: actor.role,
+    });
     res.json(success({ id: req.params.id, removed: result.changes }));
   } catch (err) {
     res.status(500).json(safeFail('移除勿扰失败'));
@@ -767,6 +786,16 @@ router.post('/teachers', adminOnly, (req, res) => {
           .run(role, Array.isArray(permissions) ? JSON.stringify(permissions) : '', now(), u.id);
       }
     }
+    // 新增教师会同步创建/提权登录账号（role/permissions），属权限变更，必须留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'teacher',
+      entityId: id,
+      action: 'create',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { name: name.trim(), role, has_phone: !!phone, permissions: Array.isArray(permissions) ? permissions : [] },
+    });
     res.json(success({ id }));
   } catch (err) {
     console.error('[admin teachers create]', err);
@@ -888,6 +917,24 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
           .run(hashPassword(STAFF_DEFAULT_PASSWORD), now(), targetPhone);
       }
     }
+    // 教师更新可能同步改登录账号角色/权限/密码/启用状态，属权限变更，必须留痕
+    // （手机号与密码为敏感信息，仅记录「是否变更」布尔位）
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'teacher',
+      entityId: req.params.id,
+      action: 'update',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { name: existing.name },
+      after: {
+        name: name || existing.name,
+        status: status || null,
+        role: hasValidRole ? role : null,
+        phone_changed: !!phoneChanged,
+        password_reset: !!resetPassword,
+      },
+    });
     res.json(success({ id: req.params.id }));
   } catch (err) {
     res.status(500).json(safeFail('更新教师失败'));
@@ -924,6 +971,17 @@ router.delete('/teachers/:id', adminOnly, (req, res) => {
       UPDATE schedules SET teacher_id = '', teacher_name = '', updated_at = ?
       WHERE teacher_id = ? AND status = 'scheduled' AND date >= ?
     `).run(now(), req.params.id, new Date().toISOString().slice(0, 10));
+    // 停用教师会同步停用登录账号并清空未来排课，属权限与排课变更，必须留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'teacher',
+      entityId: req.params.id,
+      action: 'deactivate',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { name: existing.name },
+      after: { status: 'inactive', schedules_cleared: true },
+    });
     res.json(success({ id: req.params.id }));
   } catch (err) {
     res.status(500).json(safeFail('停用教师失败'));
@@ -980,6 +1038,16 @@ router.post('/courses', adminOnly, (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
     `).run(id, name.trim(), category || '常规训练', description || '', duration || 90,
       consumeClasses || 1, color || '#FF6B35', maxStudents || 0, pricePerClass || 0, now());
+    // 新建活动（班级）属业务基础数据变更，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'course',
+      entityId: id,
+      action: 'create',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { name: name.trim(), category: category || '常规训练', consume_classes: consumeClasses || 1 },
+    });
 
     res.json(success({ id }));
   } catch (err) {
@@ -1017,6 +1085,22 @@ router.put('/courses/:id', adminOnly, (req, res) => {
         is_active = COALESCE(?, is_active)
       WHERE id = ?
     `).run(p(name), p(category), p(description), p(duration), p(consumeClasses), p(color), p(maxStudents), p(pricePerClass), p(isActive), req.params.id);
+    // 活动（班级）配置变更影响课时消耗口径与售卖，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'course',
+      entityId: req.params.id,
+      action: 'update',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { name: existing.name },
+      after: {
+        name: name || existing.name,
+        consume_classes: consumeClasses === undefined ? null : consumeClasses,
+        is_active: isActive === undefined ? null : (isActive ? 1 : 0),
+        archived: (typeof archived === 'number' || typeof archived === 'boolean') ? (archived ? 1 : 0) : null,
+      },
+    });
 
     res.json(success({ id: req.params.id }));
   } catch (err) {
@@ -1065,6 +1149,17 @@ router.delete('/courses/:id', adminOnly, (req, res) => {
       }
       db.prepare('DELETE FROM courses WHERE id = ?').run(req.params.id);
     })();
+    // 删除活动会级联清理排期/报名/签到/积分流水，属高危操作，必须留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'course',
+      entityId: req.params.id,
+      action: 'delete',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { name: existing.name, is_active: existing.is_active },
+      after: { deleted_schedules: scheds.length },
+    });
     res.json(success({ id: req.params.id }));
   } catch (err) {
     console.error('[admin course delete]', err);
@@ -1117,6 +1212,16 @@ router.post('/courses/:id/members', adminOnly, (req, res) => {
       if (!stu) continue;
       added += ins.run(generateId('sc_'), sid, req.params.id, t).changes;
     }
+    // 班级成员归属变更影响排课与报名范围，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'class_member',
+      entityId: req.params.id,
+      action: 'add',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { added, requested: ids.length, student_ids: ids },
+    });
     res.json(success({ added }));
   } catch (err) {
     console.error('[admin course members add]', err);
@@ -1133,6 +1238,16 @@ router.delete('/courses/:id/members/:studentId', adminOnly, (req, res) => {
     if (!cls) return res.json(fail('班级不存在'));
     const r = db.prepare('DELETE FROM student_class WHERE class_id = ? AND student_id = ?')
       .run(req.params.id, req.params.studentId);
+    // 移除班级成员影响排课与报名范围，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'class_member',
+      entityId: `${req.params.id}:${req.params.studentId}`,
+      action: 'remove',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { removed: r.changes },
+    });
     res.json(success({ removed: r.changes }));
   } catch (err) {
     console.error('[admin course members remove]', err);
@@ -1197,6 +1312,16 @@ router.post('/students/:id/classes', adminOnly, (req, res) => {
       return { removed: toRemove.length, added, total: wantSet.size };
     });
     const result = tx();
+    // 覆盖式改写学员班级归属（含移除与新增），需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'class_member',
+      entityId: req.params.id,
+      action: 'update',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { removed: result.removed, added: result.added, total: result.total, class_ids: want },
+    });
     res.json(success({ ...result, studentId: req.params.id }));
   } catch (err) {
     console.error('[admin student classes update]', err);

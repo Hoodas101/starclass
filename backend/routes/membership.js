@@ -11,7 +11,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, isAdminReq, isCoachReq, canViewStudentData, calcCardExpiresAt } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, isAdminReq, isCoachReq, canViewStudentData, calcCardExpiresAt } = require('../utils');
 // 订单明细解析 / 每次课消耗课时数：与签到扣课、导出报表共用同一实现
 const { parseItems, itemLineTotal } = require('../utils/items');
 const { resolveConsumeClasses } = require('../utils/deduction');
@@ -75,6 +75,18 @@ router.post('/pause', (req, res) => {
       WHERE id = ?
     `).run(currentTime, reason, currentTime, cardId);
 
+    // 暂停改变卡状态与有效期计算口径，需留痕（谁、何时、为何暂停）
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'membership_card',
+      entityId: cardId,
+      action: 'pause',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { status: card.status },
+      after: { status: 'paused', reason },
+    });
+
     res.json(success({ id: cardId, status: 'paused', pausedAt: currentTime }));
   } catch (err) {
     console.error('[pause card]', err);
@@ -111,6 +123,18 @@ router.post('/resume', (req, res) => {
       WHERE id = ?
     `).run(totalPaused, newExpiresAt, currentTime, cardId);
 
+    // 恢复会顺延有效期（资产口径变化），需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'membership_card',
+      entityId: cardId,
+      action: 'resume',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { status: card.status, expires_at: card.expires_at || 0 },
+      after: { status: 'active', expires_at: newExpiresAt, paused_ms: pausedMs },
+    });
+
     res.json(success({
       id: cardId,
       status: 'active',
@@ -141,6 +165,16 @@ router.post('/card-type', (req, res) => {
         INSERT INTO membership_cards (id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, transferable, refundable, product_type, unit, description, created_at)
         VALUES (?, ?, 0, 0, 'goods', ?, ?, '', 0, 1, 'goods', ?, ?, ?)
       `).run(id, name, pointsReward || 0, price || 0, unit || '', description || '', now());
+      // 产品（卡类型/商品）定价与权益变更影响销售口径，需留痕
+      const actor = getActor(req);
+      recordAudit(db, {
+        entity: 'card_type',
+        entityId: id,
+        action: 'create',
+        actorId: actor.id,
+        actorRole: actor.role,
+        after: { name, product_type: 'goods', price: price || 0 },
+      });
       return res.json(success({ id, productType: 'goods' }));
     }
 
@@ -156,6 +190,24 @@ router.post('/card-type', (req, res) => {
       INSERT INTO membership_cards (id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, transferable, refundable, product_type, unit, description, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'membership', '', ?, ?)
     `).run(id, name, mode === 'count' ? totalClasses : 0, validDays || 0, mode, pointsReward || 0, price || 0, courseScope || '', transferable ? 1 : 0, refundable !== false ? 1 : 0, description || '', now());
+
+    // 产品（卡类型/商品）定价与权益变更影响销售口径，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'card_type',
+      entityId: id,
+      action: 'create',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: {
+        name,
+        product_type: 'membership',
+        billing_mode: mode,
+        price: price || 0,
+        total_classes: mode === 'count' ? totalClasses : 0,
+        valid_days: validDays || 0,
+      },
+    });
 
     res.json(success({ id, billingMode: mode }));
   } catch (err) {
@@ -270,6 +322,17 @@ router.put('/card-type/:id', (req, res) => {
       `).run(name, totalClasses, validDays, billingMode, pointsReward, price, courseScope, transferable, refundable, description, isActive, req.params.id);
     }
 
+    // 产品（卡类型/商品）定价与权益变更影响销售口径，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'card_type',
+      entityId: req.params.id,
+      action: 'update',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { product_type: isGoods ? 'goods' : 'membership', is_active: isActive === undefined ? null : (isActive ? 1 : 0) },
+    });
+
     res.json(success({ id: req.params.id }));
   } catch (err) {
     res.status(500).json(safeFail("更新会员卡类型失败"));
@@ -285,6 +348,16 @@ router.delete('/card-type/:id', (req, res) => {
     const existing = db.prepare('SELECT id FROM membership_cards WHERE id = ?').get(req.params.id);
     if (!existing) return res.json(fail('会员卡类型不存在'));
     db.prepare('UPDATE membership_cards SET is_active = 0 WHERE id = ?').run(req.params.id);
+    // 停用产品会使前端不可再售，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'card_type',
+      entityId: req.params.id,
+      action: 'deactivate',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { is_active: 0 },
+    });
     res.json(success({ id: req.params.id }));
   } catch (err) {
     res.status(500).json(safeFail("停用会员卡类型失败"));
@@ -319,6 +392,24 @@ router.post('/activate', (req, res) => {
     `).run(id, cardTypeId, cardType.name, cardType.billing_mode || 'time', studentId, student.name,
       cardType.total_classes, cardType.total_classes,
       activatedAt, expiresAt, orderId || '', now(), now());
+
+    // 开卡即产生一项会员资产（课时/有效期），需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'membership_card',
+      entityId: id,
+      action: 'activate',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: {
+        card_type_id: cardTypeId,
+        student_id: studentId,
+        billing_mode: cardType.billing_mode || 'time',
+        total_classes: cardType.total_classes,
+        expires_at: expiresAt,
+        order_id: orderId || '',
+      },
+    });
 
     res.json(success({ id, cardTypeName: cardType.name, billingMode: cardType.billing_mode || 'time', totalClasses: cardType.total_classes, expiresAt }));
   } catch (err) {
@@ -422,6 +513,16 @@ router.post('/deduct', (req, res) => {
           )
         `).run(scheduleId, studentId, card.id, now(), scheduleId, studentId);
       })();
+      // 扣课会消耗卡内资产，需留痕（时效制不扣课时，但落了出席流水）
+      const actor = getActor(req);
+      recordAudit(db, {
+        entity: 'membership_card',
+        entityId: card.id,
+        action: 'deduct',
+        actorId: actor.id,
+        actorRole: actor.role,
+        after: { mode: 'time', deducted: 0, schedule_id: scheduleId, student_id: studentId },
+      });
       return res.json(success({ cardId: card.id, mode: 'time', deducted: 0, message: '时效制会员无需扣课' }));
     }
 
@@ -451,6 +552,23 @@ router.post('/deduct', (req, res) => {
     if (deductOutcome.err) return res.json(fail(deductOutcome.err));
 
     const updatedCard = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(deductOutcome.cardId);
+    // 扣课消耗卡内课时资产，需留痕（含扣减前后余额，便于对账）
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'membership_card',
+      entityId: card.id,
+      action: 'deduct',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { remaining_classes: card.remaining_classes, used_classes: card.used_classes },
+      after: {
+        remaining_classes: updatedCard.remaining_classes,
+        used_classes: updatedCard.used_classes,
+        deducted: n,
+        schedule_id: scheduleId,
+        student_id: studentId,
+      },
+    });
     res.json(success({
       cardId: card.id,
       mode: 'count',
@@ -589,6 +707,21 @@ router.post('/refund', (req, res) => {
     })();
 
     if (result.err) return res.json(fail(result.err));
+    // 退卡涉及资金流出与权益回收，必须留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'refund',
+      entityId: result.orderId,
+      action: 'refund',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: {
+        card_id: cardId,
+        student_id: studentId,
+        refund_amount: result.refundAmount,
+        reason: reason || '',
+      },
+    });
     res.json(success({ cardId, refundAmount: result.refundAmount, orderId: result.orderId }));
   } catch (err) {
     console.error('[membership refund]', err);

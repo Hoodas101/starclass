@@ -12,7 +12,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, isAdminReq, JWT_SECRET: QR_SECRET } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, isAdminReq, JWT_SECRET: QR_SECRET } = require('../utils');
 const { parseItems } = require('../utils/items');
 
 // member_no / archived / qr_exp 列已收编至 migrations/011。
@@ -107,6 +107,17 @@ router.post('/', (req, res) => {
       }
     }
 
+    // 新建成员会分配会员编号并可能创建家长账号/绑定，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'student',
+      entityId: id,
+      action: 'create',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { name, status: 'active', has_parent_phone: !!(phone && /^1[3-9]\d{9}$/.test(phone)) },
+    });
+
     res.json(success({ id, name }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
@@ -193,6 +204,16 @@ router.post('/import', (req, res) => {
     });
 
     const { okCount, failed } = runImport();
+    // 批量导入属批量改写业务数据的高危操作，必须留痕（批次无单一主键，entityId 留空）
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'student',
+      entityId: '',
+      action: 'import',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { created: okCount.length, failed: failed.length },
+    });
     res.json(success({ success: okCount.length, failed, created: okCount.length }));
   } catch (err) {
     console.error('[students import]', err);
@@ -568,6 +589,17 @@ router.put('/:id', requireAuth, (req, res) => {
           updated_at = ?
         WHERE id = ?
       `).run(name, gender, birthday, school, grade, hobby, level, remark, now(), id);
+      // 家长自助修改成员基础信息，同样需要留痕
+      const actor = getActor(req);
+      recordAudit(db, {
+        entity: 'student',
+        entityId: id,
+        action: 'update',
+        actorId: actor.id,
+        actorRole: actor.role,
+        before: { name: existing.name },
+        after: { name: name || existing.name },
+      });
       return res.json(success({ id }));
     }
 
@@ -646,6 +678,23 @@ router.put('/:id', requireAuth, (req, res) => {
       }
     }
 
+    // 管理员修改成员（含状态/归档/家长绑定迁移），需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'student',
+      entityId: id,
+      action: 'update',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { name: existing.name, status: existing.status },
+      after: {
+        name: name || existing.name,
+        status: status || existing.status,
+        archived: archived === undefined ? null : (archived ? 1 : 0),
+        parent_phone_changed: !!(isAdmin && parentPhone),
+      },
+    });
+
     res.json(success({ id }));
   } catch (err) {
     console.error('[updateStudent]', err);
@@ -669,6 +718,16 @@ router.delete('/:id', requireAuth, (req, res) => {
       db.prepare('DELETE FROM parent_bindings WHERE student_id = ?').run(id);
     });
     tx();
+    // 软删除（退费归档）并解绑家长，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'student',
+      entityId: id,
+      action: 'delete',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { status: 'refunded', parents_unbound: true },
+    });
     res.json(success({ id, status: 'refunded' }));
   } catch (err) {
     console.error('[deleteStudent]', err);

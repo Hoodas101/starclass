@@ -6,7 +6,7 @@ const router = express.Router();
 const db = require('../db');
 const fs = require('fs');
 const path = require('path');
-const { generateId, generateToken, success, fail, safeFail, getOpenId, escapeLike, now, hashPassword, verifyPassword, resolvePerms } = require('../utils');
+const { generateId, generateToken, success, fail, safeFail, getOpenId, escapeLike, now, hashPassword, verifyPassword, resolvePerms, getActor, recordAudit } = require('../utils');
 
 // 微信 access_token 内存缓存（有效期内的 token 复用，避免频繁请求微信接口）
 let _wxAccessToken = '';
@@ -23,9 +23,28 @@ const PARENT_PHONE_LOGIN = process.env.PARENT_PHONE_LOGIN
   ? process.env.PARENT_PHONE_LOGIN === 'true'
   : process.env.NODE_ENV !== 'production';
 
+// 头像类型与扩展名按文件头（魔数）识别，不依赖客户端声明的 MIME / 扩展名。
+function detectImageType(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return null;
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return '.jpg'; // JPEG
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return '.png'; // PNG
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return '.gif'; // GIF
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+      buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return '.webp'; // WEBP
+  return null;
+}
+
+// 仅删除头像目录内的旧文件，防止 avatar URL 由客户端传入造成路径穿越删除任意文件。
+function safeUnlinkAvatar(url) {
+  if (!url || typeof url !== 'string') return;
+  const rel = url.replace(/^\/+/, '');
+  if (!rel.startsWith('uploads/avatars/')) return;
+  try { fs.unlinkSync(path.join(__dirname, '..', rel)); } catch (e) { /* 不存在或删除失败：忽略 */ }
+}
+
 /**
  * POST /api/auth/upload/avatar — 上传个人头像（base64 → 本地文件）
- * Body: { dataUrl }  返回 { url: '/uploads/avatars/xxx.png' }
+ * Body: { dataUrl }  返回 { url: '/uploads/avatars/xxx.<ext>' }
  */
 router.post('/upload/avatar', (req, res) => {
   try {
@@ -725,6 +744,15 @@ router.post('/changePassword', (req, res) => {
     db.prepare('UPDATE users SET password = ?, token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE id = ?')
       .run(hashPassword(newPassword), now(), user.id);
     const freshUser = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+    // 改密是高危安全事件，必须留痕（谁、何时改了密码；不记录密码本身）。
+    const actorPwd = getActor(req);
+    recordAudit(db, {
+      entity: 'user',
+      entityId: String(user.id),
+      action: 'change_password',
+      actorId: actorPwd.id,
+      actorRole: actorPwd.role,
+    });
     res.json(success({
       updated: true,
       token: generateToken({ openid: freshUser.openid, userId: freshUser.id, role: freshUser.role, tv: freshUser.token_version || 0 }),
