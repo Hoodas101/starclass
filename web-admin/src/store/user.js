@@ -99,6 +99,14 @@ try {
     localStorage.setItem('edu_user_info', JSON.stringify(userInfo.value))
   }
 
+  // 替换当前 Token。改密（/auth/changePassword）会 bump token_version 并返回新 Token，
+  // 旧 Token 随即失效：若不落盘，下一次请求就会被 401 登出（request.js 会清 token 并跳登录页）。
+  const setToken = (newToken) => {
+    if (!newToken) return
+    token.value = newToken
+    localStorage.setItem('edu_token', newToken)
+  }
+
   return {
     token,
     userInfo,
@@ -109,6 +117,7 @@ try {
     login,
     logout,
     getUserInfo,
-    updateUserInfo
+    updateUserInfo,
+    setToken
   }
 })

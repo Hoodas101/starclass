@@ -52,6 +52,16 @@ const routes = [
         meta: { title: '团队管理', icon: 'Avatar', roles: ['admin', 'coach'], perm: 'staff' }
       },
       {
+        // 个人设置：全员工角色（管理员/教练/销售）可访问的自助改密入口。
+        // 后端 /auth/changePassword 本就支持这三种角色，但此前承载改密表单的系统设置页
+        // 仅 roles:['admin']，教练与销售拿不到任何改密入口（无法更换初始密码）。
+        // 刻意不设 meta.title：本页由右上角用户菜单进入，不进入侧栏菜单。
+        path: 'profile',
+        name: 'Profile',
+        component: () => import('@/views/profile/index.vue'),
+        meta: { roles: ['admin', 'coach', 'sales'] }
+      },
+      {
         path: 'settings',
         name: 'Settings',
         component: () => import('@/views/settings/index.vue'),

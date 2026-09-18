@@ -69,7 +69,7 @@
       </div>
       <div class="stat-card">
         <div class="stat-value">{{ summary.totalSessions }}</div>
-        <div class="stat-label">总次数</div>
+        <div class="stat-label">应到次数</div>
       </div>
       <div class="stat-card">
         <div class="stat-value text-accent">{{ summary.attendedHours }}<span class="stat-unit">课时</span></div>

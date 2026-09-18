@@ -234,54 +234,6 @@
           </el-form>
         </div>
 
-        <!-- 账号安全 -->
-        <div v-if="activeTab === 'account'" class="settings-section">
-          <h3 class="section-title">账号安全</h3>
-          <p class="section-desc">管理员/教练登录密码，修改后立即生效</p>
-
-          <el-form
-            ref="passwordFormRef"
-            :model="passwordForm"
-            :rules="passwordRules"
-            label-width="auto"
-            label-position="left"
-            style="max-width: 480px"
-          >
-            <el-form-item label="原密码" prop="oldPassword">
-              <el-input
-                v-model="passwordForm.oldPassword"
-                type="password"
-                show-password
-                placeholder="请输入原密码"
-                maxlength="20"
-              />
-            </el-form-item>
-            <el-form-item label="新密码" prop="newPassword">
-              <el-input
-                v-model="passwordForm.newPassword"
-                type="password"
-                show-password
-                placeholder="6-20 位新密码"
-                maxlength="20"
-              />
-            </el-form-item>
-            <el-form-item label="确认新密码" prop="confirmPassword">
-              <el-input
-                v-model="passwordForm.confirmPassword"
-                type="password"
-                show-password
-                placeholder="再次输入新密码"
-                maxlength="20"
-              />
-            </el-form-item>
-            <el-form-item>
-              <el-button type="primary" :loading="passwordSaving" @click="submitPassword">
-                修改密码
-              </el-button>
-            </el-form-item>
-          </el-form>
-        </div>
-
         <!-- 数据看板设置 -->
         <div v-if="activeTab === 'dashboard'" class="settings-section">
           <div class="section-head">
@@ -622,7 +574,7 @@
 import { ref, reactive, onMounted, computed } from 'vue'
 import { Upload, Picture, Download, Bell, Plus, Delete, Document, QuestionFilled, WarningFilled, Refresh } from '@element-plus/icons-vue'
 import request from '@/api/request'
-import { getSettings, saveSettings, changePassword, generateRenewalNotices, getDataModules, exportData, importData } from '@/api/modules'
+import { getSettings, saveSettings, generateRenewalNotices, getDataModules, exportData, importData } from '@/api/modules'
 import { useSettingsStore } from '@/store/settings'
 import { useUserStore } from '@/store/user'
 import { SCHEMES, CONCEPTS } from '@/constants/terms'
@@ -638,7 +590,6 @@ const tabs = [
   { key: 'notification', label: '推送规则', icon: 'Bell' },
   { key: 'refund', label: '退费规则', icon: 'Money' },
   { key: 'leave', label: '请假规则', icon: 'Calendar' },
-  { key: 'account', label: '账号安全', icon: 'Lock' },
   { key: 'dashboard', label: '看板设置', icon: 'DataBoard' },
   { key: 'terms', label: '称呼设置', icon: 'EditPen' },
   { key: 'backup', label: '数据备份', icon: 'FolderOpened', adminOnly: true }
@@ -975,55 +926,10 @@ const resetTerms = () => {
 }
 
 // ============================================
-// 账号安全（修改密码）
+// 账号安全（修改密码）已迁至「个人设置」页（views/profile/index.vue）：
+// 该能力面向 admin/coach/sales 全部员工角色，而本页仅管理员可进入，
+// 教练与销售此前没有任何自助改密入口。
 // ============================================
-const passwordFormRef = ref(null)
-const passwordSaving = ref(false)
-const passwordForm = reactive({
-  oldPassword: '',
-  newPassword: '',
-  confirmPassword: ''
-})
-const passwordRules = {
-  oldPassword: [{ required: true, message: '请输入原密码', trigger: 'blur' }],
-  newPassword: [
-    { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 6, max: 20, message: '密码长度为 6-20 位', trigger: 'blur' }
-  ],
-  confirmPassword: [
-    { required: true, message: '请再次输入新密码', trigger: 'blur' },
-    {
-      validator: (_rule, value, callback) => {
-        if (value !== passwordForm.newPassword) callback(new Error('两次输入的密码不一致'))
-        else callback()
-      },
-      trigger: 'blur'
-    }
-  ]
-}
-
-const submitPassword = async () => {
-  if (!passwordFormRef.value) return
-  await passwordFormRef.value.validate(async (valid) => {
-    if (!valid) return
-    passwordSaving.value = true
-    try {
-      await changePassword({
-        oldPassword: passwordForm.oldPassword,
-        newPassword: passwordForm.newPassword
-      })
-      ElMessage.success('密码修改成功')
-      passwordForm.oldPassword = ''
-      passwordForm.newPassword = ''
-      passwordForm.confirmPassword = ''
-    } catch (error) {
-      ElMessage.error(error.message || '修改失败')
-    } finally {
-      passwordSaving.value = false
-    }
-  })
-}
-
 
 onMounted(() => {
   loadSettings()

@@ -6,17 +6,19 @@
  */
 
 // 可配置概念（设置页按此渲染微调项）
+// 注意：此处每一项都必须有实际调用点（$t(key) / terms.xxx），否则用户在设置页改了却看不到任何变化。
+// 'session'（课次/训练）与 'org'（机构/场馆）此前列在此处但全项目零调用点，
+// 属「改了不生效」的假开关，已移出；待相应页面把硬编码文案接入 $t 后再恢复。
+// SCHEMES 中仍保留这两个词条，供后续接线时直接取用。
 export const CONCEPTS = [
   { key: 'instructor', label: '授课员工（教练/老师）' },
   { key: 'learner', label: '被服务者（学员/会员）' },
   { key: 'membership', label: '会员卡/学员卡' },
   { key: 'course', label: '课程/训练' },
   { key: 'checkin', label: '签到/打卡' },
-  { key: 'session', label: '一次排课（课次/训练）' },
   { key: 'leave', label: '请假' },
   { key: 'makeup', label: '补课' },
   { key: 'guardian', label: '家长' },
-  { key: 'org', label: '机构/场馆' },
   { key: 'sales', label: '销售/会籍顾问' },
 ];
 

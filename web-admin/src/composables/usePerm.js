@@ -2,8 +2,10 @@ import { computed } from 'vue'
 import { useUserStore } from '@/store/user'
 
 // 角色默认权限（与后端 DEFAULT_PERMS 一致；自定义权限优先）
+// coachstats 必须与 hubs/StaffHub.vue 的 `roles: ['admin','coach']` 对齐，
+// 否则教练看得到「课时」标签页、后端却因缺少权限键而 403。
 const DEFAULT_PERMS = {
-  coach: ['students', 'schedule', 'checkin', 'leave'],
+  coach: ['students', 'schedule', 'checkin', 'leave', 'coachstats'],
   sales: ['dashboard', 'sales', 'students', 'growth'],
 }
 

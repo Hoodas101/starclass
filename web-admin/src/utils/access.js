@@ -3,8 +3,9 @@
 import { usePerm } from '@/composables/usePerm'
 
 // 与后端 DEFAULT_PERMS 一致（usePerm 同源），供非响应式场景（路由守卫）读取
+// coachstats 见 usePerm.js 的同名说明：须与 StaffHub 的 roles 对齐
 const DEFAULT_PERMS = {
-  coach: ['students', 'schedule', 'checkin', 'leave'],
+  coach: ['students', 'schedule', 'checkin', 'leave', 'coachstats'],
   sales: ['dashboard', 'sales', 'students', 'growth'],
 }
 

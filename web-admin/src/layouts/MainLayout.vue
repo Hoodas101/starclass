@@ -42,8 +42,10 @@
             </div>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item v-if="userStore.userRole === 'admin'" command="profile">
-                  <el-icon><User /></el-icon>个人资料
+                <!-- 个人设置对全部员工角色开放：教练/销售需要自助修改初始密码。
+                     MainLayout 本身仅 admin/coach/sales 可达，故此处无需再按角色收窄。 -->
+                <el-dropdown-item command="profile">
+                  <el-icon><User /></el-icon>个人设置
                 </el-dropdown-item>
                 <el-dropdown-item v-if="userStore.userRole === 'admin'" command="settings">
                   <el-icon><Setting /></el-icon>系统设置
@@ -477,7 +479,7 @@ const menuRoutes = computed(() => {
 const handleCommand = async (command) => {
   switch (command) {
     case 'profile':
-      router.push('/settings')
+      router.push('/profile')
       break
     case 'settings':
       router.push('/settings')
