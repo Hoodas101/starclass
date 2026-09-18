@@ -19,6 +19,11 @@ const db = new Database(DB_PATH);
 
 // 启用 WAL 模式（提升并发性能）
 db.pragma('journal_mode = WAL');
+// 写锁等待上限：better-sqlite3 构造时默认已是 5000ms，此处显式固定为同一值，
+// 使「遇到 SQLITE_BUSY 会等待而不是立刻失败」成为写明的契约而非隐含的驱动默认，
+// 避免将来驱动默认值变化后在并发写（tools/backup.sh 的 sqlite3 .backup、
+// 数据卫生脚本）时过早抛错。若确有长事务竞争，调大此值即可。
+db.pragma('busy_timeout = 5000');
 // 启用外键约束
 db.pragma('foreign_keys = ON');
 
