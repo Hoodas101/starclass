@@ -5,8 +5,9 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, now, parsePagination, hasPerm, getReqUser, escapeLike, isAdminReq } = require('../utils');
+const { generateId, success, fail, safeFail, now, parsePagination, hasPerm, getReqUser, escapeLike, isAdminReq, recordAudit, getActor, getOpenId } = require('../utils');
 const leadSuggestions = require('../utils/lead-suggestions');
+const { getChurnRules } = require('../utils/churn');
 
 // 增长中心权限：管理员或拥有「growth」权限的员工（销售等）
 function canGrowth(req) {
@@ -24,6 +25,17 @@ function formatLead(row) {
     ...row,
     stageText: STAGE_TEXT[row.stage] || row.stage,
   };
+}
+
+// 会员编号生成：与 students.js 的 nextMemberNo 完全一致 —— 只从现有最大编号继续递增，
+// 绝不重排已有编号（编号被 auth.js bindStudent 用于区分同名学员，重排会破坏对账与绑定）。
+// 受「本次仅可改动本文件」的范围约束，此处为必要复制；若后续放宽范围，建议抽到 utils 共享。
+function nextMemberNo() {
+  const rows = db.prepare("SELECT member_no FROM students WHERE member_no LIKE 'NO-%'").all();
+  const max = rows
+    .map((x) => { const m = /^NO-(\d+)$/.exec(x.member_no || ''); return m ? parseInt(m[1], 10) : 0; })
+    .reduce((a, b) => Math.max(a, b), 0);
+  return `NO-${String(max + 1).padStart(4, '0')}`;
 }
 
 /**
@@ -177,8 +189,14 @@ router.delete('/leads/:id', (req, res) => {
 });
 
 /**
- * POST /api/growth/leads/:id/convert — 线索转成交（可选发放奖励积分）
- * Body: { rewardPoints, rewardReason }
+ * POST /api/growth/leads/:id/convert — 线索转成交
+ * Body: { rewardPoints, rewardReason, createStudent, createOrder }
+ *
+ * 向后兼容：不传 createStudent / createOrder 时行为与旧版完全一致 —— 仅把线索翻转为
+ * 「已成交」并可选发放奖励积分，响应仍是 { id, converted, bonus }。
+ * createStudent === true 且线索尚未关联成员时：同事务内创建成员并回写 leads.student_id；
+ * createOrder === true 时：同事务内为该成员建一张 pending 草稿订单（金额 0，待收银台补全）。
+ * 缺少必要信息时跳过对应动作，并在返回中给出 studentSkipped / orderSkipped 原因，绝不写占位值。
  */
 router.post('/leads/:id/convert', (req, res) => {
   try {
@@ -187,38 +205,136 @@ router.post('/leads/:id/convert', (req, res) => {
     if (!row) return res.json(fail('线索不存在'));
     if (row.status === 'converted') return res.json(fail('该线索已成交，请勿重复转化'));
     const t = now();
-    const { rewardPoints, rewardReason = '线索成交奖励' } = req.body;
-    // 状态流转与奖励发放同事务：此前分两步，发奖失败时线索已标记成交，
+    const { rewardPoints, rewardReason = '线索成交奖励', createStudent, createOrder } = req.body || {};
+    // 状态流转、建成员、建订单、发奖励同事务：此前分两步，发奖失败时线索已标记成交，
     // 再点会命中「已成交」拒绝，奖励永远补不上（且读-改-写积分账户存在竞态）。
-    const bonus = db.transaction(() => {
+    const result = db.transaction(() => {
       const guarded = db.prepare(`
         UPDATE leads SET stage = 'deal', status = 'converted', converted_at = ?, updated_at = ?
         WHERE id = ? AND status != 'converted'
       `).run(t, t, req.params.id);
       if (guarded.changes === 0) return { err: '该线索已成交，请勿重复转化' };
 
-      if (rewardPoints && parseInt(rewardPoints) > 0 && row.student_id) {
-        const student = db.prepare('SELECT name FROM students WHERE id = ?').get(row.student_id);
-        if (student) {
-          const existAcc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(row.student_id);
-          if (!existAcc) {
-            db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-              .run(generateId('PTS'), row.student_id, student.name, rewardPoints, rewardPoints, t);
-          } else {
-            db.prepare('UPDATE points SET total_earned = total_earned + ?, balance = balance + ?, updated_at = ? WHERE student_id = ?')
-              .run(rewardPoints, rewardPoints, t, row.student_id);
+      const out = { bonus: null, studentId: row.student_id || '', studentSkipped: null, orderId: '', orderSkipped: null };
+
+      // 1) 可选：创建成员（仅在明确要求且线索当前未关联成员时）
+      if (createStudent === true && !row.student_id) {
+        const name = String(row.name || '').trim();
+        const phone = String(row.phone || '').trim();
+        if (!name) {
+          out.studentSkipped = '线索缺少姓名，未创建成员';
+        } else if (!/^1[3-9]\d{9}$/.test(phone)) {
+          // 手机号是线索唯一可用的联系方式：缺失/非法时创建出的成员无法绑定家长、无法触达，
+          // 故按「缺少必填信息」跳过，不写占位手机号（字段清单与 students.js 创建成员一致）。
+          out.studentSkipped = '线索缺少有效手机号，未创建成员';
+        } else {
+          const studentId = generateId('stu_');
+          db.prepare(`
+            INSERT INTO students (id, name, gender, birthday, school, grade, hobby, level, height, weight, bmi, remark, status, join_date, member_no, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+          `).run(studentId, name, '', '', '', '', '', '', 0, 0, 0, '', t, nextMemberNo(), t, t);
+
+          // 家长账号与绑定：与 students.js 创建成员保持一致，保证手机号登录后可见该成员
+          const parentNameVal = `${name}家长`;
+          const openid = `phone_${phone}`;
+          const existingUser = db.prepare('SELECT id, openid FROM users WHERE phone = ?').get(phone);
+          if (!existingUser) {
+            db.prepare(`
+              INSERT INTO users (id, openid, phone, nickname, avatar, role, status, created_at, updated_at)
+              VALUES (?, ?, ?, ?, '', 'parent', 'active', ?, ?)
+            `).run(generateId('user_'), openid, phone, parentNameVal, t, t);
+          } else if (!String(existingUser.openid || '').startsWith('wx_')) {
+            // 保留微信身份账号的 openid（wx_ 前缀），避免再次微信登录时账号分裂
+            db.prepare('UPDATE users SET openid = ? WHERE phone = ?').run(openid, phone);
           }
-          const balance = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(row.student_id).balance;
-          db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-            .run(generateId('PLG'), row.student_id, 'earn', rewardPoints, balance, rewardReason, t);
-          return { points: rewardPoints, balance };
+          const bindOpenid = existingUser ? String(existingUser.openid || '') : openid;
+          const dupBind = db.prepare('SELECT 1 FROM parent_bindings WHERE student_id = ? AND parent_phone = ?').get(studentId, phone);
+          if (!dupBind) {
+            db.prepare(`
+              INSERT INTO parent_bindings (student_id, student_name, parent_name, parent_openid, parent_phone, relation, is_main, created_at)
+              VALUES (?, ?, ?, ?, ?, '家长', 1, ?)
+            `).run(studentId, name, parentNameVal, bindOpenid, phone, t);
+          }
+
+          db.prepare('UPDATE leads SET student_id = ?, updated_at = ? WHERE id = ?').run(studentId, t, req.params.id);
+          out.studentId = studentId;
         }
       }
-      return null;
+
+      // 2) 可选：创建草稿订单（字段与 orders.js 建单逻辑一致；仅建 pending，金额留 0）
+      if (createOrder === true) {
+        const orderStudentId = out.studentId || row.student_id || '';
+        const student = orderStudentId ? db.prepare('SELECT name FROM students WHERE id = ?').get(orderStudentId) : null;
+        if (!student) {
+          out.orderSkipped = '线索未关联成员，未创建订单';
+        } else {
+          const orderId = generateId('ORD');
+          const orderNo = `ORD${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+          db.prepare(`
+            INSERT INTO orders (id, order_no, user_id, student_id, student_name, order_type, items, total_amount, discount_amount, payable_amount, status, salesperson, remark, is_1v1, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'pending', ?, ?, 0, ?, ?)
+          `).run(orderId, orderNo, getOpenId(req), orderStudentId, student.name, 'membership', JSON.stringify([]),
+            row.salesperson || '', '线索成交自动生成，金额待收银台补全', t, t);
+          out.orderId = orderId;
+        }
+      }
+
+      // 3) 奖励积分：原逻辑不变。out.studentId 在旧调用路径下恒等于 row.student_id，
+      //    故不传新参数时行为与旧版逐条一致。
+      if (rewardPoints && parseInt(rewardPoints) > 0 && out.studentId) {
+        const student = db.prepare('SELECT name FROM students WHERE id = ?').get(out.studentId);
+        if (student) {
+          const existAcc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(out.studentId);
+          if (!existAcc) {
+            db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+              .run(generateId('PTS'), out.studentId, student.name, rewardPoints, rewardPoints, t);
+          } else {
+            db.prepare('UPDATE points SET total_earned = total_earned + ?, balance = balance + ?, updated_at = ? WHERE student_id = ?')
+              .run(rewardPoints, rewardPoints, t, out.studentId);
+          }
+          const balance = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(out.studentId).balance;
+          db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+            .run(generateId('PLG'), out.studentId, 'earn', rewardPoints, balance, rewardReason, t);
+          out.bonus = { points: rewardPoints, balance };
+        }
+      }
+
+      // 转化是 CRM 主链路的关键节点（可能连带建成员/建订单），必须留痕
+      const actor = getActor(req);
+      recordAudit(db, {
+        entity: 'lead',
+        entityId: req.params.id,
+        action: 'lead_convert',
+        actorId: actor.id,
+        actorRole: actor.role,
+        before: { stage: row.stage, status: row.status, student_id: row.student_id || '' },
+        after: {
+          stage: 'deal',
+          status: 'converted',
+          studentId: out.studentId || '',
+          orderId: out.orderId || '',
+          studentSkipped: out.studentSkipped || null,
+          orderSkipped: out.orderSkipped || null,
+          rewardPoints: out.bonus ? out.bonus.points : 0,
+        },
+      });
+
+      return out;
     })();
-    if (bonus && bonus.err) return res.json(fail(bonus.err));
-    res.json(success({ id: req.params.id, converted: true, bonus }));
+
+    if (result.err) return res.json(fail(result.err));
+    const payload = { id: req.params.id, converted: true, bonus: result.bonus };
+    // 扩展字段仅在调用方显式使用新参数时返回：旧调用方（不传 createStudent/createOrder）
+    // 收到的响应与改造前逐字节一致，便于灰度期间前端/测试做严格比对。
+    if (createStudent === true || createOrder === true) {
+      if (result.studentId) payload.studentId = result.studentId;
+    }
+    if (result.studentSkipped) payload.studentSkipped = result.studentSkipped;
+    if (result.orderId) payload.orderId = result.orderId;
+    if (result.orderSkipped) payload.orderSkipped = result.orderSkipped;
+    res.json(success(payload));
   } catch (err) {
+    console.error('[lead convert]', err);
     res.status(500).json(safeFail('转化失败'));
   }
 });
@@ -279,13 +395,16 @@ router.get('/leads/:id/suggestion', (req, res) => {
 });
 
 /**
- * GET /api/growth/churn — 流失预警（近 30 天无签到 或 会员卡已过期未续费）
+ * GET /api/growth/churn — 流失预警（连续未到课达到 churn_rules.churnDays，或会员卡已过期未续费）
+ * 风险分级：未到课超过 churnDays → medium；超过 churnDays 的 2 倍（默认 30/60）或卡已过期 → high。
  */
 router.get('/churn', (req, res) => {
   try {
     if (!canGrowth(req)) return res.status(403).json(safeFail('无增长中心权限'));
     const t = now();
-    const since = t - 30 * 86400000;
+    // 流失阈值统一取自 churn_rules（默认 churnDays=30）；原 `since` 变量是 30 天硬编码的
+    // 遗留死代码（未被任何 SQL 使用），此处一并移除。
+    const { churnDays } = getChurnRules(db);
 
     const rows = db.prepare(`
       SELECT s.id, s.name,
@@ -300,7 +419,9 @@ router.get('/churn', (req, res) => {
       const lastTs = lastDate ? new Date(lastDate.replace(/-/g, '/')).getTime() : 0;
       const daysSince = lastTs ? Math.floor((t - lastTs) / 86400000) : 999;
       const expired = r.last_expires_at && r.last_expires_at < t;
-      const risk = daysSince > 30 || expired ? (daysSince > 60 || expired ? 'high' : 'medium') : 'low';
+      // 高危线沿用原有的 2 倍关系（30:60），随 churnDays 一起可配：
+      // 默认 churnDays=30 时与原硬编码 30 / 60 的判定结果逐条一致。
+      const risk = daysSince > churnDays || expired ? (daysSince > churnDays * 2 || expired ? 'high' : 'medium') : 'low';
       return {
         studentId: r.id,
         name: r.name,

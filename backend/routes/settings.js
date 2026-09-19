@@ -65,7 +65,7 @@ router.use((req, res, next) => {
   return res.status(403).json({ code: 403, data: null, message: '仅管理员可修改设置' });
 });
 
-const KEYS = ['org_info', 'points_rules', 'notification_rules', 'refund_rules', 'leave_rules', 'uniform_price', 'service_phone', 'students_columns', 'orders_columns', 'term_scheme', 'term_overrides'];
+const KEYS = ['org_info', 'points_rules', 'notification_rules', 'refund_rules', 'leave_rules', 'uniform_price', 'service_phone', 'students_columns', 'orders_columns', 'term_scheme', 'term_overrides', 'churn_rules'];
 
 // 推送规则规范默认值：存储为空/畸形时兜底返回，保证设置页可读可配、定时任务有默认档位
 const DEFAULT_NOTIFICATION_RULES = [
@@ -204,6 +204,7 @@ router.put('/', (req, res) => {
       orders_columns: '销售表格字段',
       term_scheme: '称呼方案',
       term_overrides: '称呼自定义',
+      churn_rules: '流失与召回规则',
     };
 
     for (const key of KEYS) {

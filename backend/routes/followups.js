@@ -4,7 +4,7 @@
  *   1. 续费跟进：会员卡到期前 15 / 7 / 1 天
  *   2. 线索跟进：线索到 next_follow_at 未跟进，或新建超 3 天未联系
  *   3. 体验跟进：线索处于「体验中」阶段
- *   4. 流失挽回：连续 14 天未到课的在籍学员
+ *   4. 流失挽回：连续未到课达到 churn_rules.dormantDays（默认 14）天的在籍学员
  * 每条任务都带 reason（为什么跟进），负责人可直接看到原因后行动。
  */
 const express = require('express');
@@ -12,6 +12,7 @@ const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser } = require('../utils');
 const { generateRenewalNotifications } = require('../utils/renewal');
+const { getChurnRules } = require('../utils/churn');
 
 // follow_ups 建表与索引已收编至 migrations/014
 
@@ -148,7 +149,8 @@ router.post('/generate', (req, res) => {
       if (id) created++;
     }
 
-    // 4) 流失挽回：连续 14 天未到课的在籍学员
+    // 4) 流失挽回：连续未到课达到 dormantDays 天（默认 14，规则见 utils/churn.js）的在籍学员
+    const { dormantDays } = getChurnRules(db);
     const churned = db.prepare(`
       SELECT s.id, s.name,
              (SELECT pb.parent_phone FROM parent_bindings pb WHERE pb.student_id = s.id AND pb.is_main = 1 LIMIT 1) as parent_phone,
@@ -161,7 +163,7 @@ router.post('/generate', (req, res) => {
       const lastTs = Date.parse(s.last_date);
       if (Number.isNaN(lastTs)) continue;
       const gap = Math.floor((t - lastTs) / DAY);
-      if (gap < 14) continue;
+      if (gap < dormantDays) continue;
       const id = insertTask({
         targetType: 'student',
         targetId: s.id,
