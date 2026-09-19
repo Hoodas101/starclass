@@ -22,6 +22,7 @@ export const addRecursiveSchedule = (data) => request.post('/schedules/recursive
 export const updateSchedule = (id, data) => request.put(`/schedules/${id}`, data)
 export const deleteSchedule = (id) => request.delete(`/schedules/${id}`)
 export const getScheduleDetail = (id) => request.get(`/schedules/${id}`)
+export const checkScheduleConflict = (data) => request.post('/schedules/conflict-check', data)
 
 // 排课资源（教师 / 场地 / 活动）
 export const getTeachers = (params) => request.get('/admin/teachers', { params })
@@ -134,6 +135,11 @@ export const getChurnList = () => request.get('/growth/churn')
 export const getRenewalList = (params) => request.get('/growth/renewal', { params })
 export const getLowClasses = (params) => request.get('/growth/low-classes', { params })
 export const getReferrals = () => request.get('/growth/referrals')
+
+// 试听预约（家长端提交，管理端处理）
+export const getTrialList = (params) => request.get('/trial/list', { params })
+export const applyTrial = (data) => request.post('/trial/apply', data)
+export const updateTrial = (id, data) => request.put(`/trial/${id}`, data)
 
 // 跟进任务（借鉴 trycompai/crm 的 Activity/AgentTask）
 export const getFollowUps = (params) => request.get('/followups', { params })

@@ -373,6 +373,7 @@ import {
   addRecursiveSchedule,
   updateSchedule,
   deleteSchedule,
+  checkScheduleConflict,
 } from '@/api/modules'
 import { exportXlsx } from '@/utils/xlsx'
 import { fetchAllPages } from '@/utils/fetchAll'
@@ -788,24 +789,51 @@ const submitSchedule = async () => {
   const valid = await scheduleFormRef.value.validate().catch(() => false)
   if (!valid) return
 
+  const payload = {
+    courseId: scheduleForm.courseId,
+    // 显式传空串表示“清除”，后端据此更新；未传字段才保持原值
+    teacherId: scheduleForm.teacherId,
+    classroomId: scheduleForm.classroomId,
+    date: scheduleForm.date,
+    startTime: scheduleForm.timeRange[0].format('HH:mm'),
+    endTime: scheduleForm.timeRange[1].format('HH:mm'),
+    maxStudents: scheduleForm.maxStudents,
+    remark: scheduleForm.remark,
+    groupCourseId: scheduleForm.groupCourseId,
+    groupName: scheduleForm.groupCourseId
+      ? (courses.value.find((c) => c.id === scheduleForm.groupCourseId)?.name || '')
+      : ''
+  }
+
+  // 提交前冲突检测（教师 / 场地 / 学员）：命中后由用户确认，带 confirmOverride 重试放行。
+  // 该接口后端限定管理员（isAdminReq），教练端跳过预检，仍由创建/修改接口兜底拦截。
+  if (isAdmin.value) {
+    try {
+      const conflict = await checkScheduleConflict({
+        teacherId: payload.teacherId,
+        classroomId: payload.classroomId,
+        date: payload.date,
+        startTime: payload.startTime,
+        endTime: payload.endTime,
+        groupCourseId: payload.groupCourseId,
+        excludeId: editingId.value || undefined
+      })
+      if (conflict?.conflict) {
+        await ElMessageBox.confirm(conflict.message, '排期冲突', {
+          type: 'warning',
+          confirmButtonText: '仍然保存',
+          cancelButtonText: '返回修改'
+        })
+        payload.confirmOverride = true
+      }
+    } catch (e) {
+      // 用户取消确认（'cancel'/'close'）→ 终止提交；其余异常（网络等）继续提交，由后端兜底
+      if (e === 'cancel' || e === 'close') return
+    }
+  }
+
   submitting.value = true
   try {
-    const payload = {
-      courseId: scheduleForm.courseId,
-      // 显式传空串表示“清除”，后端据此更新；未传字段才保持原值
-      teacherId: scheduleForm.teacherId,
-      classroomId: scheduleForm.classroomId,
-      date: scheduleForm.date,
-      startTime: scheduleForm.timeRange[0].format('HH:mm'),
-      endTime: scheduleForm.timeRange[1].format('HH:mm'),
-      maxStudents: scheduleForm.maxStudents,
-      remark: scheduleForm.remark,
-      groupCourseId: scheduleForm.groupCourseId,
-      groupName: scheduleForm.groupCourseId
-        ? (courses.value.find((c) => c.id === scheduleForm.groupCourseId)?.name || '')
-        : ''
-    }
-
     if (editingId.value) {
       await updateSchedule(editingId.value, payload)
       ElMessage.success('排期已更新')

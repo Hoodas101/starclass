@@ -1107,13 +1107,36 @@ const batchArchive = async (archive) => {
       archive ? '批量归档' : '批量恢复',
       { confirmButtonText: archive ? '归档' : '恢复', type: archive ? 'warning' : 'success', confirmButtonClass: archive ? 'el-button--danger' : '' }
     )
-    await Promise.all(selectedRows.value.map((s) => updateStudent(s.id, { archived: archive ? 1 : 0 })))
-    ElMessage.success(`已${archive ? '归档' : '恢复'} ${selectedRows.value.length} 名成员`)
-    selectedRows.value = []
-    loadStudents()
   } catch (e) {
-    // 取消或失败
+    return // 用户取消
   }
+  const verb = archive ? '归档' : '恢复'
+  // 逐条执行，不用 Promise.all：Promise.all 在首个请求失败时立即 reject，
+  // 而其余请求仍在飞行中 —— 结果是「一部分已改、一部分失败」但 catch 是空的，
+  // 用户只看到"什么都没发生"，数据静默处于部分一致状态。
+  // 改为串行后能精确拿到每条的结果，并如实反馈成功/失败明细。
+  const targets = [...selectedRows.value]
+  const done = []
+  const failed = []
+  for (const s of targets) {
+    try {
+      await updateStudent(s.id, { archived: archive ? 1 : 0 })
+      done.push(s)
+    } catch (e) {
+      failed.push(s)
+    }
+  }
+  if (failed.length === 0) {
+    ElMessage.success(`已${verb} ${done.length} 名成员`)
+  } else if (done.length === 0) {
+    ElMessage.error(`${verb}失败：${failed.length} 名成员均未成功，请稍后重试`)
+  } else {
+    ElMessage.warning(
+      `已${verb} ${done.length} 名，${failed.length} 名失败：${failed.map((s) => s.name).join('、')}`
+    )
+  }
+  selectedRows.value = []
+  loadStudents()
 }
 
 const doExport = async (range) => {

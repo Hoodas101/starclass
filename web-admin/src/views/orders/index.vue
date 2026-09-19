@@ -742,6 +742,28 @@ const confirmRefund = async () => {
     ElMessage.warning('退款金额必须大于 0')
     return
   }
+  // 后端约定：退款金额偏离退费规则建议值超过 ¥1 时必须显式携带 confirmOverride，
+  // 否则一律拒绝。此前前端从不发送该字段 —— 于是「自定义金额」退款必然被拒，
+  // 形成「UI 有入口、点了就报错」的功能死锁。这里改为：偏离即先向用户确认，再带标记提交。
+  const suggested = Number(refundPreview.value?.amount) || 0
+  const deviate = suggested > 0 && Math.abs(refundFinal.value - suggested) > 1
+  if (deviate) {
+    try {
+      await ElMessageBox.confirm(
+        `按退费规则建议应退 ¥${suggested.toLocaleString()}（${
+          refundPreview.value?.reason || '规则建议值'
+        }），本次将退 ¥${refundFinal.value.toLocaleString()}。\n\n按规则外金额退款视为协商让利，不会回收卡内剩余权益，确认继续？`,
+        '偏离退费规则',
+        {
+          type: 'warning',
+          confirmButtonText: '仍按此金额退款',
+          cancelButtonText: '返回修改',
+        }
+      )
+    } catch (e) {
+      return // 用户取消，不提交
+    }
+  }
   submitting.value = true
   try {
     const reasonMap = {
@@ -752,6 +774,7 @@ const confirmRefund = async () => {
     const res = await refundOrderApi(refundOrder.value.id, {
       reason: reasonMap[refundMode.value],
       refundAmount: refundFinal.value,
+      ...(deviate ? { confirmOverride: true } : {}),
     })
     const clawbackTip = res.clawback ? `，${res.clawback}` : ''
     ElMessage.success(`${res.full ? '全额退款' : '部分退款'}成功${clawbackTip}`)

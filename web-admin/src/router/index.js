@@ -75,6 +75,7 @@ const routes = [
       { path: 'points', redirect: '/students?tab=points' },
       { path: 'orders', redirect: '/sales?tab=orders' },
       { path: 'growth', redirect: '/sales?tab=growth' },
+      { path: 'trial', redirect: '/sales?tab=trial' },
       { path: 'feedback', redirect: '/parents?tab=feedback' },
       { path: 'notifications', redirect: '/parents?tab=notifications' },
       { path: 'coach-stats', redirect: '/staff?tab=coachstats' },
