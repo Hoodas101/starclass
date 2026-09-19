@@ -15,6 +15,8 @@ const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, n
 // 订单明细解析 / 每次课消耗课时数：与签到扣课、导出报表共用同一实现
 const { parseItems, itemLineTotal } = require('../utils/items');
 const { resolveConsumeClasses } = require('../utils/deduction');
+// 退卡与订单退款共用同一套退费规则引擎（refund_rules），避免同一笔钱两条路径两个金额
+const { computeRefundSuggestion } = require('../utils/refund');
 
 // schema 列（paused_at/billing_mode/points_reward/product_type 等）已收编至 migrations/011；
 // 此处仅保留数据回填。
@@ -600,6 +602,11 @@ router.post('/refund', (req, res) => {
       if (!card) return { err: '会员卡不存在' };
       if (card.status === 'refunded') return { err: '该卡已退过' };
 
+      // 卡类型（membership_cards）上的 refundable 是机构对「这类卡能不能退」的开关：
+      // 此前该字段全仓无任何代码读取（死字段），退卡接口可绕过卡类型设置强行退款。
+      const cardType = db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(card.card_type_id);
+      if (cardType && cardType.refundable === 0) return { err: '该卡按卡类型设置不可退' };
+
       // 取得该卡的实际成交价（优先取购卡订单实付，避免按卡类型原价退款造成多退/少退）
       let paidPrice = 0;
       let orderId = null;
@@ -607,9 +614,10 @@ router.post('/refund', (req, res) => {
       let orderRefundedSoFar = 0;
       // 整单折扣比例（实付 / 标价）：<1 表示整单有折扣，按标价退会超退
       let discountRatio = 1;
+      let order = null; // 规则引擎需要完整订单对象（id / payable_amount / refunded_amount）
       if (card.order_id) {
         orderId = card.order_id;
-        const order = db.prepare('SELECT items, total_amount, payable_amount, refunded_amount FROM orders WHERE id = ?').get(card.order_id);
+        order = db.prepare('SELECT id, items, total_amount, payable_amount, refunded_amount FROM orders WHERE id = ?').get(card.order_id);
         if (order) {
           orderPayable = Number(order.payable_amount) || 0;
           orderRefundedSoFar = Number(order.refunded_amount) || 0;
@@ -635,7 +643,6 @@ router.post('/refund', (req, res) => {
           }
         }
       }
-      const cardType = db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(card.card_type_id);
       // 最后兜底：连订单明细都拿不到时用卡类型标价，但仍按整单折扣比例折减
       // （旧实现直接取标价，折扣单会按原价退 → 超退）
       if (!paidPrice && cardType) {
@@ -643,18 +650,40 @@ router.post('/refund', (req, res) => {
         paidPrice = discountRatio < 1 ? Math.round(base * discountRatio) : base;
       }
 
-      // 计算退款金额（按计费模式：次数卡按剩余次数比例，时效卡按剩余有效期天数比例）
-      // 时效卡分母为「已购总时长」：expires_at 在恢复时会顺延 pause_total_ms，
-      // 故总时长 = (expires_at - pause_total_ms) - activated_at，扣除暂停期后才是真实购买时长。
-      const mode = card.billing_mode || 'time';
+      // 退款金额：卡关联订单存在时走与订单退款同一套退费规则（refund_rules 的
+      // beforeStart/afterStart 百分比、以及 unused 模式按剩余比例），使同一笔钱在
+      // /api/orders/:id/refund 与 /api/membership/refund 不再算出两个金额。
+      //
+      // 但**基数是本卡的折后成交价 paidPrice**，不是整单剩余额：规则引擎返回的 amount 是
+      // 「整单剩余可退额 × 规则比例」，直接采用会把同一订单中其他商品的份额退到本卡头上
+      // （多明细/多卡订单超退）。故这里只取规则比例因子 refundFactor 再乘本卡价。
+      // 传 cardId 是必需的：否则引擎按 `ORDER BY created_at DESC LIMIT 1` 取卡，
+      // 多卡订单会取到别的卡、按其消耗状态定价。
       let refundAmount = 0;
-      if (mode === 'count') {
-        const pricePerClass = paidPrice > 0 && card.total_classes > 0 ? paidPrice / card.total_classes : 0;
-        refundAmount = Math.round(card.remaining_classes * pricePerClass);
-      } else {
-        const totalMs = ((card.expires_at || 0) - (card.pause_total_ms || 0)) - (card.activated_at || 0);
-        const remainMs = Math.max(0, (card.expires_at || 0) - currentTime);
-        refundAmount = totalMs > 0 && paidPrice > 0 ? Math.max(0, Math.round(paidPrice * remainMs / totalMs)) : 0;
+      let ruleApplied = false;
+      if (order && paidPrice > 0) {
+        const s = computeRefundSuggestion(order, { cardId });
+        const remainAll = Number(s.remain) || 0;
+        if (remainAll > 0) {
+          const factor = Math.max(0, Math.min(1, Number(s.refundFactor) || 0));
+          refundAmount = Math.round(paidPrice * factor);
+          ruleApplied = true;
+        }
+      }
+      if (!ruleApplied) {
+        // 兜底：卡无关联订单、或整单已无剩余可退额（remain = 0）时，保留原有按计费模式的
+        // 比例算法（次数卡按剩余次数比例，时效卡按剩余有效期天数比例）。
+        // 时效卡分母为「已购总时长」：expires_at 在恢复时会顺延 pause_total_ms，
+        // 故总时长 = (expires_at - pause_total_ms) - activated_at，扣除暂停期后才是真实购买时长。
+        const mode = card.billing_mode || 'time';
+        if (mode === 'count') {
+          const pricePerClass = paidPrice > 0 && card.total_classes > 0 ? paidPrice / card.total_classes : 0;
+          refundAmount = Math.round(card.remaining_classes * pricePerClass);
+        } else {
+          const totalMs = ((card.expires_at || 0) - (card.pause_total_ms || 0)) - (card.activated_at || 0);
+          const remainMs = Math.max(0, (card.expires_at || 0) - currentTime);
+          refundAmount = totalMs > 0 && paidPrice > 0 ? Math.max(0, Math.round(paidPrice * remainMs / totalMs)) : 0;
+        }
       }
       // 硬上限：不得超过该订单剩余额退额度（payable − 已退），与 orders/refund 的
       // 「累计退款不能超过订单金额」口径一致。RFND 流水行按本值入账，不会超过原单可退额。
