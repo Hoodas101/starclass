@@ -19,7 +19,7 @@
           <span class="stat-label">{{ stat.label }}</span>
         </div>
         <div class="stat-value">
-          <span class="stat-number">{{ stat.value }}</span>
+          <span class="stat-number v4-num-display">{{ stat.value }}</span>
           <span class="stat-unit">{{ stat.unit }}</span>
         </div>
         <div class="stat-trend" :class="stat.trend > 0 ? 'up' : 'down'">

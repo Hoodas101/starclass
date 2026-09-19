@@ -83,3 +83,45 @@ $ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 $dur-fast: 120ms;
 $dur-base: 200ms;
 $dur-page: 280ms;
+
+// ============================================
+// DESIGN v4（Bento Grid 升级版）— 准备态 token
+// 本区块**不覆盖**现有 v3 token，27 个现有页面继续使用 --t-*。
+// 新页面 / 精修页面按需引用 --v4-* token。
+// 切走 v3 为默认前，需逐项覆盖同名 v3 值并走视觉回归。
+// ============================================
+
+// ---- 品牌与中性色（v4）----
+$v4-primary: #0071e3;                                 // 与 v3 同（确认对齐）
+$v4-primary-strong: #0066cc;
+$v4-primary-bg: rgba(0, 113, 227, 0.08);
+$v4-primary-line: rgba(0, 113, 227, 0.20);
+
+// 语义色（v4 — 与 v3 值略有差异，未覆盖以避免破坏现有页面）
+$v4-success: #10B981;
+$v4-success-bg: rgba(16, 185, 129, 0.10);
+$v4-warning: #F59E0B;
+$v4-warning-bg: rgba(245, 158, 11, 0.10);
+$v4-danger: #EF4444;
+$v4-danger-bg: rgba(239, 68, 68, 0.10);
+
+// ---- 字体（v4）----
+$v4-font-body: 'Inter', -apple-system, BlinkMacSystemFont, "SF Pro Text",
+  "PingFang SC", "PingFang TC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+// Space Grotesk 用于大数字 / KPI；未引入本地字族，依赖浏览器按需下载（见 index.scss 的 @import url）
+$v4-font-display: 'Space Grotesk', 'Inter', -apple-system, sans-serif;
+
+// ---- 字号（v4 扩展）----
+$v4-fs-5xl: 36px;    // 数字英雄（大）
+$v4-fs-6xl: 42px;    // 数字英雄（XL / 报表首屏）
+
+// ---- 圆角（v4 扩展）----
+$v4-radius-6: 6px;    // 按钮 / 输入框（v3 默认 8px，v4 更紧凑）
+
+// ---- 动效（v4）----
+$v4-dur-fast: 150ms;   // hover / focus 微反馈（v3 是 120ms）
+$v4-stagger: 80ms;     // Bento 卡片入场 stagger 间隔
+$v4-dur-page: 400ms;   // 页面入场（v3 是 280ms，v4 更明显）
+
+// ---- 数字稳定 ----
+$v4-numeric: 'tnum' 1, 'lnum' 1;     // 启用等宽数字 + lining figures

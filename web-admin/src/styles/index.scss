@@ -1174,3 +1174,127 @@ html, body {
   margin-top: 6px;
   font-weight: 500;
 }
+
+// ============================================
+// DESIGN v4 token 输出层（与 v3 并存；opt-in 使用）
+// 27 个现有页面继续走 --t-*（v3），不主动迁移。
+// ============================================
+
+// v4 字体加载（仅在使用 v4 token 时触发网络下载）
+@supports (font-variation-settings: normal) {
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+}
+
+:root {
+  // 字体
+  --v4-font-body: #{inspect($v4-font-body)};
+  --v4-font-display: #{inspect($v4-font-display)};
+
+  // 颜色
+  --v4-primary: #{$v4-primary};
+  --v4-primary-strong: #{$v4-primary-strong};
+  --v4-primary-bg: #{$v4-primary-bg};
+  --v4-primary-line: #{$v4-primary-line};
+  --v4-success: #{$v4-success};
+  --v4-success-bg: #{$v4-success-bg};
+  --v4-warning: #{$v4-warning};
+  --v4-warning-bg: #{$v4-warning-bg};
+  --v4-danger: #{$v4-danger};
+  --v4-danger-bg: #{$v4-danger-bg};
+
+  // 字号扩展
+  --v4-fs-5xl: #{$v4-fs-5xl};
+  --v4-fs-6xl: #{$v4-fs-6xl};
+
+  // 圆角扩展
+  --v4-radius-6: #{$v4-radius-6};
+
+  // 动效扩展
+  --v4-dur-fast: #{$v4-dur-fast};
+  --v4-stagger: #{$v4-stagger};
+  --v4-dur-page: #{$v4-dur-page};
+
+  // 数字稳定（OpenType features）
+  --v4-numeric: #{$v4-numeric};
+}
+
+// ============================================
+// v4 工具类（opt-in；在元素上添加 .v4-* 即可应用）
+// ============================================
+
+// 数字英雄卡（KPI / 统计大数字）
+.v4-num-display {
+  font-family: var(--v4-font-display);
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1;
+  color: var(--t-text-1);
+  font-feature-settings: var(--v4-numeric);
+}
+.v4-num-display.is-lg { font-size: var(--v4-fs-6xl); }
+.v4-num-display.is-md { font-size: var(--v4-fs-5xl); }
+.v4-num-display.is-sm { font-size: var(--t-fs-3xl); }
+
+// 数字稳定（任何变化的数字）
+.v4-tabular { font-feature-settings: var(--v4-numeric); }
+
+// v4 按钮（更紧凑 6px 圆角）
+.v4-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px;
+  height: 36px;
+  border-radius: var(--v4-radius-6);
+  font: 500 13px var(--v4-font-body);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background-color var(--v4-dur-fast) var(--ease-standard),
+              box-shadow var(--v4-dur-fast) var(--ease-standard),
+              transform var(--v4-dur-fast) var(--ease-spring);
+}
+.v4-btn-primary {
+  background: var(--v4-primary);
+  color: white;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.v4-btn-primary:hover {
+  background: var(--v4-primary-strong);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(0, 113, 227, 0.18);
+}
+.v4-btn-primary:active { transform: scale(0.97); }
+
+// v4 卡片（更克制阴影 + 10px 圆角）
+.v4-card {
+  background: var(--t-surface);
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-radius-xl);
+  padding: var(--t-spacing-lg);
+  transition: box-shadow var(--v4-dur-fast) var(--ease-standard),
+              transform var(--v4-dur-fast) var(--ease-standard);
+}
+.v4-card:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  transform: translateY(-1px);
+}
+
+// v4 stagger 入场（在父元素加 .v4-stagger-in，子元素按序淡入）
+.v4-stagger-in > * {
+  animation: v4-fade-up var(--v4-dur-page) var(--ease-standard) both;
+}
+.v4-stagger-in > *:nth-child(1) { animation-delay: calc(var(--v4-stagger) * 0); }
+.v4-stagger-in > *:nth-child(2) { animation-delay: calc(var(--v4-stagger) * 1); }
+.v4-stagger-in > *:nth-child(3) { animation-delay: calc(var(--v4-stagger) * 2); }
+.v4-stagger-in > *:nth-child(4) { animation-delay: calc(var(--v4-stagger) * 3); }
+.v4-stagger-in > *:nth-child(5) { animation-delay: calc(var(--v4-stagger) * 4); }
+.v4-stagger-in > *:nth-child(6) { animation-delay: calc(var(--v4-stagger) * 5); }
+@keyframes v4-fade-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .v4-stagger-in > * { animation: none; }
+  .v4-btn { transition: none; }
+  .v4-card { transition: none; }
+}
