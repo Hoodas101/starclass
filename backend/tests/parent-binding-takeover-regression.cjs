@@ -175,9 +175,11 @@ console.log('\n\x1b[1m[T1] 核心攻击链：改号占用检查必须覆盖 pare
     JSON.stringify(res.body));
 
   const rows = bindingRows('stu_takeover_x');
-  rec('T1 [判别] 受害学员的 parent_openid 未被改写（仍是 wx_victim_parent_x）',
+  // 护栏而非判别项：改号接口本身不写 parent_bindings（接管发生在登录迁移那一步），
+  // 故这两条在「移除改动1」时同样通过；它们钉死的是「拒绝时不产生副作用」。
+  rec('T1 [护栏] 受害学员的 parent_openid 未被改写（仍是 wx_victim_parent_x）',
     rows.length === 1 && rows[0].parent_openid === 'wx_victim_parent_x', JSON.stringify(rows));
-  rec('T1 [判别] 受害绑定的 parent_phone 未被改写', rows.length === 1 && rows[0].parent_phone === P_VICTIM,
+  rec('T1 [护栏] 受害绑定的 parent_phone 未被改写', rows.length === 1 && rows[0].parent_phone === P_VICTIM,
     JSON.stringify(rows));
 
   const a = userRow('user_atk1');
