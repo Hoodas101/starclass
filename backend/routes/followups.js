@@ -2,16 +2,23 @@
  * 跟进任务路由 — 借鉴 trycompai/crm 的「Activity.dueAt + AgentTask 工作队列」设计
  * 自动生成规则（对应 CRM 的 schedule_recheck）：
  *   1. 续费跟进：会员卡到期前 15 / 7 / 1 天
+ *   1b. 到期未续费：会员卡已过期 60 天内且未续新卡
  *   2. 线索跟进：线索到 next_follow_at 未跟进，或新建超 3 天未联系
  *   3. 体验跟进：线索处于「体验中」阶段
  *   4. 流失挽回：连续未到课达到 churn_rules.dormantDays（默认 14）天的在籍学员
+ *   5.  课时续费：次数卡剩余课时不足 5 节
  * 每条任务都带 reason（为什么跟进），负责人可直接看到原因后行动。
  */
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser } = require('../utils');
-const { generateRenewalNotifications } = require('../utils/renewal');
+const {
+  generateRenewalNotifications,
+  RENEWAL_WARN_DAYS,
+  LOW_CLASS_THRESHOLD,
+  EXPIRED_WINDOW_DAYS,
+} = require('../utils/renewal');
 const { getChurnRules } = require('../utils/churn');
 
 // follow_ups 建表与索引已收编至 migrations/014
@@ -27,6 +34,7 @@ const TASK_TYPE_TEXT = {
   lead_followup: '线索跟进',
   trial_followup: '体验跟进',
   churn_winback: '流失挽回',
+  low_class: '课时续费',
   other: '其他',
 };
 
@@ -69,20 +77,23 @@ router.post('/generate', (req, res) => {
       if (renewal.created > 0) console.log(`[followups] 已同步发送续费提醒 ${renewal.created} 条`);
     } catch (e) { /* 忽略 */ }
 
-    // 1) 续费跟进：到期前 15 / 7 / 1 天
+    // 1) 续费跟进：到期前 RENEWAL_WARN_DAYS(15) / 7 / 1 天
+    // 说明：原 SQL 写的是 status IN ('active','valid')，其中 'valid' 是历史遗留的死值——
+    // member_cards.status 实际只有 active / paused / expired / refunded，'valid' 从未被写入过，故删除。
+    // 这里也不纳入 'paused'：请假暂停中的卡 expires_at 是暂停前的日期，纳入会误触发续费提醒。
     const expiring = db.prepare(`
       SELECT mc.id, mc.student_id, s.name as student_name, mc.card_type_name, mc.expires_at,
              pb.parent_phone
       FROM member_cards mc
       LEFT JOIN students s ON s.id = mc.student_id
       LEFT JOIN parent_bindings pb ON pb.student_id = mc.student_id AND pb.is_main = 1
-      WHERE mc.status IN ('active','valid') AND mc.expires_at > ?
+      WHERE mc.status = 'active' AND mc.expires_at > ?
         AND mc.expires_at <= ? + ?
-    `).all(t - 15 * DAY, t, 16 * DAY);
+    `).all(t - RENEWAL_WARN_DAYS * DAY, t, (RENEWAL_WARN_DAYS + 1) * DAY);
     for (const c of expiring) {
       const daysLeft = Math.ceil((c.expires_at - t) / DAY);
-      if (daysLeft <= 0 || daysLeft > 15) continue;
-      const key = [1, 7, 15].filter((d) => daysLeft <= d).sort((a, b) => a - b)[0];
+      if (daysLeft <= 0 || daysLeft > RENEWAL_WARN_DAYS) continue;
+      const key = [1, 7, RENEWAL_WARN_DAYS].filter((d) => daysLeft <= d).sort((a, b) => a - b)[0];
       if (daysLeft > key) continue;
       const id = insertTask({
         targetType: 'student',
@@ -91,6 +102,40 @@ router.post('/generate', (req, res) => {
         phone: c.parent_phone || '',
         taskType: 'renewal',
         reason: `「${c.card_type_name || '会员卡'}」将于 ${daysLeft} 天后到期，需提醒续费`,
+        owner: '',
+        dueAt: t,
+        priority: 1,
+        createdBy: 'system',
+      });
+      if (id) created++;
+    }
+
+    // 1b) 到期未续费：已过期 EXPIRED_WINDOW_DAYS 天内，且该学员没有更晚到期的有效卡
+    const overdue = db.prepare(`
+      SELECT mc.id, mc.student_id, s.name as student_name, mc.card_type_name, mc.expires_at, pb.parent_phone
+      FROM member_cards mc
+      LEFT JOIN students s ON s.id = mc.student_id
+      LEFT JOIN parent_bindings pb ON pb.student_id = mc.student_id AND pb.is_main = 1
+      WHERE mc.status = 'expired'
+        AND mc.expires_at IS NOT NULL
+        AND mc.expires_at <= ?
+        AND mc.expires_at >= ? - ?
+        AND NOT EXISTS (
+          SELECT 1 FROM member_cards c3
+          WHERE c3.student_id = mc.student_id
+            AND c3.status IN ('active','paused')
+            AND c3.expires_at > ?
+        )
+    `).all(t, t, EXPIRED_WINDOW_DAYS * DAY, t);
+    for (const c of overdue) {
+      const days = Math.max(1, Math.floor((t - c.expires_at) / DAY));
+      const id = insertTask({
+        targetType: 'student',
+        targetId: c.student_id,
+        targetName: c.student_name,
+        phone: c.parent_phone || '',
+        taskType: 'renewal',
+        reason: `「${c.card_type_name || '会员卡'}」已于 ${days} 天前到期，需确认是否续费`,
         owner: '',
         dueAt: t,
         priority: 1,
@@ -174,6 +219,31 @@ router.post('/generate', (req, res) => {
         owner: '',
         dueAt: t,
         priority: 3,
+        createdBy: 'system',
+      });
+      if (id) created++;
+    }
+
+    // 5) 低课时续费：次数卡剩余课时不足 LOW_CLASS_THRESHOLD 节
+    const lowClass = db.prepare(`
+      SELECT mc.id, mc.student_id, s.name as student_name, mc.card_type_name, mc.remaining_classes, pb.parent_phone
+      FROM member_cards mc
+      LEFT JOIN students s ON s.id = mc.student_id
+      LEFT JOIN parent_bindings pb ON pb.student_id = mc.student_id AND pb.is_main = 1
+      WHERE mc.status = 'active' AND mc.billing_mode = 'count'
+        AND mc.remaining_classes > 0 AND mc.remaining_classes <= ?
+    `).all(LOW_CLASS_THRESHOLD);
+    for (const c of lowClass) {
+      const id = insertTask({
+        targetType: 'student',
+        targetId: c.student_id,
+        targetName: c.student_name,
+        phone: c.parent_phone || '',
+        taskType: 'low_class',
+        reason: `「${c.card_type_name || '次卡'}」仅剩 ${c.remaining_classes} 节，需提醒续课`,
+        owner: '',
+        dueAt: t,
+        priority: 2,
         createdBy: 'system',
       });
       if (id) created++;

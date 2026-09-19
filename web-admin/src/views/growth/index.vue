@@ -209,8 +209,28 @@
               </template>
             </el-table-column>
             <el-table-column label="近30天出勤" min-width="110" prop="recentAttendance" />
+            <el-table-column label="跟进状态" min-width="110">
+              <template #default="{ row }">
+                <StatusDot
+                  :tone="row.followUp ? 'success' : 'neutral'"
+                  :label="row.followUp ? '跟进中' : '未跟进'"
+                  subtle
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" min-width="120" fixed="right">
+              <template #default="{ row }">
+                <el-button
+                  link
+                  type="primary"
+                  size="small"
+                  :disabled="!!row.followUp"
+                  @click.stop="quickFollowUp(row, 'renewal')"
+                >{{ row.followUp ? '已建' : '建跟进' }}</el-button>
+              </template>
+            </el-table-column>
           </el-table>
-          <div v-if="renewalList.length === 0" class="empty-tip">近 15 天内没有到期的{{ $t('membership') }}卡，续费很从容。</div>
+          <div v-if="renewalList.length === 0" class="empty-tip">暂无需要续费的成员：近 15 天内没有到期卡，也没有过期未续的卡。</div>
         </div>
       </template>
 
@@ -232,6 +252,26 @@
               <template #default="{ row }">{{ formatDate(row.expires_at) }}</template>
             </el-table-column>
             <el-table-column label="近30天出勤" min-width="110" prop="recent_count" />
+            <el-table-column label="跟进状态" min-width="110">
+              <template #default="{ row }">
+                <StatusDot
+                  :tone="row.followUp ? 'success' : 'neutral'"
+                  :label="row.followUp ? '跟进中' : '未跟进'"
+                  subtle
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" min-width="120" fixed="right">
+              <template #default="{ row }">
+                <el-button
+                  link
+                  type="primary"
+                  size="small"
+                  :disabled="!!row.followUp"
+                  @click.stop="quickFollowUp(row, 'low_class')"
+                >{{ row.followUp ? '已建' : '建跟进' }}</el-button>
+              </template>
+            </el-table-column>
           </el-table>
           <div v-if="lowClassList.length === 0" class="empty-tip">暂无课时不足的成员，消耗节奏健康。</div>
         </div>
@@ -788,8 +828,8 @@ const fuLoading = ref(false)
 const fuKeyword = ref('')
 const fuStatus = ref('')
 const fuType = ref('')
-const fuTypeOptions = { renewal: '续费跟进', lead_followup: '线索跟进', trial_followup: '体验跟进', churn_winback: '流失挽回', other: '其他' }
-const fuTagType = (t) => ({ renewal: 'warning', lead_followup: 'primary', trial_followup: 'success', churn_winback: 'danger', other: 'info' }[t] || 'info')
+const fuTypeOptions = { renewal: '续费跟进', lead_followup: '线索跟进', trial_followup: '体验跟进', churn_winback: '流失挽回', low_class: '课时续费', other: '其他' }
+const fuTagType = (t) => ({ renewal: 'warning', lead_followup: 'primary', trial_followup: 'success', churn_winback: 'danger', low_class: 'danger', other: 'info' }[t] || 'info')
 
 const errorFU = ref('')
 
@@ -944,6 +984,29 @@ const loadLowClasses = async () => {
     const res = await getLowClasses({ threshold: 5 })
     lowClassList.value = res?.list || []
   } finally { lowClassLoading.value = false }
+}
+
+// 预警清单一键建跟进：免去切到「跟进任务」区块重新选人填原因
+const quickFollowUp = async (row, taskType) => {
+  const studentId = row.studentId || row.student_id
+  const name = row.studentName || row.student_name
+  if (!studentId) { ElMessage.warning('该记录未关联成员，无法建立跟进'); return }
+  const reason = taskType === 'low_class'
+    ? `「${row.cardType || row.card_type_name || '次卡'}」仅剩 ${row.remainingClasses ?? row.remaining_classes} 节，需提醒续课`
+    : `「${row.cardType || row.card_type_name || '会员卡'}」${row.expired ? '已过期' : `${row.daysLeft} 天后到期`}，需提醒续费`
+  try {
+    await createFollowUp({
+      targetType: 'student',
+      targetId: String(studentId),
+      targetName: name,
+      taskType,
+      reason,
+    })
+    ElMessage.success('跟进任务已创建')
+    loadRenewal(); loadLowClasses(); loadFollowUps()
+  } catch (e) {
+    // 拦截器已提示业务/网络错误
+  }
 }
 
 // 流失预警

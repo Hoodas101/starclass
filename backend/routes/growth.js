@@ -10,6 +10,8 @@ const leadSuggestions = require('../utils/lead-suggestions');
 const { getChurnRules } = require('../utils/churn');
 // 建档查重（与 POST /api/students 同一判据）
 const { findDuplicateStudents } = require('../utils/duplicate');
+// 续费 / 课时预警的统一口径常量（与 followups.js 共用同一来源，避免两处阈值各写一份）
+const { RENEWAL_WARN_DAYS, LOW_CLASS_THRESHOLD, EXPIRED_WINDOW_DAYS } = require('../utils/renewal');
 
 // 增长中心权限：管理员或拥有「growth」权限的员工（销售等）
 function canGrowth(req) {
@@ -471,35 +473,73 @@ router.get('/churn', (req, res) => {
 });
 
 /**
- * GET /api/growth/renewal — 续费预警（有效期 15 天内 / 已过期未续费）
+ * 查询某学员当前是否有未完成的跟进任务（用于预警清单显示「跟进中」，避免重复打扰）
+ * @returns {{ id: string, status: string, taskType: string, reason: string } | null}
+ */
+function findPendingFollowUp(studentId, taskTypes) {
+  if (!studentId) return null;
+  const ph = taskTypes.map(() => '?').join(',');
+  const row = db.prepare(`
+    SELECT id, status, task_type, reason FROM follow_ups
+    WHERE target_type = 'student' AND target_id = ? AND status = 'pending'
+      AND task_type IN (${ph})
+    ORDER BY created_at DESC LIMIT 1
+  `).get(studentId, ...taskTypes);
+  return row ? { id: row.id, status: row.status, taskType: row.task_type, reason: row.reason } : null;
+}
+
+/**
+ * GET /api/growth/renewal — 续费预警（到期前 warnIn 天内 + 已过期 expiredWithin 天内未续费）
  */
 router.get('/renewal', (req, res) => {
   try {
     if (!canGrowth(req)) return res.status(403).json(safeFail('无增长中心权限'));
     const t = now();
-    const warnIn = Math.max(1, parseInt(req.query.warnIn) || 15) * 86400000;
+    const warnIn = Math.max(1, parseInt(req.query.warnIn) || RENEWAL_WARN_DAYS);
+    const expiredWithin = Math.max(1, parseInt(req.query.expiredWithin) || EXPIRED_WINDOW_DAYS);
+    const warnMs = warnIn * 86400000;
+    const backMs = expiredWithin * 86400000;
     const rows = db.prepare(`
       SELECT c.id, c.student_id, c.card_type_name, c.expires_at, c.status, s.name as student_name,
         (SELECT COUNT(*) FROM attendances a WHERE a.student_id = c.student_id AND a.date >= date('now', 'localtime', '-30 days')) as recent_count
       FROM member_cards c
       JOIN students s ON s.id = c.student_id
-      WHERE c.status IN ('active','paused')
+      WHERE c.status IN ('active','paused','expired')
+        AND c.expires_at IS NOT NULL
+        AND c.expires_at <= ? + ?
+        AND c.expires_at >= ? - ?
+        AND NOT EXISTS (
+          SELECT 1 FROM member_cards c3
+          WHERE c3.student_id = c.student_id
+            AND c3.status IN ('active','paused')
+            AND c3.expires_at > ? + ?
+        )
+        AND c.expires_at = (
+          SELECT MAX(c2.expires_at) FROM member_cards c2
+          WHERE c2.student_id = c.student_id
+            AND c2.status IN ('active','paused','expired')
+            AND c2.expires_at IS NOT NULL
+            AND c2.expires_at <= ? + ?
+            AND c2.expires_at >= ? - ?
+        )
       ORDER BY c.expires_at ASC
-    `).all();
-    const list = rows
-      .filter((r) => r.expires_at <= t + warnIn)
-      .map((r) => ({
-        cardId: r.id,
-        studentId: r.student_id,
-        studentName: r.student_name,
-        cardType: r.card_type_name,
-        expiresAt: r.expires_at,
-        daysLeft: Math.ceil((r.expires_at - t) / 86400000),
-        expired: r.expires_at < t,
-        recentAttendance: r.recent_count,
-        status: r.status,
-      }));
-    res.json(success({ list, total: list.length, warnIn }));
+    `).all(t, warnMs, t, backMs, t, warnMs, t, warnMs, t, backMs);
+    // 上面两条附加条件不可删：
+    //  1) NOT EXISTS —— 该学员如果已经有一张到期日更远的有效卡（说明已经续过费了），就不再提醒，避免误报。
+    //  2) c.expires_at = (SELECT MAX ...) —— 同一学员在窗口内有多张卡时只保留最晚到期的那张，避免同一个人重复出现两行。
+    const list = rows.map((r) => ({
+      cardId: r.id,
+      studentId: r.student_id,
+      studentName: r.student_name,
+      cardType: r.card_type_name,
+      expiresAt: r.expires_at,
+      daysLeft: Math.ceil((r.expires_at - t) / 86400000),
+      expired: r.expires_at < t,
+      recentAttendance: r.recent_count,
+      status: r.status,
+      followUp: findPendingFollowUp(r.student_id, ['renewal', 'low_class']),
+    }));
+    res.json(success({ list, total: list.length, warnIn, expiredWithin }));
   } catch (err) {
     res.status(500).json(safeFail('获取续费预警失败'));
   }
@@ -512,8 +552,8 @@ router.get('/renewal', (req, res) => {
 router.get('/low-classes', (req, res) => {
   try {
     if (!canGrowth(req)) return res.status(403).json(safeFail('无增长中心权限'));
-    const threshold = Math.max(1, parseInt(req.query.threshold) || 5);
-    const list = db.prepare(`
+    const threshold = Math.max(1, parseInt(req.query.threshold) || LOW_CLASS_THRESHOLD);
+    const rows = db.prepare(`
       SELECT mc.id, mc.student_id, mc.card_type_name, mc.billing_mode, mc.remaining_classes, mc.expires_at, mc.status,
         s.name as student_name,
         (SELECT COUNT(*) FROM attendances a WHERE a.student_id = mc.student_id AND a.date >= date('now', 'localtime', '-30 days')) as recent_count
@@ -522,6 +562,18 @@ router.get('/low-classes', (req, res) => {
       WHERE mc.status = 'active' AND mc.billing_mode = 'count' AND mc.remaining_classes <= ? AND mc.remaining_classes > 0
       ORDER BY mc.remaining_classes ASC
     `).all(threshold);
+    // 同时保留 snake_case 原字段（既有调用方在用）与 camelCase 别名（与续费清单统一，前端可复用同一套渲染逻辑）
+    const list = rows.map((r) => ({
+      ...r,
+      cardId: r.id,
+      studentId: r.student_id,
+      studentName: r.student_name,
+      cardType: r.card_type_name,
+      remainingClasses: r.remaining_classes,
+      expiresAt: r.expires_at,
+      recentAttendance: r.recent_count,
+      followUp: findPendingFollowUp(r.student_id, ['low_class', 'renewal']),
+    }));
     res.json(success({ list, total: list.length, threshold }));
   } catch (err) {
     res.status(500).json(safeFail('获取低课时预警失败'));

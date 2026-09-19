@@ -74,4 +74,30 @@ function generateRenewalNotifications(db) {
   return { created, reminderDays, message: created ? `已发送 ${created} 条续费提醒` : '本次无新的续费提醒需发送' };
 }
 
-module.exports = { generateRenewalNotifications };
+// ---------------------------------------------------------------------------
+// 续费 / 课时预警的统一口径常量
+//
+// 改动前这些阈值在三处各自写死且互不一致：
+//   - routes/growth.js  GET /growth/renewal      warnIn = 15
+//   - routes/growth.js  GET /growth/low-classes  threshold = 5
+//   - routes/followups.js 续费跟进生成           15 / 7 / 1 天
+// 结果是「续费预警清单」和「跟进任务队列」对同一批会员卡给出不同的判断口径，
+// 老师在同一天会看到两套互相矛盾的数字。此处收口为单一来源，三处统一引用。
+// ---------------------------------------------------------------------------
+
+/** 续费预警窗口：到期前多少天开始进入清单 */
+const RENEWAL_WARN_DAYS = 15;
+/** 低课时阈值：次数卡剩余课时不超过多少节进入清单 */
+const LOW_CLASS_THRESHOLD = 5;
+/**
+ * 过期回溯窗口：已过期多少天内的卡仍算「待续费」。
+ * 只设上界不设下界会让多年前的历史死卡永久占据清单，反而淹掉真正要催的人。
+ */
+const EXPIRED_WINDOW_DAYS = 60;
+
+module.exports = {
+  generateRenewalNotifications,
+  RENEWAL_WARN_DAYS,
+  LOW_CLASS_THRESHOLD,
+  EXPIRED_WINDOW_DAYS,
+};
