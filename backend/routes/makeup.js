@@ -66,7 +66,24 @@ router.get('/eligible', (req, res) => {
       makeupStatus: row.makeupStatus || null,
     }));
 
-    res.json(success({ list: withMakeupFlag, total: withMakeupFlag.length }));
+    // 列表带 LIMIT 200：若拿 list.length 当总数，缺席记录攒过 200 条后「共 N 条」
+    // 会静默算少，与列表内容对不上。单独 COUNT 一次并回传截断标记。
+    // COUNT 与主查询共用同一套 JOIN 与 where（mk 子查询已按「排期+学员」聚合为一行，
+    // 不会让 COUNT 膨胀）。
+    const total = db.prepare(`
+      SELECT COUNT(*) AS c
+      FROM attendances a
+      LEFT JOIN schedules s ON s.id = a.schedule_id
+      LEFT JOIN (
+        SELECT original_schedule_id, student_id, MAX(id) AS mk_id
+        FROM makeup_records
+        WHERE status != 'cancelled'
+        GROUP BY original_schedule_id, student_id
+      ) mk ON mk.original_schedule_id = a.schedule_id AND mk.student_id = a.student_id
+      ${where}
+    `).get(...params).c;
+
+    res.json(success({ list: withMakeupFlag, total, truncated: withMakeupFlag.length < total }));
   } catch (err) {
     console.error('[makeup eligible]', err);
     res.status(500).json(safeFail('查询失败'));

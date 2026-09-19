@@ -12,7 +12,9 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, isAdminReq, JWT_SECRET: QR_SECRET } = require('../utils');
+// attendanceRate 别名 calcAttendanceRate：本文件 /:id/stats 内已有同名局部变量，
+// 直接解构会同名遮蔽。到场率口径全站唯一，必须复用而非另写公式。
+const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, isAdminReq, JWT_SECRET: QR_SECRET, attendanceRate: calcAttendanceRate } = require('../utils');
 const { parseItems } = require('../utils/items');
 // 流失阈值唯一来源（settings.churn_rules）——与 followups / growth 同源，
 // 避免同一学员在不同页面被判定为「流失」的时间不一致
@@ -495,6 +497,12 @@ router.get('/home/data', (req, res) => {
       membership = db.prepare('SELECT * FROM member_cards WHERE student_id = ? AND status = ? ORDER BY expires_at ASC LIMIT 1').get(student.id, 'active');
     }
 
+    // 家长端不得看到同场次**其他孩子**的姓名：未成年人名单属于敏感信息，
+    // 家长只需要知道自己孩子报没报名。完整报名名单仅工作人员可见（管理端活动卡要用）。
+    // 原先这里无条件把该场次全部报名学员的姓名拼成串返回，家长拿自己孩子的 token
+    // 就能批量拉取全机构在训孩子的姓名。
+    const isStaff = isStaffReq(req);
+
     // 某一天的训练活动（今天 / 明天共用同一构建逻辑）
     const buildClassList = (dateStr) => {
       const list = [];
@@ -523,7 +531,10 @@ router.get('/home/data', (req, res) => {
           group_course_id: s.group_course_id || '',
           maxStudents: s.max_students || 0,
           isEnrolled: student ? enr.some((e) => e.student_id === student.id) : false,
-          enrolledNames: enr.map((e) => e.student_name).filter(Boolean).join('、'),
+          enrolledNames: isStaff
+            ? enr.map((e) => e.student_name).filter(Boolean).join('、')
+            // 家长：只回自己孩子的姓名（且仅限孩子确实报了这场），否则为空
+            : (student && enr.some((e) => e.student_id === student.id) ? student.name : ''),
           enrolledCount: s.enrolled_count || enr.length,
           checkedInCount: checkedIn,
         });
@@ -857,13 +868,25 @@ router.get('/:id/stats', requireAuth, (req, res) => {
     const bind = db.prepare('SELECT 1 FROM parent_bindings WHERE student_id = ? AND parent_openid = ?').get(id, req.openid);
     if (!bind && !canViewStudents(req)) return res.status(403).json(safeFail('无权访问该成员信息'));
 
-    const totalRow = db.prepare("SELECT COUNT(*) AS c FROM attendances WHERE student_id = ?").get(id);
-    const presentRow = db.prepare("SELECT COUNT(*) AS c FROM attendances WHERE student_id = ? AND status IN ('present','late')").get(id);
-    const total = totalRow ? totalRow.c : 0;
-    const present = presentRow ? presentRow.c : 0;
-    const attendanceRate = total > 0 ? Math.round((present / total) * 100) : 0;
+    // 按状态分组计数，交 utils.attendanceRate 统一算率（全站唯一口径）。
+    // 原实现用 COUNT(*) 当分母，把 leave（已批准请假）也算成「应到未到」，
+    // 于是同一学员在档案页的到场率比看板低一截。请假不进分母。
+    const counts = db.prepare(`
+      SELECT
+        SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS present,
+        SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) AS late,
+        SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) AS absent
+      FROM attendances WHERE student_id = ?
+    `).get(id) || {};
+    const presentCount = counts.present || 0;
+    const lateCount = counts.late || 0;
+    const absentCount = counts.absent || 0;
+    // 应到次数 = 实到 + 缺勤（与 attendances.js 汇总一致），保证 实到/应到 与 到场率 同源
+    const totalSessions = presentCount + lateCount + absentCount;
+    const attendedSessions = presentCount + lateCount;
+    const attendanceRate = calcAttendanceRate({ present: presentCount, late: lateCount, absent: absentCount });
 
-    res.json(success({ totalSessions: total, attendedSessions: present, attendanceRate }));
+    res.json(success({ totalSessions, attendedSessions, attendanceRate }));
   } catch (err) {
     console.error('[studentStats]', err);
     res.status(500).json(safeFail('获取训练统计失败'));
@@ -885,8 +908,10 @@ router.get('/:id/activities', requireAuth, (req, res) => {
       LEFT JOIN schedules s ON s.id = a.schedule_id
       WHERE a.student_id = ?
       ORDER BY COALESCE(a.date, datetime(a.checkin_time/1000, 'unixepoch', 'localtime')) DESC
-      LIMIT 50
     `).all(id);
+    // 原带 LIMIT 50：单个学员的历史出勤攒过 50 条后，家长/教务翻不到更早的记录，
+    // 且接口不返回总数，调用方无从知道被截断了。这里保持返回数组（前端按数组消费，
+    // 改成对象会破坏调用方），改为全量返回 —— 单个学员的历史记录规模有限。
 
     res.json(success(list));
   } catch (err) {

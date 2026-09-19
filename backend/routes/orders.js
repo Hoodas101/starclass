@@ -519,16 +519,30 @@ router.post('/:id/refund', (req, res) => {
         let totalReward = 0;
         for (const log of rewardLogs) {
           totalReward += Number(log.amount) || 0;
+          // 翻转 earn → refund 保留：既让该笔奖励不再计入「本周获得积分」，
+          // 也使重复退款时下面的 type='earn' 查询落空（幂等保护）。
           db.prepare("UPDATE point_logs SET type = 'refund', description = '订单退款回收积分' WHERE id = ?").run(log.id);
         }
         if (totalReward > 0) {
-          db.prepare(`
-            UPDATE points SET
-              total_earned = MAX(0, total_earned - ?),
-              balance = MAX(0, balance - ?),
-              updated_at = ?
-            WHERE student_id = ?
-          `).run(totalReward, totalReward, currentTime, order.student_id);
+          // 回收额以「实际生效量」为准：余额只有 30 而要回收 100 时，余额只能扣到 0
+          // （实扣 30），流水就必须记 -30。旧实现余额按 MAX(0,…) 截断到 0、流水却按
+          // 全额 100 计，SUM(point_logs.amount) 与 points.balance 从此永久相差 70 且无自愈。
+          const acc = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(order.student_id);
+          const actual = Math.min(totalReward, (acc && acc.balance) || 0);
+          if (actual > 0) {
+            const newBal = ((acc && acc.balance) || 0) - actual; // actual ≤ balance，结果自然 ≥ 0
+            db.prepare(`
+              UPDATE points SET
+                total_earned = MAX(0, total_earned - ?),
+                balance = ?,
+                updated_at = ?
+              WHERE student_id = ?
+            `).run(actual, newBal, currentTime, order.student_id);
+            db.prepare(`
+              INSERT INTO point_logs (id, student_id, type, amount, balance, reference_id, reason, description, created_at)
+              VALUES (?, ?, 'refund', ?, ?, ?, '订单退款回收积分', '订单退款回收积分', ?)
+            `).run(generateId('PLG'), order.student_id, -actual, newBal, 'order_' + order.id, currentTime);
+          }
         }
       } else if (appliedSuggestion && suggestion.started && (suggestion.mode === 'custom' || suggestion.mode === 'ratio') && suggestion.cardId) {
         // 语义：凡**按规则建议值**退款（appliedSuggestion 为真）且该退款对应「交出剩余权益」
@@ -703,16 +717,29 @@ router.post('/:id/cancel', (req, res) => {
         let totalCancelReward = 0;
         for (const l of logs) {
           totalCancelReward += Number(l.amount) || 0;
+          // 翻转 earn → refund 保留：既让该笔奖励不再计入「本周获得积分」，
+          // 也使重复取消时下面的 type='earn' 查询落空（幂等保护）。
           db.prepare("UPDATE point_logs SET type = 'refund', description = '订单取消回收积分' WHERE id = ?").run(l.id);
         }
         if (totalCancelReward > 0) {
-          db.prepare(`
-            UPDATE points SET
-              total_earned = MAX(0, total_earned - ?),
-              balance = MAX(0, balance - ?),
-              updated_at = ?
-            WHERE student_id = ?
-          `).run(totalCancelReward, totalCancelReward, currentTime, order.student_id);
+          // 与全额退款回收同一口径：余额不足时只能扣到 0，流水必须记实际生效量 -actual，
+          // 否则 SUM(point_logs.amount) 与 points.balance 永久对不上。
+          const acc = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(order.student_id);
+          const actual = Math.min(totalCancelReward, (acc && acc.balance) || 0);
+          if (actual > 0) {
+            const newBal = ((acc && acc.balance) || 0) - actual; // actual ≤ balance，结果自然 ≥ 0
+            db.prepare(`
+              UPDATE points SET
+                total_earned = MAX(0, total_earned - ?),
+                balance = ?,
+                updated_at = ?
+              WHERE student_id = ?
+            `).run(actual, newBal, currentTime, order.student_id);
+            db.prepare(`
+              INSERT INTO point_logs (id, student_id, type, amount, balance, reference_id, reason, description, created_at)
+              VALUES (?, ?, 'refund', ?, ?, ?, '订单取消回收积分', '订单取消回收积分', ?)
+            `).run(generateId('PLG'), order.student_id, -actual, newBal, 'order_' + id, currentTime);
+          }
         }
         db.prepare("UPDATE payments SET status = 'refunded' WHERE order_id = ?").run(id);
       }

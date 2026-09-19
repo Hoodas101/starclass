@@ -215,7 +215,7 @@ router.get('/ranking', (req, res) => {
     const weekStartTs = weekStart.getTime();
 
     const list = db.prepare(`
-      SELECT p.student_id, p.student_name,
+      SELECT p.student_id, p.student_name, p.balance AS balance,
         COALESCE(SUM(CASE WHEN pl.created_at >= ? AND pl.type = 'earn' THEN pl.amount ELSE 0 END), 0) AS points
       FROM points p
       LEFT JOIN point_logs pl ON pl.student_id = p.student_id
@@ -229,7 +229,9 @@ router.get('/ranking', (req, res) => {
       studentId: item.student_id,
       studentName: item.student_name,
       points: item.points || 0,
-      balance: item.points || 0,
+      // balance 必须是 points.balance（当前可用余额），不能用本周获得 points 顶替 ——
+      // 否则排行榜显示的「余额」与积分页/档案页的可用余额对不上（兑换时尤其困惑）。
+      balance: item.balance || 0,
       isMe: myStudentId ? item.student_id === myStudentId : false,
     }));
 

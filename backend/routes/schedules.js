@@ -436,6 +436,10 @@ router.get('/', (req, res) => {
  */
 router.get('/options', (req, res) => {
   try {
+    // 机构内部下拉（调课 / 试听排课用），原本**完全没有角色判断** ——
+    // 家长带上自己的 token 就能枚举全机构排期（活动名、日期时间、场地、
+    // 报名数与容量）。仅工作人员可用；家长端不使用本接口（试听与补课页都在管理端）。
+    if (!isStaffReq(req)) return res.status(403).json(safeFail('无排期查看权限'));
     const { q, status } = req.query;
     let where = "WHERE status != 'cancelled'";
     const params = [];
@@ -446,6 +450,10 @@ router.get('/options', (req, res) => {
       where += ' AND course_name LIKE ?';
       params.push(`%${q}%`);
     }
+    // 下拉场景保留 LIMIT 50（一次全量拉取没必要），但 total 必须是真实总数：
+    // 用 rows.length 当 total 时，排期超过 50 条后调用方既拿不到真实规模，
+    // 也不知道列表被截断了（下拉里找不到想要的排期，还以为本来就没有）。
+    const total = db.prepare(`SELECT COUNT(*) AS c FROM schedules ${where}`).get(...params).c;
     const rows = db.prepare(`
       SELECT id, course_name, date, start_time, end_time, enrolled_count, max_students
       FROM schedules ${where} ORDER BY date ASC, start_time ASC LIMIT 50
@@ -460,7 +468,7 @@ router.get('/options', (req, res) => {
       max_students: s.max_students,
       label: `${s.course_name} | ${s.date} ${s.start_time}-${s.end_time}`,
     }));
-    res.json(success({ list, total: list.length }));
+    res.json(success({ list, total, truncated: list.length < total }));
   } catch (err) {
     res.status(500).json(safeFail('获取排期选项失败'));
   }

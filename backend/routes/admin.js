@@ -1233,13 +1233,28 @@ router.delete('/courses/:id', adminOnly, (req, res) => {
         db.prepare('DELETE FROM coach_comments WHERE schedule_id IN (' + ph + ')').run(...ids);
         db.prepare('DELETE FROM schedules WHERE id IN (' + ph + ')').run(...ids);
         for (const a of affected) {
+          // 上面已把这批流水整批 DELETE（净变动 −a.total），故余额只能按「实际生效量」扣：
+          // 余额只有 30 而要回滚 100 时只能扣到 0（实扣 30）。若照旧扣 a.total，余额被
+          // MAX(0,…) 截断成 0 而流水净减 100，两者永久相差 70 且无自愈。
+          const acc = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(a.student_id);
+          const actual = Math.min(a.total, (acc && acc.balance) || 0);
+          const newBal = ((acc && acc.balance) || 0) - actual; // actual ≤ balance，结果自然 ≥ 0
           db.prepare(`
             UPDATE points SET
               total_earned = MAX(0, total_earned - ?),
-              balance = MAX(0, balance - ?),
+              balance = ?,
               updated_at = ?
             WHERE student_id = ?
-          `).run(a.total, a.total, now(), a.student_id);
+          `).run(actual, newBal, now(), a.student_id);
+          // 已消耗掉、追不回的那部分（a.total − actual）补记一笔，使流水的净变动恰好
+          // 等于余额变动 −actual；否则「流水合计」与「账户余额」会永久对不上。
+          // 注：流水行仍需随活动一并清理（见上 DELETE），故这里补记的是净额差额而非原行。
+          if (a.total - actual > 0) {
+            db.prepare(`
+              INSERT INTO point_logs (id, student_id, type, amount, balance, reason, description, created_at)
+              VALUES (?, ?, 'earn', ?, ?, '删除活动回滚积分', '删除活动：积分已消耗部分不可回收', ?)
+            `).run(generateId('PLG'), a.student_id, a.total - actual, newBal, now());
+          }
         }
       }
       // 课程级关联：班级成员归属（student_class.class_id 即 courses.id）、
