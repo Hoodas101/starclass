@@ -14,6 +14,9 @@ const crypto = require('crypto');
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, isAdminReq, JWT_SECRET: QR_SECRET } = require('../utils');
 const { parseItems } = require('../utils/items');
+// 流失阈值唯一来源（settings.churn_rules）——与 followups / growth 同源，
+// 避免同一学员在不同页面被判定为「流失」的时间不一致
+const { getChurnRules } = require('../utils/churn');
 
 // member_no / archived / qr_exp 列已收编至 migrations/011。
 // 会员编号回填：只补空号（从现有最大编号继续），绝不重排已有编号——
@@ -240,6 +243,11 @@ router.get('/', (req, res) => {
     } else {
       where += ' AND s.archived = 0';
     }
+    // 流失阈值取自 settings.churn_rules（与 followups / growth 同源）。
+    // getChurnRules 保证返回的是正整数（非法值一律回退默认 30），因此在下方
+    // mem_status 的 SELECT 列表里可直接数值内插——该处若改用 ? 绑定，参数会
+    // 排到 WHERE 之前，与 project/keyword 的入参顺序错位。此处不存在注入面。
+    const { churnDays } = getChurnRules(db);
     if (status === 'active') {
       where += " AND EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id AND mc.status = 'active' AND mc.expires_at > strftime('%s','now')*1000)";
     } else if (status === 'paused') {
@@ -248,16 +256,22 @@ router.get('/', (req, res) => {
       where += " AND EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id AND mc.status = 'refunded')";
     } else if (status === 'graduated') {
       // 已结束：持有过会员卡但当前无进行中/暂停/退费卡，且近期仍有出勤（区别于流失）
+      // 「近期」窗口 = churn_rules.churnDays，与下方 churn 分支共用同一阈值，
+      // 否则同一学员可能同时满足/都不满足 graduated 与 churn 两个互补判定。
       where += ` AND EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id)
         AND NOT EXISTS (SELECT 1 FROM member_cards mc2 WHERE mc2.student_id = s.id
           AND (mc2.status = 'active' AND mc2.expires_at > strftime('%s','now')*1000
             OR mc2.status IN ('paused','refunded')))
-        AND EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', 'localtime', '-30 days'))`;
+        AND EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', 'localtime', ? || ' days'))`;
+      params.push(`-${churnDays}`);
     } else if (status === 'churn') {
       where += ` AND EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id)
         AND NOT EXISTS (SELECT 1 FROM member_cards mc2 WHERE mc2.student_id = s.id
           AND mc2.status = 'active' AND mc2.expires_at > strftime('%s','now')*1000)
-        AND NOT EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', 'localtime', '-30 days'))`;
+        AND NOT EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', 'localtime', ? || ' days'))`;
+      // 必须与上面的 ? 同序入参：两个分支互斥执行，各只推 1 个参数，
+      // 且都排在 project / keyword / 日期区间参数之前
+      params.push(`-${churnDays}`);
     }
     if (project) {
       where += ` AND EXISTS (
@@ -305,7 +319,7 @@ router.get('/', (req, res) => {
           WHEN EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id AND mc.status = 'paused') THEN 'paused'
           WHEN EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id AND mc.status = 'refunded') THEN 'refunded'
           WHEN EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id)
-            AND NOT EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', 'localtime', '-30 days')) THEN 'churn'
+            AND NOT EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', 'localtime', '-${churnDays} days')) THEN 'churn'
           WHEN EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id) THEN 'graduated'
           ELSE 'none'
         END) AS mem_status,
@@ -574,7 +588,12 @@ router.get('/:id/timeline', requireAuth, (req, res) => {
     for (const src of sources) {
       try {
         for (const e of src()) push(e.type, e.title, e.detail, e.eventAt, e.meta);
-      } catch (e) { /* 单类数据异常不阻塞时间线 */ }
+      } catch (e) {
+        // 单类数据异常不阻塞时间线，但**必须留下日志**：此前这里是空 catch，
+        // feedback 表缺 student_id 列导致查询每次都抛错却被完全吞掉，
+        // 学员详情页的「反馈」区块永远为空且永远不报错，属于"看起来有、实际没有"。
+        console.warn('[student timeline] 某类时间线数据读取失败，已跳过:', e && e.message);
+      }
     }
 
     events.sort((a, b) => b.eventAt - a.eventAt);
