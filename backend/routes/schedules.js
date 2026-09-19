@@ -1262,8 +1262,9 @@ router.delete('/:id', (req, res) => {
     // 先置 cancelled 再回滚时中途失败，会留下「活动已取消、学员课时却仍被扣」的账实不符。
     const t = now();
     const actor = getActor(req);
+    let revertResult = null;
     db.transaction(() => {
-      revertScheduleAttendances({
+      revertResult = revertScheduleAttendances({
         scheduleId: id,
         actorId: actor.id,
         actorRole: actor.role,
@@ -1278,6 +1279,33 @@ router.delete('/:id', (req, res) => {
     // 通知必须在事务提交成功之后发送：先发通知后落库时，事务一旦失败，数据库里活动仍照常进行，
     // 家长却已收到「已取消」，通知与事实不符；管理员重试还会再推一条重复通知。
     notifyEnrolledParents(id, notifyTitle, notifyContent, notifyRecipients);
+
+    // 取消排期是不可逆的高危操作：作废全部报名、回滚已签到学员的课时/积分/收入结转，
+    // 并向家长推送取消通知。此前与其它高危操作（删除学员/课程、停用教师）不同，
+    // 这里**没有留痕** —— 谁取消了哪一场、连带回滚了多少课时与积分，事后无从追溯。
+    // 审计写在事务提交之后：只记录**实际发生**的结果，回滚若部分失败也能如实反映。
+    recordAudit(db, {
+      entity: 'schedule',
+      entityId: id,
+      action: 'cancel',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: {
+        status: existing.status,
+        course_name: existing.course_name,
+        date: existing.date,
+        start_time: existing.start_time,
+        enrolled_count: existing.enrolled_count || 0,
+      },
+      after: {
+        status: 'cancelled',
+        reverted: revertResult ? revertResult.reverted : 0,
+        reverted_classes: revertResult ? revertResult.revertedClasses : 0,
+        reverted_points: revertResult ? revertResult.revertedPoints : 0,
+        cancelled_makeups: revertResult ? revertResult.cancelledMakeups : 0,
+        notified: Array.isArray(notifyRecipients) ? notifyRecipients.length : 0,
+      },
+    });
 
     res.json(success({ id }));
   } catch (err) {

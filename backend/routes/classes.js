@@ -190,12 +190,28 @@ router.delete('/:id', (req, res) => {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可删除班级'));
     const cls = getClassOr404(req.params.id);
     if (!cls) return res.json(fail('班级不存在'));
+    // 影响面必须先数出来再删：删完就查不到了，审计要如实记录连带影响了多少成员与排期
+    const memberCount = db.prepare('SELECT COUNT(*) c FROM class_members WHERE class_id = ?').get(req.params.id).c;
+    const scheduleCount = db.prepare('SELECT COUNT(*) c FROM schedules WHERE class_id = ?').get(req.params.id).c;
     const tx = db.transaction(() => {
       db.prepare('DELETE FROM class_members WHERE class_id = ?').run(req.params.id);
       db.prepare("UPDATE schedules SET class_id = '', updated_at = ? WHERE class_id = ?").run(now(), req.params.id);
       db.prepare('DELETE FROM classes WHERE id = ?').run(req.params.id);
     });
     tx();
+    // 删除班级是不可逆操作：一并解除全部成员的班级归属，并把该班级下的排期降级为无班级排期。
+    // 此前与其它高危操作（删除学员/课程、停用教师、取消排期）不同，这里**没有留痕** ——
+    // 班级被谁删的、连带影响了多少成员与排期，事后无从追溯。
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'class',
+      entityId: req.params.id,
+      action: 'delete',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { name: cls.name, member_count: memberCount, schedule_count: scheduleCount },
+      after: { status: 'deleted', members_unlinked: memberCount, schedules_detached: scheduleCount },
+    });
     res.json(success({ id: req.params.id }));
   } catch (err) {
     console.error('[class delete]', err);
@@ -332,6 +348,26 @@ router.delete('/:id/members/:studentId', (req, res) => {
     if (!cls) return res.json(fail('班级不存在'));
     const r = db.prepare('DELETE FROM class_members WHERE class_id = ? AND student_id = ?')
       .run(req.params.id, req.params.studentId);
+    // 移除成员同样要留痕：此前无任何审计，谁把谁移出了哪个班级事后无从追溯。
+    // r.changes === 0（本就不是该班成员）时**不写**审计 —— 没有实际变更，
+    // 写进去只会让审计流水混进噪音，反而掩盖真正的移除动作。
+    if (r.changes > 0) {
+      const stu = db.prepare('SELECT name FROM students WHERE id = ?').get(req.params.studentId);
+      const actor = getActor(req);
+      recordAudit(db, {
+        entity: 'class_member',
+        entityId: `${req.params.id}:${req.params.studentId}`,
+        action: 'remove',
+        actorId: actor.id,
+        actorRole: actor.role,
+        before: {
+          class_name: cls.name,
+          student_id: req.params.studentId,
+          student_name: stu ? stu.name : '',
+        },
+        after: { removed: true },
+      });
+    }
     res.json(success({ removed: r.changes, classId: req.params.id, studentId: req.params.studentId }));
   } catch (err) {
     console.error('[class member remove]', err);

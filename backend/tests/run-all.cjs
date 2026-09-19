@@ -65,6 +65,7 @@ const SUITES = [
   ['attendance-trend-consistency-regression.cjs', '出勤口径一致性（趋势「应到」=== 汇总「应到次数」）'],
   ['leave-deduction-visibility-regression.cjs', '请假扣课可见（会员卡明细并入 leave_deduction_logs，排除 mode=days）'],
   ['student-delete-release-regression.cjs', '删除学员释放未来场次名额（容量闸 + 历史场次不追溯）'],
+  ['destructive-audit-trail-regression.cjs', '破坏性操作审计留痕（取消排期/删除班级/移除成员）'],
   ['batch7-security-guards.test.cjs', 'S3-S11 安全守卫（导入黑名单/课表可见性/广播已读/口令/jwt算法/绑卡频控）'],
   ['full-system.test.js', '全功能系统'],
 ];
