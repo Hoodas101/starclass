@@ -38,9 +38,13 @@
         </div>
       </div>
 
-      <div v-if="importResult" class="import-result" :class="importResult.failed.length ? 'has-failed' : 'ok'">
-        <p>导入完成：成功 {{ importResult.success }} 条，失败 {{ importResult.failed.length }} 条。</p>
+      <div v-if="importResult" class="import-result" :class="(importResult.failed.length || importWarnings.length) ? 'has-failed' : 'ok'">
+        <p>
+          导入完成：成功 {{ importResult.success }} 条，失败 {{ importResult.failed.length }} 条<template v-if="importWarnings.length">，另有 {{ importWarnings.length }} 条未建立家长绑定</template>。
+        </p>
         <div v-for="(f, i) in importResult.failed.slice(0, 6)" :key="i" class="preview-error-item">{{ f }}</div>
+        <div v-for="(w, i) in importWarnings.slice(0, 6)" :key="'w' + i" class="preview-warn-item">{{ w }}</div>
+        <div v-if="importWarnings.length > 6" class="preview-warn-item">… 其余 {{ importWarnings.length - 6 }} 条未建立家长绑定略</div>
       </div>
     </div>
 
@@ -57,7 +61,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { Download, Upload } from '@element-plus/icons-vue'
 import { parseCsv, csvToObjects } from '@/utils/csv'
 import { exportXlsx } from '@/utils/xlsx'
@@ -66,7 +70,7 @@ const props = defineProps({
   title: { type: String, default: '批量导入' },
   // [{ key, label, required }]
   templateColumns: { type: Array, default: () => [] },
-  // (rows: object[]) => Promise<{ success: number, failed: string[] }>
+  // (rows: object[]) => Promise<{ success: number, failed: string[], warnings?: string[] }>
   importFn: { type: Function, required: true },
 })
 
@@ -75,6 +79,8 @@ const previewRows = ref([])
 const parseErrors = ref([])
 const importing = ref(false)
 const importResult = ref(null)
+// 未建立家长绑定的行（仅成员导入会返回 warnings；订单导入没有，故兜底为空数组）
+const importWarnings = computed(() => (importResult.value && importResult.value.warnings) || [])
 
 const open = () => {
   visible.value = true
@@ -228,6 +234,13 @@ defineExpose({ open })
 .preview-error-item {
   font-size: 12px;
   color: var(--t-danger-text);
+  line-height: 1.7;
+}
+
+/* 警告不是失败：学员已导入成功，只是家长绑定没建上，用警示色而非报错色 */
+.preview-warn-item {
+  font-size: 12px;
+  color: var(--t-warning-text);
   line-height: 1.7;
 }
 

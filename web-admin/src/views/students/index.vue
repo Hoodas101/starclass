@@ -694,6 +694,9 @@ const doImportStudents = async (rows) => {
   return {
     success: res.success || 0,
     failed: (res.failed || []).map((f) => `第 ${f.row} 行：${f.reason}`),
+    // 学员已建成功、但家长绑定未建的行：不计入失败，必须单独提示，
+    // 否则这些家长永远收不到通知且无人察觉
+    warnings: (res.warnings || []).map((w) => `第 ${w.row} 行：${w.reason}`),
   }
 }
 

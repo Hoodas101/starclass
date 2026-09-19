@@ -1153,13 +1153,47 @@ router.put('/courses/:id', adminOnly, (req, res) => {
 });
 
 /**
- * DELETE /api/admin/courses/:id — 停用活动
+ * DELETE /api/admin/courses/:id — 删除活动
+ * 高危不可逆防护：删除课程会连带删掉扣课流水，却**不回补** member_cards 的
+ * remaining_classes/used_classes —— 学员课时凭空少一截，且事后无法察觉。
+ * 同理，出勤是计薪与出勤率的依据、收入结转是财务口径的依据，删掉都会让账对不上。
+ *
+ * 因此：已产生上课（attendances）、扣课（deduction_logs / leave_deduction_logs）、
+ * 收入结转（revenue_recognitions）或补课（makeup_records）痕迹的课程一律拒绝删除，
+ * 引导改为「停用」（PUT /api/admin/courses/:id { isActive: 0 }）。
+ * 只排了课、还没上过的活动仍然允许删除 —— 建错的活动需要能清掉，
+ * 且其积分流水会在下方事务里正确回滚，不会造成账实不符。
  */
 router.delete('/courses/:id', adminOnly, (req, res) => {
   try {
     const existing = db.prepare('SELECT * FROM courses WHERE id = ?').get(req.params.id);
     if (!existing) return res.json(fail('活动不存在'));
     const scheds = db.prepare('SELECT id FROM schedules WHERE course_id = ?').all(req.params.id);
+
+    // 使用痕迹统计：任一 > 0 即视为已产生教学/财务后果，禁止删除。
+    // 无排期时以 IN (NULL) 占位——匹配不到任何行，避免拼出空 IN () 的语法错误。
+    const usageIds = scheds.map((s) => s.id);
+    const usagePh = usageIds.length ? usageIds.map(() => '?').join(',') : 'NULL';
+    const countRows = (sql, ...args) => db.prepare(sql).get(...args).n;
+    // 只把「删了会让账对不上」的痕迹作为拦截依据，不要看有没有排期。
+    //   · attendances —— 出勤是计薪与出勤率的依据，删掉后已结算薪资失去凭据
+    //   · deduction_logs / leave_deduction_logs —— 课时已被真实消耗，
+    //     而删除路径不回补 member_cards 的 remaining_classes，学员课时会凭空少一截
+    //   · revenue_recognitions —— 收入已结转，抹掉台账会让财务口径对不上
+    //   · makeup_records —— 补课占用了课时安排
+    // 反过来，只有排期与报名、尚未上过课的活动，删除是安全的（也确实需要能删，
+    // 否则建错的活动永远清不掉），其积分流水会在下方事务里正确回滚。
+    const usage = {
+      attendances: countRows(`SELECT COUNT(*) n FROM attendances WHERE schedule_id IN (${usagePh})`, ...usageIds),
+      deductions: countRows(`SELECT COUNT(*) n FROM deduction_logs WHERE schedule_id IN (${usagePh})`, ...usageIds),
+      leaveDeductions: countRows(`SELECT COUNT(*) n FROM leave_deduction_logs WHERE schedule_id IN (${usagePh})`, ...usageIds),
+      makeups: countRows(`SELECT COUNT(*) n FROM makeup_records WHERE original_schedule_id IN (${usagePh}) OR makeup_schedule_id IN (${usagePh})`, ...usageIds, ...usageIds),
+      recognitions: countRows(`SELECT COUNT(*) n FROM revenue_recognitions WHERE schedule_id IN (${usagePh})`, ...usageIds)
+        + countRows('SELECT COUNT(*) n FROM revenue_recognitions WHERE course_id = ?', req.params.id),
+    };
+    if (Object.keys(usage).some((k) => usage[k] > 0)) {
+      return res.status(400).json(fail('该活动已产生上课、扣课或收入结转记录，删除会导致课时与账目对不上；请改为「停用」'));
+    }
     // 级联清理包事务：中途失败会留下「报名已删、排期还在」的半删状态。
     // 删除签到流水时同步回滚 points.balance/total_earned——此前只删流水不改余额，
     // 学员积分账户凭空多出已删除活动的分数，兑换时账实不符。
@@ -1177,6 +1211,11 @@ router.delete('/courses/:id', adminOnly, (req, res) => {
         db.prepare('DELETE FROM attendances WHERE schedule_id IN (' + ph + ')').run(...ids);
         db.prepare('DELETE FROM leave_requests WHERE schedule_id IN (' + ph + ')').run(...ids);
         db.prepare('DELETE FROM deduction_logs WHERE schedule_id IN (' + ph + ')').run(...ids);
+        // 补齐此前漏删的关联表：请假扣课流水、补课记录、已确认收入台账。
+        // 只删流水不清理这些行，会在排期消失后留下指向空排期的孤儿数据。
+        db.prepare('DELETE FROM leave_deduction_logs WHERE schedule_id IN (' + ph + ')').run(...ids);
+        db.prepare('DELETE FROM makeup_records WHERE original_schedule_id IN (' + ph + ') OR makeup_schedule_id IN (' + ph + ')').run(...ids, ...ids);
+        db.prepare('DELETE FROM revenue_recognitions WHERE schedule_id IN (' + ph + ')').run(...ids);
         db.prepare('DELETE FROM point_logs WHERE reference_id IN (' + ph + ')').run(...ids);
         db.prepare('DELETE FROM coach_comments WHERE schedule_id IN (' + ph + ')').run(...ids);
         db.prepare('DELETE FROM schedules WHERE id IN (' + ph + ')').run(...ids);
@@ -1190,6 +1229,10 @@ router.delete('/courses/:id', adminOnly, (req, res) => {
           `).run(a.total, a.total, now(), a.student_id);
         }
       }
+      // 课程级关联：班级成员归属（student_class.class_id 即 courses.id）、
+      // 按 course_id 直连的收入台账，一并清掉避免留下孤儿行
+      db.prepare('DELETE FROM student_class WHERE class_id = ?').run(req.params.id);
+      db.prepare('DELETE FROM revenue_recognitions WHERE course_id = ?').run(req.params.id);
       db.prepare('DELETE FROM courses WHERE id = ?').run(req.params.id);
     })();
     // 删除活动会级联清理排期/报名/签到/积分流水，属高危操作，必须留痕

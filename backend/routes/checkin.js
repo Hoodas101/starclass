@@ -16,6 +16,9 @@ const { resolveConsumeClasses } = require('../utils/deduction');
 // 订单明细（orders.items）解析：全后端唯一实现，兼容「数组元素为 JSON 字符串」的双重编码形态。
 // 收入结转需要从订单明细里取行小计推导单位课时价，禁止在本文件自行 JSON.parse。
 const { parseItems, itemLineTotal, itemQuantity } = require('../utils/items');
+// 「推送规则 → 缺席通知」的读取与文案渲染：与续费/训练提醒共用同一实现（utils/reminders.js）
+const { getNotificationRule, resolveRuleTemplate, renderNotificationTemplate } = require('../utils/reminders');
+const { getTerms } = require('../utils/terms');
 
 /**
  * 读取积分规则 —— 签到积分的唯一取值入口（替代原先散落在两处的硬编码 10 / 5）。
@@ -573,6 +576,13 @@ function runAutoAbsent(dateStr) {
   const targetDate = dateStr || formatDate(now());
   const currentTime = formatDate(now()) === targetDate ? _currentTimeStr() : '23:59';
 
+  // 「推送规则 → 缺席通知」：设置页上的开关与文案必须真的生效。
+  // 规则缺失 / JSON 畸形时回退默认（启用 + 默认文案），不因读不到配置就漏发通知。
+  const absentRule = getNotificationRule('缺席通知');
+  const absentNotifyEnabled = !(absentRule && absentRule.enabled === false);
+  const absentTemplate = resolveRuleTemplate(absentRule, '缺席通知');
+  const { terms } = getTerms(db);
+
   const schedules = db.prepare(`
     SELECT * FROM schedules
     WHERE date = ? AND end_time < ? AND status = 'scheduled'
@@ -608,23 +618,33 @@ function runAutoAbsent(dateStr) {
         after: { status: 'absent' },
       });
 
-      // 自动缺席后通知家长（站内信），避免家长不知情
-      try {
-        const parent = db.prepare(`
-          SELECT parent_openid FROM parent_bindings
-          WHERE student_id = ? AND is_main = 1 LIMIT 1
-        `).get(stu.student_id);
-        if (parent && parent.parent_openid) {
-          const noticeId = generateId('NTF');
-          const title = '出勤提醒：未参加今日训练';
-          const content = `学员「${stu.student_name}」今日（${targetDate}）未参加「${schedule.course_name}」训练（${schedule.start_time}-${schedule.end_time}），已按缺席记录。如有疑问请联系机构。`;
-          db.prepare(`
-            INSERT INTO notifications (id, user_id, title, content, priority, category, summary, channel, status, sent_at, created_at)
-            VALUES (?, ?, ?, ?, 'important', 'attendance', ?, 'inapp', 'sent', ?, ?)
-          `).run(noticeId, parent.parent_openid, title, content, content.slice(0, 60), now(), now());
+      // 自动缺席后通知家长（站内信），避免家长不知情；
+      // 「缺席通知」规则被禁用时只记录缺席、不发通知（考勤记录不受开关影响）
+      if (absentNotifyEnabled) {
+        try {
+          const parent = db.prepare(`
+            SELECT parent_openid FROM parent_bindings
+            WHERE student_id = ? AND is_main = 1 LIMIT 1
+          `).get(stu.student_id);
+          if (parent && parent.parent_openid) {
+            const noticeId = generateId('NTF');
+            const title = '出勤提醒：未参加今日训练';
+            // 文案来自「缺席通知」规则的 template（设置页可改），
+            // 可用占位符：{{studentName}}/{{courseName}}/{{date}}/{{time}} + 机构称呼占位符
+            const content = renderNotificationTemplate(absentTemplate, {
+              studentName: stu.student_name || '',
+              courseName: schedule.course_name || '',
+              date: targetDate,
+              time: `${schedule.start_time}-${schedule.end_time}`,
+            }, terms);
+            db.prepare(`
+              INSERT INTO notifications (id, user_id, title, content, priority, category, summary, channel, status, sent_at, created_at)
+              VALUES (?, ?, ?, ?, 'important', 'attendance', ?, 'inapp', 'sent', ?, ?)
+            `).run(noticeId, parent.parent_openid, title, content, content.slice(0, 60), now(), now());
+          }
+        } catch (e) {
+          console.error('[checkin auto-absent notify]', e && e.stack ? e.stack : e);
         }
-      } catch (e) {
-        console.error('[checkin auto-absent notify]', e && e.stack ? e.stack : e);
       }
     }
   };

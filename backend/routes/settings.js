@@ -15,6 +15,9 @@ const { success, fail, safeFail, getOpenId, getActor, recordAudit, now, isAdminR
 const { getBackupConfig, createBackup, listBackups, deleteBackup, BACKUP_DIR } = require('../utils/backup');
 const { getModulesMeta, exportData, importData, FORBIDDEN_TABLES } = require('../utils/dataio');
 const termsUtil = require('../utils/terms');
+// 推送规则默认值取自 utils/reminders.js —— 与定时任务实际发送时使用的兜底文案是同一份，
+// 避免「设置页显示一套、实际发送另一套」的配置欺骗。
+const { DEFAULT_NOTIFICATION_RULES } = require('../utils/reminders');
 
 // 公开端点：返回机构当前称呼方案与解析后的术语表（无任何敏感信息，供管理端/家长端/微信通知共用）
 // 置于 router.use 守卫之前，确保无需鉴权也可访问（机构术语纯展示用）。
@@ -67,34 +70,8 @@ router.use((req, res, next) => {
 
 const KEYS = ['org_info', 'points_rules', 'notification_rules', 'refund_rules', 'leave_rules', 'uniform_price', 'service_phone', 'students_columns', 'orders_columns', 'term_scheme', 'term_overrides', 'churn_rules'];
 
-// 推送规则规范默认值：存储为空/畸形时兜底返回，保证设置页可读可配、定时任务有默认档位
-const DEFAULT_NOTIFICATION_RULES = [
-  {
-    name: '训练提醒',
-    type: '微信通知',
-    enabled: true,
-    trigger: '活动开始前',
-    advanceTime: 2,
-    template: '您的孩子{{studentName}}今天有{{courseName}}活动，训练时间{{time}}，请准时到课。',
-  },
-  {
-    name: '续期提醒',
-    type: '微信通知',
-    enabled: true,
-    trigger: '到期前15/7/1天',
-    advanceTime: 0,
-    reminderDays: [15, 7, 1],
-    template: '您的孩子{{studentName}}的会员卡即将到期，请及时续期。',
-  },
-  {
-    name: '缺席通知',
-    type: '微信通知',
-    enabled: true,
-    trigger: '成员未签到',
-    advanceTime: 1,
-    template: '您的孩子{{studentName}}今天{{courseName}}活动未到场，请确认情况。',
-  },
-];
+// 推送规则规范默认值（DEFAULT_NOTIFICATION_RULES）已上移至 utils/reminders.js：
+// 存储为空/畸形时兜底返回，保证设置页可读可配、定时任务有默认档位，且两处共用同一份。
 
 // 积分规则规范默认值：存储为空/畸形时兜底返回，保证设置页可读可配、积分规则展示有默认档位
 const DEFAULT_POINTS_RULES = [

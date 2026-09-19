@@ -22,8 +22,24 @@ function normalizeName(v) {
   return String(v == null ? '' : v).trim().replace(/\s+/g, '');
 }
 
+/**
+ * 手机号规范化 —— 全站唯一实现（建档查重与批量导入共用）。
+ * 从 Excel 复制过来的号码常带空格、横线、括号、全角数字或 +86 区号，
+ * 直接拿原始串跑 `^1[3-9]\d{9}$` 会把这类行整行判为「没有手机号」。
+ * 这里统一清洗为纯数字的大陆手机号串；无法识别时返回清洗结果（可能是空串或非 11 位），
+ * 由调用方用 PHONE_RE 自行判定是否可用。
+ * @param {string} v 原始号码
+ * @returns {string} 清洗后的纯数字串
+ */
 function normalizePhone(v) {
-  return String(v == null ? '' : v).replace(/\D/g, '');
+  return String(v == null ? '' : v)
+    // 全角数字（０-９）转半角，避免被下面的 \D 直接抹掉
+    .replace(/[\uFF10-\uFF19]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    // 去掉空格、横线、括号、加号等一切非数字字符
+    .replace(/\D/g, '')
+    // 去掉国际区号 0086 / 86。仅在去掉后正好是合法 11 位手机号时才去，
+    // 避免把 86 开头的座机等其他号码误截断成看似合法的手机号。
+    .replace(/^0{0,2}86(?=1[3-9]\d{9}$)/, '');
 }
 
 /**

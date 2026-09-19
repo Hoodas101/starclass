@@ -7,24 +7,25 @@
  */
 function generateRenewalNotifications(db) {
   const { generateId, now } = require('./index');
-  let reminderDays = [15, 7, 1];
-  let enabled = true;
-  let template = '您的孩子{{studentName}}的会员卡即将到期（{{cardType}}），为避免影响正常训练，请及时续期。';
-  try {
-    const rulesJson = db.prepare("SELECT value FROM settings WHERE key = 'notification_rules'").get();
-    const rules = rulesJson ? JSON.parse(rulesJson.value) : [];
-    const renewalRule = rules.find((r) => r && r.name === '续期提醒');
-    if (renewalRule) {
-      enabled = renewalRule.enabled !== false;
-      if (Array.isArray(renewalRule.reminderDays) && renewalRule.reminderDays.length) {
-        reminderDays = renewalRule.reminderDays
-          .map(Number)
-          .filter((n) => Number.isFinite(n) && n > 0)
-          .sort((a, b) => b - a);
-      }
-      if (renewalRule.template) template = String(renewalRule.template);
-    }
-  } catch (e) { /* 规则解析失败走默认 */ }
+  // 规则读取与文案渲染与自动路径（utils/reminders.js）共用同一实现，
+  // 保证「设置页关掉的开关」「改过的文案」在两条路径上口径完全一致。
+  const { getNotificationRule, resolveRuleTemplate, renderNotificationTemplate, defaultRule } = require('./reminders');
+  const { getTerms } = require('./terms');
+
+  const rule = getNotificationRule('续期提醒');
+  const dft = defaultRule('续期提醒');
+  let reminderDays = (dft.reminderDays || [15, 7, 1]).slice();
+  if (rule && Array.isArray(rule.reminderDays) && rule.reminderDays.length) {
+    const parsed = rule.reminderDays
+      .map(Number)
+      .filter((n) => Number.isFinite(n) && n > 0)
+      .sort((a, b) => b - a);
+    // 过滤后为空说明配置畸形（如全为 0/负数）→ 回退默认档位
+    if (parsed.length) reminderDays = parsed;
+  }
+  const template = resolveRuleTemplate(rule, '续期提醒');
+  // 规则缺失（getNotificationRule 返回 null）时按默认启用处理，不因读不到配置就不发提醒
+  const enabled = !(rule && rule.enabled === false);
 
   if (!enabled || !reminderDays.length) {
     return { created: 0, reminderDays, message: '续期提醒规则未启用' };
@@ -42,6 +43,7 @@ function generateRenewalNotifications(db) {
   `).all(t, t, maxDays * DAY);
 
   let created = 0;
+  const { terms } = getTerms(db);
   for (const card of cards) {
     const daysLeft = Math.ceil((card.expires_at - t) / DAY);
     if (daysLeft <= 0 || !daysLeftSet.has(daysLeft)) continue;
@@ -56,10 +58,12 @@ function generateRenewalNotifications(db) {
     `).all(card.student_id);
     if (!parents.length) continue;
 
-    const content = template
-      .replace(/{{studentName}}/g, card.student_name || '孩子')
-      .replace(/{{cardType}}/g, card.card_type_name || '会员卡')
-      .replace(/{{days}}/g, String(daysLeft));
+    // 与自动路径同一套占位符：{{studentName}}/{{cardType}}/{{days}} + 机构称呼占位符
+    const content = renderNotificationTemplate(template, {
+      studentName: card.student_name || '孩子',
+      cardType: card.card_type_name || '会员卡',
+      days: String(daysLeft),
+    }, terms);
     const ins = db.prepare(`
       INSERT INTO notifications (id, user_id, student_id, template_id, title, content, summary, priority, category, channel, status, is_broadcast, sent_at, created_at)
       VALUES (?, ?, ?, ?, '会员即将到期提醒', ?, ?, 'important', 'system', 'inapp', 'sent', 0, ?, ?)

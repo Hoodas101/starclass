@@ -18,7 +18,8 @@ const { parseItems } = require('../utils/items');
 // 避免同一学员在不同页面被判定为「流失」的时间不一致
 const { getChurnRules } = require('../utils/churn');
 // 建档查重（手机号相同 = 强重复，阻止同一人被录成两份）
-const { findDuplicateStudents } = require('../utils/duplicate');
+// normalizePhone / PHONE_RE 与查重同源：导入时先规范化再校验，避免同一号码两套判据
+const { findDuplicateStudents, normalizePhone, PHONE_RE } = require('../utils/duplicate');
 
 // member_no / archived / qr_exp 列已收编至 migrations/011。
 // 会员编号回填：只补空号（从现有最大编号继续），绝不重排已有编号——
@@ -142,7 +143,9 @@ router.post('/', (req, res) => {
 /**
  * POST /api/students/import — 批量导入成员（CSV 解析后由前端提交 JSON）
  * Body: { rows: [{ name, gender, birthday, school, grade, level, parentName, phone, remark }] }
- * 返回 { success, failed: [{ row, reason }] }
+ * 返回 { success, created, failed: [{ row, reason }], unlinked, warnings: [{ row, name, phone, reason }] }
+ * 说明：warnings 只表示「学员已建成功、但家长绑定未建」，不计入 failed。
+ *       学员本身建成了就不算失败，但不能因此把它报成完整成功。
  */
 router.post('/import', (req, res) => {
   try {
@@ -155,6 +158,8 @@ router.post('/import', (req, res) => {
     const runImport = db.transaction(() => {
       const okCount = [];
       const failed = [];
+      // 学员已建成功、但家长绑定未建的行：既不算失败，也不能报成完整成功
+      const warnings = [];
       rows.forEach((r, idx) => {
         const name = String(r.name || '').trim();
         if (!name) {
@@ -172,8 +177,13 @@ router.post('/import', (req, res) => {
         `).run(id, name, String(r.gender || '').trim(), String(r.birthday || '').trim(), String(r.school || '').trim(),
           String(r.grade || '').trim(), String(r.level || '').trim(), String(r.remark || '').trim(), statusVal, joinDateVal, t, t);
 
-        const phone = String(r.phone || '').trim();
-        if (phone && /^1[3-9]\d{9}$/.test(phone)) {
+        // 手机号先规范化再校验：Excel 复制来的号码常带空格、横线、括号、全角数字或 +86 前缀，
+        // 直接拿原始串跑 ^1[3-9]\d{9}$ 会把这类行整行判为「没有手机号」而静默跳过家长绑定，
+        // 结果学员建了、家长却永远绑不上，之后所有家长通知都发不到人且无人察觉。
+        const phoneRaw = String(r.phone || '').trim();
+        const phone = normalizePhone(phoneRaw);
+        const phoneOk = PHONE_RE.test(phone);
+        if (phoneOk) {
           const parentNameVal = String(r.parentName || '').trim() || `${name}家长`;
           const openid = `phone_${phone}`;
           const existingUser = db.prepare('SELECT id, openid FROM users WHERE phone = ?').get(phone);
@@ -197,7 +207,19 @@ router.post('/import', (req, res) => {
             `).run(id, name, parentNameVal, bindOpenid, phone, t);
           }
         }
-        okCount.push({ name, phone });
+        // 学员本身已建成功，一律计入成功列表（手机号问题不改变成功/失败判定）；
+        // 但家长绑定到底建没建必须如实标出，供前端提示老师补录。
+        okCount.push({ name, phone: phoneOk ? phone : phoneRaw, parentLinked: phoneOk });
+        if (!phoneOk) {
+          warnings.push({
+            row: idx + 2,
+            name,
+            phone: phoneRaw,
+            reason: phoneRaw
+              ? `家长手机号「${phoneRaw}」不是有效的 11 位手机号，该学员未建立家长绑定，请补录后再发通知`
+              : '未填写家长手机号，该学员未建立家长绑定',
+          });
+        }
       });
 
       // 仅回填缺失的会员编号，保留已有编号（从现有最大值继续，不整体重排）
@@ -215,10 +237,10 @@ router.post('/import', (req, res) => {
         });
       }
 
-      return { okCount, failed };
+      return { okCount, failed, warnings };
     });
 
-    const { okCount, failed } = runImport();
+    const { okCount, failed, warnings } = runImport();
     // 批量导入属批量改写业务数据的高危操作，必须留痕（批次无单一主键，entityId 留空）
     const actor = getActor(req);
     recordAudit(db, {
@@ -227,9 +249,12 @@ router.post('/import', (req, res) => {
       action: 'import',
       actorId: actor.id,
       actorRole: actor.role,
-      after: { created: okCount.length, failed: failed.length },
+      // 审计如实记录「未建家长绑定」的行数，否则事后无从判断这批学员的家长能否收到通知
+      after: { created: okCount.length, failed: failed.length, unlinked: warnings.length },
     });
-    res.json(success({ success: okCount.length, failed, created: okCount.length }));
+    // 保持 success / created / failed 结构不变（前端与既有调用方依赖），
+    // 新增 unlinked + warnings 如实说明哪些学员没建上家长绑定。
+    res.json(success({ success: okCount.length, failed, created: okCount.length, unlinked: warnings.length, warnings }));
   } catch (err) {
     console.error('[students import]', err);
     res.status(500).json(safeFail('导入失败，请稍后重试'));

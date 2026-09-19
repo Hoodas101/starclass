@@ -327,7 +327,7 @@ const handleArchive = async (row) => {
 const handleDelete = async (row) => {
   try {
     await ElMessageBox.confirm(
-      `确定删除项目「${row.name}」？将同时删除其全部排课、报名与签到记录，且不可恢复。`,
+      `确定删除项目「${row.name}」？已产生上课、扣课或收入结转记录的项目不能删除（会导致课时与账目对不上），需先改为「停用」；仅排过课但尚未上过的项目可被删除。`,
       '删除确认',
       { type: 'warning', confirmButtonText: '确认删除', confirmButtonClass: 'el-button--danger' }
     )
