@@ -496,6 +496,15 @@ router.post('/deduct', (req, res) => {
       'SELECT * FROM deduction_logs WHERE schedule_id = ? AND student_id = ?'
     ).get(scheduleId, studentId);
     if (existing) return res.json(fail('已扣过训练时长，无需重复扣课'));
+    // 两套账本交叉校验：请假审批扣课写的是 leave_deduction_logs（mode='class'），
+    // 与本接口的 deduction_logs 不是同一张表。此前只查本表，于是
+    // 「学员请假获批已扣课 → 管理员在后台手工补扣」会把同一节课扣两次。
+    // 签到路径 applyArrivalDeduction（checkin.js:322）已有同款校验，此处此前漏了。
+    // 只拦 mode='class'：mode='days' 扣的是时效卡有效期，并未消课时，不构成重复扣课。
+    const leaveDed = db.prepare(
+      "SELECT 1 FROM leave_deduction_logs WHERE schedule_id = ? AND student_id = ? AND mode = 'class'"
+    ).get(scheduleId, studentId);
+    if (leaveDed) return res.json(fail('该场次已按请假规则扣过课时，无需重复扣课'));
 
     // 查找学员当前生效的会员卡（优先指定卡）
     // 显式指定 cardId 时也必须校验 status = 'active'：订单全额退款只把卡标记为 status='refunded'，
@@ -542,6 +551,11 @@ router.post('/deduct', (req, res) => {
     const deductOutcome = db.transaction(() => {
       const dup = db.prepare('SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
       if (dup) return { err: '已扣过训练时长，无需重复扣课' };
+      // 与上方前置检查同口径：事务内复查一次，防「请假记录是在本次检查之后才写入」的并发窗口
+      const dupLeave = db.prepare(
+        "SELECT 1 FROM leave_deduction_logs WHERE schedule_id = ? AND student_id = ? AND mode = 'class'"
+      ).get(scheduleId, studentId);
+      if (dupLeave) return { err: '该场次已按请假规则扣过课时，无需重复扣课' };
       const upd = db.prepare(`
         UPDATE member_cards SET remaining_classes = remaining_classes - ?, used_classes = used_classes + ?, updated_at = ?
         WHERE id = ? AND remaining_classes >= ?
