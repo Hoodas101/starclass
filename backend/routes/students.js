@@ -626,8 +626,20 @@ router.get('/:id/timeline', requireAuth, (req, res) => {
         .map((r) => ({ type: 'leave', title: `${r.date || ''} 请假`, detail: r.reason || '', eventAt: r.created_at })),
       () => db.prepare('SELECT type, amount, reason, created_at FROM point_logs WHERE student_id = ? ORDER BY created_at DESC LIMIT 100').all(id)
         .map((r) => {
-          const sign = r.type === 'consume' ? '-' : '+';
-          return { type: 'points', title: `积分${r.type === 'consume' ? '扣减' : '获得'} ${sign}${r.amount}`, detail: r.reason || '', eventAt: r.created_at };
+          // amount 的符号在历史数据里并不统一：earn/consume/refund 存的是正值，
+          // 而签到回滚（checkin.js）存的是负值。原写法按 type 二次拼符号，
+          // 于是回滚那条会显示成「积分获得 +-10」，退卡回收（refund）也会显示成
+          // 「积分获得 +100」——明明是扣分却写成获得，家长看到会对不上账。
+          // 统一改为：以绝对值为准，符号由「这笔到底是加还是减」决定。
+          const amt = Number(r.amount) || 0;
+          const isDeduct = amt < 0 || r.type === 'consume' || r.type === 'refund';
+          const label = r.type === 'refund' ? '回收' : (isDeduct ? '扣减' : '获得');
+          return {
+            type: 'points',
+            title: `积分${label} ${isDeduct ? '-' : '+'}${Math.abs(amt)}`,
+            detail: r.reason || '',
+            eventAt: r.created_at,
+          };
         }),
       () => db.prepare('SELECT content, status, created_at FROM feedback WHERE student_id = ?').all(id)
         .map((r) => ({ type: 'feedback', title: '提交意见反馈', detail: r.content || '', eventAt: r.created_at })),

@@ -16,6 +16,8 @@ const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, n
 const { requireStaffPerm } = require('../middleware/authz');
 // 已删除 / 已归档学员的排除条件（排期涉及学员的收集与 growth 预警共用同一判据）
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
+// 取消排期的回滚原语：与签到回滚共用同一实现（utils/attendance-revert）
+const { revertScheduleAttendances } = require('../utils/attendance-revert');
 
 /**
  * 排期变更自动通知：向已报名学员的绑定家长发送站内通知
@@ -1041,7 +1043,11 @@ router.get('/:id', (req, res) => {
     const teacherNameVal = teacherId === '' ? '' : ((teacher?.alias || teacher?.name) ?? null);
     const classroomNameVal = classroomId === '' ? '' : (classroom?.name ?? null);
 
-    db.prepare(`
+    // 主更新先定义成函数、延后调用：取消排期时，它必须与「课时 / 积分 / 收入结转回滚」
+    // 落在**同一个事务**里（见下方 isCancel 分支）。若照原样先写 status='cancelled' 再回滚，
+    // 一旦回滚中途失败就会留下「活动已取消、学员课时却仍被扣」的账实不符，且无从自愈。
+    // 下面的家长通知只依赖 existing 快照，不受延后调用影响。
+    const applyScheduleUpdate = () => db.prepare(`
       UPDATE schedules SET
         course_id = COALESCE(?, course_id),
         course_name = COALESCE(?, course_name),
@@ -1093,9 +1099,25 @@ router.get('/:id', (req, res) => {
 
     // 通过修改状态取消活动时,级联取消报名(与 DELETE /:id 行为一致),避免"已取消活动仍显示已报名"
     if (status === 'cancelled' && existing.status !== 'cancelled') {
-      db.prepare("UPDATE enrollments SET status = 'cancelled', updated_at = ? WHERE schedule_id = ? AND status = 'active'")
-        .run(now(), id);
-      db.prepare('UPDATE schedules SET enrolled_count = 0, updated_at = ? WHERE id = ?').run(now(), id);
+      // 主更新 + 回滚 + 级联取消报名，三者同一事务：
+      // 回滚（课时 / 积分 / 收入结转）必须排在状态更新**之前**，中途失败才能整笔撤销，
+      // 否则会留下「活动已取消、学员课时却仍被扣」的账实不符，且无法从数据判断是否回滚过。
+      const t = now();
+      const actor = getActor(req);
+      db.transaction(() => {
+        applyScheduleUpdate();
+        revertScheduleAttendances({
+          scheduleId: id,
+          actorId: actor.id,
+          actorRole: actor.role,
+          reason: '活动取消，回滚已签到学员的课时与积分',
+        });
+        db.prepare("UPDATE enrollments SET status = 'cancelled', updated_at = ? WHERE schedule_id = ? AND status = 'active'")
+          .run(t, id);
+        db.prepare('UPDATE schedules SET enrolled_count = 0, updated_at = ? WHERE id = ?').run(t, id);
+      })();
+    } else {
+      applyScheduleUpdate();
     }
 
     res.json(success({ id }));
@@ -1121,10 +1143,24 @@ router.delete('/:id', (req, res) => {
       '活动取消通知',
       `「${existing.course_name || '训练活动'}」（${existing.date} ${existing.start_time || ''}）已取消，感谢理解。`
     );
-    db.prepare("UPDATE schedules SET status = 'cancelled', updated_at = ? WHERE id = ?").run(now(), id);
-    // 级联处理报名记录（置为取消，避免孤儿报名残留）
-    db.prepare("UPDATE enrollments SET status = 'cancelled', updated_at = ? WHERE schedule_id = ? AND status = 'active'").run(now(), id);
-    db.prepare("UPDATE schedules SET enrolled_count = 0 WHERE id = ? AND status = 'cancelled'").run(id);
+    // 三写必须原子：分开写时中途出错会留下「报名已取消但排期仍是 scheduled」的半截状态
+    // —— 课表上还挂着这个活动、家长端仍可见，但报名已被清空，且无法从数据本身判断发生了什么。
+    // 回滚（课时 / 积分 / 收入结转）同样塞进这一事务、排在状态更新**之前**：
+    // 先置 cancelled 再回滚时中途失败，会留下「活动已取消、学员课时却仍被扣」的账实不符。
+    const t = now();
+    const actor = getActor(req);
+    db.transaction(() => {
+      revertScheduleAttendances({
+        scheduleId: id,
+        actorId: actor.id,
+        actorRole: actor.role,
+        reason: '活动取消，回滚已签到学员的课时与积分',
+      });
+      db.prepare("UPDATE schedules SET status = 'cancelled', updated_at = ? WHERE id = ?").run(t, id);
+      // 级联处理报名记录（置为取消，避免孤儿报名残留）
+      db.prepare("UPDATE enrollments SET status = 'cancelled', updated_at = ? WHERE schedule_id = ? AND status = 'active'").run(t, id);
+      db.prepare("UPDATE schedules SET enrolled_count = 0 WHERE id = ? AND status = 'cancelled'").run(id);
+    })();
     res.json(success({ id }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));

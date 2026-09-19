@@ -540,7 +540,12 @@ router.post('/:id/refund', (req, res) => {
         const card = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(suggestion.cardId);
         if (card && card.status !== 'refunded') {
           if ((card.billing_mode || 'time') === 'count') {
-            db.prepare('UPDATE member_cards SET remaining_classes = 0, updated_at = ? WHERE id = ?').run(currentTime, card.id);
+            // 被回收的课时必须计入 used_classes：只把 remaining 置 0 会破坏
+            // 「total = remaining + used」恒等式（例：24 节课用了 6 节，退后变成
+            // 24 = 0 + 6，不成立）。恒等式一破，就无法从卡本身回答「这张卡一共
+            // 消耗了多少课时」，且没有任何自愈机制。
+            // SQL 里两处赋值都基于更新前的行值，故先后顺序不影响结果。
+            db.prepare('UPDATE member_cards SET used_classes = used_classes + remaining_classes, remaining_classes = 0, updated_at = ? WHERE id = ?').run(currentTime, card.id);
             clawback = `已同步回收卡内剩余 ${card.remaining_classes || 0} 次课时`;
           } else {
             db.prepare('UPDATE member_cards SET expires_at = ?, updated_at = ? WHERE id = ?').run(currentTime, card.id);

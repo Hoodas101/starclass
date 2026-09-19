@@ -119,7 +119,7 @@
             <el-table-column label="类型" min-width="72">
               <template #default="{ row }">
                 <span class="log-amount" :class="row.type === 'earn' ? 'earn' : 'consume'">
-                  {{ row.type === 'earn' ? '+' : '-' }}{{ row.amount }}
+                  {{ row.type === 'earn' && Number(row.amount) > 0 ? '+' : '-' }}{{ Math.abs(Number(row.amount) || 0) }}
                 </span>
               </template>
             </el-table-column>

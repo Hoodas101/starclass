@@ -696,8 +696,16 @@ router.post('/refund', (req, res) => {
         if (refundAmount > room) refundAmount = room;
       }
 
-      // 更新卡状态
-      db.prepare("UPDATE member_cards SET status = 'refunded', updated_at = ? WHERE id = ?").run(currentTime, cardId);
+      // 更新卡状态：次数卡同时回收剩余课时并计入已用，理由与订单退款路径一致
+      // （orders.js 退款回收）—— 只置 status='refunded' 而留着 remaining_classes，
+      // 会让一张已退掉的卡仍显示「剩余 18 节」，且 total = remaining + used 不成立。
+      // 时效卡不消耗课时，不做此处理。
+      // 注意：退费金额 refundAmount 已在上面按 remaining_classes 算完，此处归零不影响已算金额。
+      if ((card.billing_mode || 'time') === 'count') {
+        db.prepare("UPDATE member_cards SET status = 'refunded', used_classes = used_classes + remaining_classes, remaining_classes = 0, updated_at = ? WHERE id = ?").run(currentTime, cardId);
+      } else {
+        db.prepare("UPDATE member_cards SET status = 'refunded', updated_at = ? WHERE id = ?").run(currentTime, cardId);
+      }
 
       // 回收购买时赠送的积分（仅本卡对应商品的奖励，订单含多商品时不影响其他商品权益）
       if (orderId) {

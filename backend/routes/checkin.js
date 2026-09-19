@@ -13,6 +13,10 @@ const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, n
 const { requireStaffPerm } = require('../middleware/authz');
 // 每次课消耗的课时数（courses.consume_classes）：与手工扣课路径共用同一实现
 const { resolveConsumeClasses } = require('../utils/deduction');
+// 考勤回滚共享原语（积分 / 扣课 / 收入结转的唯一实现）：
+// 「取消排期」路径（routes/schedules.js）也回滚同一批副作用，必须共用同一份代码，
+// 否则两条回滚路径会各写一份、口径日久漂移。
+const { reversePoints, hasRevenueRecognitionTable, revertRevenueRecognition, revertDeduction } = require('../utils/attendance-revert');
 // 订单明细（orders.items）解析：全后端唯一实现，兼容「数组元素为 JSON 字符串」的双重编码形态。
 // 收入结转需要从订单明细里取行小计推导单位课时价，禁止在本文件自行 JSON.parse。
 const { parseItems, itemLineTotal, itemQuantity } = require('../utils/items');
@@ -130,6 +134,12 @@ router.post('/teacher', (req, res) => {
         }
         const t = now();
         // 回滚签到积分（含累计，记录负流水）
+        // 注意：此处**刻意**不复用 utils/attendance-revert 的 reversePoints。
+        // 两者积分算术完全一致（同样按实际生效量扣减 balance/total_earned、写负流水），
+        // 但落库文案不等价：这里 reason='清除签到记录，回滚积分' 与
+        // description='清除签到记录回滚积分' 是两个不同的字符串，而 reversePoints
+        // 把同一个 description 同时写进 reason 与 description 两列。直接替换会改写
+        // 已产生流水行的审计文案，故按「不能证明等价就保留内联」处理。
         if ((existing.points_earned || 0) > 0) {
           const acc = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
           if (acc) {
@@ -154,24 +164,9 @@ router.post('/teacher', (req, res) => {
             `).run(generateId('plog_'), studentId, -actual, newBal, scheduleId, t);
           }
         }
-        // 回滚次数卡扣课（若已扣）
-        const ded = db.prepare(
-          'SELECT * FROM deduction_logs WHERE schedule_id = ? AND student_id = ?'
-        ).get(scheduleId, studentId);
-        if (ded) {
-          // 回滚课时：以扣课时记下的真实扣减量为准（迁移 019 的 deduction_logs.count）。
-          // 旧实现在此按 resolveConsumeClasses(scheduleId) 于回滚那一刻重新推导，
-          // 与当初真实扣减量不符时（手动按 classes=N 扣课、或扣课后课程配置被改），
-          // 每次「签到 → 改缺席/清除」都会让卡内课时凭空增减。
-          // 迁移前的历史行 count 为 NULL，回退到旧的推导方式，行为与改动前一致。
-          const back = ded.count != null ? ded.count : resolveConsumeClasses(scheduleId);
-          db.prepare(`
-            UPDATE member_cards SET remaining_classes = remaining_classes + ?,
-              used_classes = MAX(0, used_classes - ?), updated_at = ?
-            WHERE id = ?
-          `).run(back, back, t, ded.card_id);
-          db.prepare('DELETE FROM deduction_logs WHERE id = ?').run(ded.id);
-        }
+        // 回滚次数卡扣课（若已扣）—— 共享实现（utils/attendance-revert），
+        // 与「取消排期」回滚路径同一份代码，避免两处口径漂移。
+        revertDeduction({ scheduleId, studentId, t });
         // 课时已退回卡内 → 对应已结转的收入必须同步冲销，否则「清除签到」后
         // 合同负债会被系统性低估（钱退回了卡里，收入却还挂在账上）。
         revertRevenueRecognition(scheduleId, studentId);
@@ -213,19 +208,9 @@ router.post('/teacher', (req, res) => {
             if (oldPointsEarned > 0) {
               reversePoints(studentId, oldPointsEarned, scheduleId, '签到状态变更回滚积分');
             }
-            const ded = db.prepare(
-              'SELECT * FROM deduction_logs WHERE schedule_id = ? AND student_id = ?'
-            ).get(scheduleId, studentId);
-            if (ded) {
-              // 同上：以扣课时记录的真实扣减量为准，历史行（count 为 NULL）回退到推导
-              const back = ded.count != null ? ded.count : resolveConsumeClasses(scheduleId);
-              db.prepare(`
-                UPDATE member_cards SET remaining_classes = remaining_classes + ?,
-                  used_classes = MAX(0, used_classes - ?), updated_at = ?
-                WHERE id = ?
-              `).run(back, back, now(), ded.card_id);
-              db.prepare('DELETE FROM deduction_logs WHERE id = ?').run(ded.id);
-            }
+            // 共享实现（utils/attendance-revert）：以扣课时记录的真实扣减量为准，
+            // 历史行（count 为 NULL）回退到 resolveConsumeClasses 推导
+            revertDeduction({ scheduleId, studentId });
             // 同上：课时退回 → 同步冲销已结转收入，保持结转台账与课时台账一致
             revertRevenueRecognition(scheduleId, studentId);
           } else if (!oldIsEarn && newIsEarn) {
@@ -717,33 +702,6 @@ function addPoints(studentId, studentName, amount, type, referenceId, descriptio
 }
 
 /**
- * 反向扣回积分（内部使用）：用于签到状态由「已签到/迟到」改为「非签到」时回滚已发放积分。
- * 仅做减法：扣减 balance 与 total_earned，并写一条负 amount 的 point_logs。
- * reference_id 复用原签到值（scheduleId），便于去重与审计追溯。
- */
-function reversePoints(studentId, amount, referenceId, description) {
-  if (!(amount > 0)) return;
-  const acc = db.prepare('SELECT * FROM points WHERE student_id = ?').get(studentId);
-  if (!acc) return; // 账户不存在则无需回滚
-  // 与「清除签到回滚」同一口径：流水只记实际生效的扣减量。
-  // 余额只有 3 却要回滚 10 时，实扣 3 就必须记 -3；记 -10 会让
-  // SUM(point_logs.amount) 与 points.balance 永久相差 7 且无自愈。
-  // 业务语义不变：余额不足时仍是「扣到 0 为止、不报失败」。
-  const actual = Math.min(amount, acc.balance || 0);
-  const newBal = (acc.balance || 0) - actual; // actual ≤ balance，结果自然 ≥ 0
-  // total_earned 同按实际生效量扣；MAX(0, …) 仅防御历史脏数据
-  // （正常情况下 total_earned ≥ balance ≥ actual，不会触发截断）。
-  db.prepare(`
-    UPDATE points SET total_earned = MAX(0, total_earned - ?), balance = ?, updated_at = ?
-    WHERE student_id = ?
-  `).run(actual, newBal, now(), studentId);
-  db.prepare(`
-    INSERT INTO point_logs (id, student_id, type, amount, balance, reference_id, reason, description, created_at)
-    VALUES (?, ?, 'checkin', ?, ?, ?, ?, ?, ?)
-  `).run(generateId('plog_'), studentId, -actual, newBal, referenceId, description, description, now());
-}
-
-/**
  * 获取当前时间字符串 HH:mm
  */
 function _currentTimeStr() {
@@ -765,22 +723,8 @@ function isUniqueViolation(e) {
 }
 
 // ============ 收入结转（合同负债）辅助函数 ============
-
-/**
- * revenue_recognitions 表是否存在（迁移 017 未执行时为 false）。
- * 新增的是旁路台账：老库尚未迁移时只跳过结转，绝不让既有签到流程报错。
- * 不做结果缓存 —— 建表后无需重启即生效，且这是一次极廉价的 sqlite_master 点查
- * （只在「扣课成功」这一低频分支上发生）。
- */
-function hasRevenueRecognitionTable() {
-  try {
-    return !!db.prepare(
-      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'revenue_recognitions'"
-    ).get();
-  } catch (e) {
-    return false;
-  }
-}
+// hasRevenueRecognitionTable / revertRevenueRecognition 已迁至 utils/attendance-revert.js
+// （取消排期路径同样需要冲销结转，必须共用同一实现）。
 
 /**
  * 从卡的**关联订单**推导单位课时价（元/课时）。
@@ -865,16 +809,6 @@ function recordRevenueRecognition({ card, scheduleId, classes, t }) {
     basis,
     t
   );
-}
-
-/**
- * 冲销某排期+学员的结转记录（课时回滚时调用：清除签到、签到改为缺席/请假）。
- * DELETE 天然幂等，重复调用安全。表不存在时静默跳过。
- */
-function revertRevenueRecognition(scheduleId, studentId) {
-  if (!hasRevenueRecognitionTable()) return;
-  db.prepare('DELETE FROM revenue_recognitions WHERE schedule_id = ? AND student_id = ?')
-    .run(scheduleId, studentId);
 }
 
 module.exports = router;

@@ -287,14 +287,20 @@ router.get('/logs', (req, res) => {
     if (!isAdmin(req)) return res.status(403).json(safeFail('仅管理员可查看薪资结算记录'));
     const month = req.query.month;
     let list;
+    let total;
     if (month) {
       const range = monthRange(String(month));
       if (!range) return res.json(fail('月份格式应为 YYYY-MM'));
       list = db.prepare('SELECT * FROM payroll_logs WHERE month = ? ORDER BY status, teacher_name').all(String(month));
+      total = list.length;
     } else {
       list = db.prepare('SELECT * FROM payroll_logs ORDER BY month DESC, status, teacher_name LIMIT 200').all();
+      // 不带月份时列表被 LIMIT 200 截断：只回 list 的话调用方只能拿 list.length 当总数，
+      // 结算记录攒过 200 条后「共 N 条」会静默算少，与列表内容对不上。
+      // 故单独 COUNT 一次，并回传截断标记让调用方知道还有更多。
+      total = db.prepare('SELECT COUNT(*) AS c FROM payroll_logs').get().c;
     }
-    res.json(success({ list }));
+    res.json(success({ list, total, truncated: list.length < total }));
   } catch (err) {
     console.error('[payroll logs]', err);
     res.status(500).json(safeFail('获取结算记录失败'));

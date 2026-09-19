@@ -308,12 +308,17 @@ router.get('/today', (req, res) => {
   try {
     if (!canFollowUp(req)) return res.status(403).json(safeFail('无跟进任务权限'));
     const endOfDay = now() + (24 * 60 * 60 * 1000 - 1);
+    const where = "status = 'pending' AND due_at <= ?";
+    // 列表保留 LIMIT 20（首页看板只需最高优先级的一屏），但 count 必须是**真实总数**：
+    // 用 list.length 当 count 时，待办一旦超过 20 条，看板就永远显示「今日待办 20 条」，
+    // 与库里实际待办量对不上，销售会以为打完这 20 个就没事了。
+    const total = db.prepare(`SELECT COUNT(*) AS c FROM follow_ups WHERE ${where}`).get(endOfDay).c;
     const list = db.prepare(`
       SELECT * FROM follow_ups
-      WHERE status = 'pending' AND due_at <= ?
+      WHERE ${where}
       ORDER BY priority ASC, due_at ASC LIMIT 20
     `).all(endOfDay).map(formatTask);
-    res.json(success({ list, count: list.length }));
+    res.json(success({ list, count: total, truncated: list.length < total }));
   } catch (err) {
     console.error('[followups today]', err);
     res.status(500).json(safeFail('获取今日待办失败'));
