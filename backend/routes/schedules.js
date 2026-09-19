@@ -6,7 +6,7 @@
  * GET  /api/schedules/my           — 当前成员的课表
  * GET  /api/schedules/today        — 今日课表
  * PUT  /api/schedules/:id          — 修改排期
- * DELETE /api/schedules/:id        — 暂停活动
+ * DELETE /api/schedules/:id        — 取消排期（软删除，status 置 cancelled，不可恢复）
  * POST /api/schedules/conflict-check — 冲突检测
  */
 const express = require('express');
@@ -1242,11 +1242,11 @@ router.get('/:id', (req, res) => {
 });
 
 /**
- * DELETE /api/schedules/:id — 暂停活动
+ * DELETE /api/schedules/:id — 取消排期（软删除，status 置 cancelled，不可恢复）
  */
 router.delete('/:id', (req, res) => {
   try {
-    if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可暂停活动'));
+    if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可取消排期'));
     const { id } = req.params;
     const existing = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
     if (!existing) return res.json(fail('排期不存在'));

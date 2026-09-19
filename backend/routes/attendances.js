@@ -140,7 +140,9 @@ function computeSummary(where, params) {
 function computeTrend(where, params) {
   return db.prepare(`
     SELECT a.date AS date,
-      COUNT(*) AS total,
+      -- 与 :119 totalSessions 同口径：机构已批准的请假不计入应到，
+      -- 否则同页柱状图的「应到」与卡片「应到次数」会出现两个数字。
+      SUM(CASE WHEN a.status IN ('present', 'late', 'absent') THEN 1 ELSE 0 END) AS total,
       SUM(CASE WHEN a.status IN ('present', 'late') THEN 1 ELSE 0 END) AS attended
     FROM attendances a
     LEFT JOIN schedules s ON s.id = a.schedule_id

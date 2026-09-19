@@ -403,10 +403,21 @@ router.post('/phone-login', async (req, res) => {
       user.avatar = avatarUrl;
     }
 
-    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0 });
+    // 与密码登录（:202）同一判据：密码仍是系统默认口令 → 登录后必须改密。
+    // 此前 phone-login 下发的 token 不带 mcp claim，员工改用微信手机号快捷登录即可绕开
+    // server.js:179 的强制改密拦截，使默认口令长期有效（账号接管面）。
+    // 先判 user.password 非空：verifyPassword 内部对 storedHash 直接调用 startsWith，
+    // 早期员工数据 password 可能为 NULL/空串，传 null 会抛 TypeError 把登录打成 500。
+    const mustChangePassword =
+      ['admin', 'coach', 'sales'].includes(user.role)
+      && typeof user.password === 'string' && user.password.length > 0
+      && verifyPassword(getStaffDefaultPassword(), user.password).valid;
+
+    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0, mcp: mustChangePassword ? 1 : 0 });
     res.json(success({
       openid: user.openid,
       token,
+      mustChangePassword,
       userId: user.id,
       role: user.role,
       permissions: resolvePerms(user),

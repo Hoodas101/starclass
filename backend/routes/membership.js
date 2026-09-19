@@ -872,17 +872,34 @@ router.get('/deductions', (req, res) => {
 
     let where = '';
     const params = [];
-    if (studentId) { where = 'WHERE d.student_id = ?'; params.push(studentId); }
+    // 过滤条件作用于 UNION 子查询的别名 u，保证 card_id / student_id 等条件对两个分支同等生效
+    if (studentId) { where = 'WHERE u.student_id = ?'; params.push(studentId); }
 
-    const total = db.prepare(`SELECT COUNT(*) as count FROM deduction_logs d ${where}`).get(...params).count;
-    const list = db.prepare(`
-      SELECT d.id, d.schedule_id, d.student_id, d.card_id, d.deducted_at,
-             s.course_name, sc.name as student_name
+    // 扣课明细 = 上课扣课（deduction_logs）∪ 请假扣课（leave_deduction_logs，仅 mode='class'）。
+    // 此前只读 deduction_logs，而请假审批扣课时写的是 leave_deduction_logs，
+    // 于是「卡上少了一节课，却在任何明细里都查不到是谁扣的」。
+    // 注意：
+    //  1) mode='days' 的请假扣的是时效卡「有效天数」，并未消课，并入会凭空多出一条消课记录；
+    //  2) leave_deduction_logs 没有数量列，UNION 分支的 count 恒为 NULL ——
+    //     请假扣课的数量由当时的班级扣课规则决定，历史行无法回填，故不新增列、不改写入路径。
+    //     返回中保留 mode 字段，调用方可据此标注「请假扣课」（上课扣课 mode 为 NULL）。
+    // 只改读路径：写入路径不动，避免污染撤销签到的回滚语义与「已消课」守卫。
+    const unionSql = `
+      SELECT d.id, d.schedule_id, d.student_id, d.card_id, d.deducted_at, d.count, NULL AS mode
       FROM deduction_logs d
-      LEFT JOIN schedules s ON s.id = d.schedule_id
-      LEFT JOIN students sc ON sc.id = d.student_id
+      UNION ALL
+      SELECT l.id, l.schedule_id, l.student_id, l.card_id, l.deducted_at, NULL AS count, l.mode
+      FROM leave_deduction_logs l WHERE l.mode = 'class'`;
+
+    const total = db.prepare(`SELECT COUNT(*) as count FROM (${unionSql}) u ${where}`).get(...params).count;
+    const list = db.prepare(`
+      SELECT u.id, u.schedule_id, u.student_id, u.card_id, u.deducted_at, u.count, u.mode,
+             s.course_name, sc.name as student_name
+      FROM (${unionSql}) u
+      LEFT JOIN schedules s ON s.id = u.schedule_id
+      LEFT JOIN students sc ON sc.id = u.student_id
       ${where}
-      ORDER BY d.deducted_at DESC LIMIT ? OFFSET ?
+      ORDER BY u.deducted_at DESC LIMIT ? OFFSET ?
     `).all(...params, pageSize, offset);
 
     res.json(success({ list, total, page, pageSize }));

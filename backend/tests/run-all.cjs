@@ -61,6 +61,9 @@ const SUITES = [
   ['metrics-consistency-regression.cjs', '口径一致性（到场率 / enrolled_count 非负 / 排行榜余额）'],
   ['parent-binding-takeover-regression.cjs', '家长身份接管（改号占用检查覆盖 parent_bindings + 登录迁移纵深防御）'],
   ['batch9-authz-concurrency.test.cjs', '支付/退款幂等 + 跨教练签到鉴权 + 请求边界'],
+  ['phone-login-mcp-regression.cjs', '默认口令强制改密（微信快捷登录不得绕过 mcp 闸门）'],
+  ['attendance-trend-consistency-regression.cjs', '出勤口径一致性（趋势「应到」=== 汇总「应到次数」）'],
+  ['leave-deduction-visibility-regression.cjs', '请假扣课可见（会员卡明细并入 leave_deduction_logs，排除 mode=days）'],
   ['batch7-security-guards.test.cjs', 'S3-S11 安全守卫（导入黑名单/课表可见性/广播已读/口令/jwt算法/绑卡频控）'],
   ['full-system.test.js', '全功能系统'],
 ];

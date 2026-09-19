@@ -338,7 +338,7 @@
             plain
             :disabled="!editingId"
             @click="deleteCurrentSchedule"
-          >删除排期</el-button>
+          >取消排期</el-button>
           <span class="dlg-footer-right">
             <el-button @click="scheduleDialogVisible = false">取消</el-button>
             <el-button type="primary" :loading="submitting" @click="submitSchedule">确认排期</el-button>
@@ -393,7 +393,7 @@ watch(themeTick, () => {
   }))
 })
 
-// 删除排期仅管理员可用（后端 DELETE /schedules/:id 仅管理员可调用）
+// 取消排期仅管理员可用（后端 DELETE /schedules/:id 仅管理员可调用）
 const isAdmin = computed(() => usePerm().role.value === 'admin')
 
 const viewMode = ref('week')
