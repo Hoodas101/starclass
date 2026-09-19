@@ -44,12 +44,27 @@ function getPayRule(teacher) {
 }
 
 /**
+ * 计薪截止日：未来日期不产生应付，统一截断到今天。
+ * /coaches、/coach/:id、/me、/settle 四个调用点共用本函数（lessonRows 内部也会
+ * 再应用一次），保证同一教练同月不会算出两个不同的合计。
+ */
+function effectiveEnd(endDate) {
+  const today = formatDate(now());
+  return endDate > today ? today : endDate;
+}
+
+/**
  * 教练在日期范围内的逐节明细（含薪资计算）
+ * endDate 在此统一截断（未来日期不计薪）；调用点传月末或已截断值结果一致。
  */
 function lessonRows(teacherId, startDate, endDate) {
   const teacher = db.prepare("SELECT * FROM teachers WHERE id = ?").get(teacherId);
   if (!teacher) return null;
   const rule = getPayRule(teacher);
+  const effEnd = effectiveEnd(endDate);
+  // 计薪基数 = 实际授课：排了课但一条考勤记录都没有，说明该课并未实际发生
+  // （停课/改期/临时取消但未改状态），不应计课时费。反之「有考勤记录但学员全部
+  // 缺席」的课仍然计薪 —— 教师确实到场授课。故用 EXISTS 而非 attended > 0。
   const list = db.prepare(`
     SELECT s.id, s.date, s.course_name, s.start_time, s.end_time, s.status,
       s.enrolled_count, s.classroom_name,
@@ -57,8 +72,9 @@ function lessonRows(teacherId, startDate, endDate) {
         WHERE a.schedule_id = s.id AND a.status IN ('present','late')) AS attended
     FROM schedules s
     WHERE s.teacher_id = ? AND s.status != 'cancelled' AND s.date >= ? AND s.date <= ?
+      AND EXISTS (SELECT 1 FROM attendances a WHERE a.schedule_id = s.id)
     ORDER BY s.date ASC, s.start_time ASC
-  `).all(teacherId, startDate, endDate);
+  `).all(teacherId, startDate, effEnd);
 
   const rows = list.map((r) => {
     const attended = r.attended || 0;
@@ -116,7 +132,7 @@ router.get('/coaches', (req, res) => {
     const { startDate, endDate } = range;
     // Same cutoff as /settle: exclude future-dated classes so the preview
     // matches what a mid-month settle would actually pay.
-    const effEnd = endDate > formatDate(now()) ? formatDate(now()) : endDate;
+    const effEnd = effectiveEnd(endDate);
     const teachers = db.prepare("SELECT * FROM teachers ORDER BY status, name").all();
     const list = teachers.map((t) => {
       const rule = getPayRule(t);
@@ -158,9 +174,11 @@ router.get('/coach/:id', (req, res) => {
       if (!mine) return res.status(403).json(safeFail('无权查看该教练薪资明细'));
     }
 
-    const data = lessonRows(req.params.id, range.startDate, range.endDate);
+    // 与 /coaches 同口径：回显实际计酬截止日，避免明细区间宽于实际数据
+    const effEnd = effectiveEnd(range.endDate);
+    const data = lessonRows(req.params.id, range.startDate, effEnd);
     if (!data) return res.json(fail('教练不存在'));
-    res.json(success({ ...data, month: req.query.month, startDate: range.startDate, endDate: range.endDate }));
+    res.json(success({ ...data, month: req.query.month, startDate: range.startDate, endDate: effEnd }));
   } catch (err) {
     console.error('[payroll coach detail]', err);
     res.status(500).json(safeFail('获取薪资明细失败'));
@@ -201,8 +219,7 @@ router.post('/settle', (req, res) => {
     const { startDate, endDate } = range;
     // Only lessons up to today are payable; future scheduled classes are excluded
     // so a mid-month settle doesn't prepay classes that haven't happened.
-    const todayStr = formatDate(now());
-    const effEnd = endDate > todayStr ? todayStr : endDate;
+    const effEnd = effectiveEnd(endDate);
 
     const teachers = db.prepare("SELECT * FROM teachers").all();
     const result = db.transaction(() => {

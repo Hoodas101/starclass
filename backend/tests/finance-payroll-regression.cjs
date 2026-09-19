@@ -103,6 +103,20 @@ const seed = db.transaction(() => {
   ins(`INSERT OR IGNORE INTO schedules (id, course_id, course_name, teacher_id, teacher_name, date, start_time, end_time, status, enrolled_count, created_at, updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
     'sch_future7', 'crs_p7', '体适能', 'tea_p7', '结算教练', `${FUTURE_MONTH}-15`, '09:00', '10:00', 'scheduled', 0, t, t);
+  // 已过月份但**无任何考勤记录**的一节：按「计薪以实际授课为准」的口径必须被剔除
+  // （见 routes/payroll.js 的 EXISTS(attendances) 判据）。它的存在使下方 `classes === 2`
+  // 具备判别力 —— 旧实现（只按 schedules 取行）会数成 3 节。
+  ins(`INSERT OR IGNORE INTO schedules (id, course_id, course_name, teacher_id, teacher_name, date, start_time, end_time, status, enrolled_count, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'sch_past7_noatt', 'crs_p7', '体适能', 'tea_p7', '结算教练', `${PAST_MONTH}-05`, '14:00', '15:00', 'scheduled', 0, t, t);
+  // 考勤行：过去两节各补一条 present（教师到场授课 → 计酬）。
+  // 未来那节与 sch_past7_noatt 刻意不补，分别覆盖「未来课节剔除」与「未授课不计酬」。
+  ins(`INSERT OR IGNORE INTO attendances (id, schedule_id, student_id, student_name, course_id, course_name, status, checkin_method, date, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    'att_past7_a', 'sch_past7', 'stu_p7', '资金学员', 'crs_p7', '体适能', 'present', 'teacher', `${PAST_MONTH}-01`, t, t);
+  ins(`INSERT OR IGNORE INTO attendances (id, schedule_id, student_id, student_name, course_id, course_name, status, checkin_method, date, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    'att_past7_b', 'sch_past7_end', 'stu_p7', '资金学员', 'crs_p7', '体适能', 'present', 'teacher', PAST_MONTH_END, t, t);
 
   // === T4：课程级联删除回滚签到积分 ===
   ins("INSERT OR IGNORE INTO courses (id, name, category, created_at) VALUES (?,?,?,?)", 'crs_del7', '待删活动', 'training', t);
@@ -183,7 +197,7 @@ function expect(condition, label, detail) {
   const rowC = listC.find((x) => x.teacherId === 'tea_p7');
   expect(!!rowC, '/coaches 返回教练行');
   if (rowC) {
-    expect(rowC.classes === 2, `已过月份 ${PAST_MONTH}：2 节课节全部计酬`, `got ${rowC.classes}`);
+    expect(rowC.classes === 2, `已过月份 ${PAST_MONTH}：2 节已授课节计酬（sch_past7_noatt 无考勤被剔除）`, `got ${rowC.classes}`);
     expect(rowC.amount === 200, '已过月份应付 = 2 × 100 = 200', `got ${rowC.amount}`);
   }
   const effEnd = resC.body && resC.body.data.endDate;
