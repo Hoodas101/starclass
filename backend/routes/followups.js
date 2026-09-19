@@ -78,7 +78,11 @@ router.post('/generate', (req, res) => {
     try {
       const renewal = generateRenewalNotifications(db);
       if (renewal.created > 0) console.log(`[followups] 已同步发送续费提醒 ${renewal.created} 条`);
-    } catch (e) { /* 忽略 */ }
+    } catch (e) {
+      // 通知是旁路（失败不阻塞跟进任务的生成），但不能静默：续费提醒一旦长期发不出去，
+      // 表现为「设置了规则却没人收到」，而跟进任务照样生成，问题会被掩盖很久。
+      console.error('[followups generate] 家长续费提醒同步失败:', e && e.message ? e.message : e);
+    }
 
     // 1) 续费跟进：到期前 RENEWAL_WARN_DAYS(15) / 7 / 1 天
     // 说明：原 SQL 写的是 status IN ('active','valid')，其中 'valid' 是历史遗留的死值——

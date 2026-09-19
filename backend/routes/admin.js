@@ -266,6 +266,9 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
         amount: r.amount || 0,
       }));
     } catch (e) {
+      // 不能静默清空：查询失败时看板显示「暂无热销项目」，与「这个月真的一件都没
+      // 卖出去」长得一模一样，经营判断会被误导，排查时也无从下手。
+      console.error('[admin dashboard] 热销项目统计失败:', e && e.message ? e.message : e);
       itemStats = [];
     }
 

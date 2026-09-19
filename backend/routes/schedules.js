@@ -957,8 +957,10 @@ router.get('/:id', (req, res) => {
         FROM enrollments e
         LEFT JOIN attendances a ON a.student_id = e.student_id AND a.schedule_id = ?
         WHERE e.schedule_id = ? AND e.status = 'active'
-        LIMIT 20
       `).all(req.params.id, req.params.id);
+      // 原带 LIMIT 20：报名超过 20 人时名单被**静默**截断，工作人员看到一份不完整
+      // 名单却毫无提示，也无法判断「是不是还有人没显示」。小微机构单场人数有限，
+      // 直接返回全量，并在响应里回传总数供调用方核对。
     } else if (openid) {
       students = db.prepare(`
         SELECT e.student_id, e.student_name, a.status as checkin_status
@@ -973,7 +975,13 @@ router.get('/:id', (req, res) => {
 
     // 角色隔离：student_ids 为机构内部指定学员名单，非工作人员不得见（防按 id 枚举读他人名册）
     const publicSchedule = isStaff ? s : { ...s, student_ids: '' };
-    res.json(success({ ...publicSchedule, is_registered: isRegistered, my_enrollments: myEnrollments, students }));
+    res.json(success({
+      ...publicSchedule,
+      is_registered: isRegistered,
+      my_enrollments: myEnrollments,
+      students,
+      students_total: students.length,
+    }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }

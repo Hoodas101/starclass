@@ -97,31 +97,37 @@ router.post('/', (req, res) => {
       bmi !== undefined && bmi !== '' ? Number(bmi) : 0,
       remark || '', now(), nextMemberNo(), now(), now());
 
-    // 录入家长手机号时，同时建立绑定关系与家长账号，便于手机号登录
-    if (phone && /^1[3-9]\d{9}$/.test(phone)) {
+    // 录入家长手机号时，同时建立绑定关系与家长账号，便于手机号登录。
+    // 与批量导入走**同一判据**（utils/duplicate 的 normalizePhone + PHONE_RE）：先规范化
+    // 全角数字、空格、横线、+86/0086 前缀，再校验。原先这里用裸正则 ^1[3-9]\d{9}$，
+    // 于是「138 0013 8000」「+8613800138000」这类最常见的写法会静默跳过下面的家长账号
+    // 与绑定 —— 学员建好了、家长却永远登不上，之后所有家长通知都发不到人且无人察觉。
+    const phoneNorm = normalizePhone(String(phone || ''));
+    const phoneOk = PHONE_RE.test(phoneNorm);
+    if (phoneOk) {
       const parentNameVal = parentName || `${name}家长`;
-      const openid = `phone_${phone}`;
-      const existingUser = db.prepare('SELECT id FROM users WHERE phone = ?').get(phone);
+      const openid = `phone_${phoneNorm}`;
+      const existingUser = db.prepare('SELECT id FROM users WHERE phone = ?').get(phoneNorm);
       if (!existingUser) {
         db.prepare(`
           INSERT INTO users (id, openid, phone, nickname, avatar, role, status, created_at, updated_at)
           VALUES (?, ?, ?, ?, '', 'parent', 'active', ?, ?)
-        `).run(generateId('user_'), openid, phone, parentNameVal, now(), now());
+        `).run(generateId('user_'), openid, phoneNorm, parentNameVal, now(), now());
       } else {
         // 保留微信身份账号的 openid（wx_ 前缀），避免再次微信登录时账号分裂
         if (!String(existingUser.openid || '').startsWith('wx_')) {
-          db.prepare('UPDATE users SET openid = ? WHERE phone = ?').run(openid, phone);
+          db.prepare('UPDATE users SET openid = ? WHERE phone = ?').run(openid, phoneNorm);
         }
       }
       // 绑定记录使用该手机号用户的实际 openid（微信身份为 wx_ 前缀），保证登录后可见绑定
       const bindOpenid = existingUser ? String(existingUser.openid || '') : openid;
       // 去重：同一成员同一家长手机号只保留一条绑定
-      const dupBind = db.prepare('SELECT 1 FROM parent_bindings WHERE student_id = ? AND parent_phone = ?').get(id, phone);
+      const dupBind = db.prepare('SELECT 1 FROM parent_bindings WHERE student_id = ? AND parent_phone = ?').get(id, phoneNorm);
       if (!dupBind) {
         db.prepare(`
           INSERT INTO parent_bindings (student_id, student_name, parent_name, parent_openid, parent_phone, relation, is_main, created_at)
           VALUES (?, ?, ?, ?, ?, '家长', 1, ?)
-        `).run(id, name, parentNameVal, bindOpenid, phone, now());
+        `).run(id, name, parentNameVal, bindOpenid, phoneNorm, now());
       }
     }
 
@@ -133,7 +139,7 @@ router.post('/', (req, res) => {
       action: 'create',
       actorId: actor.id,
       actorRole: actor.role,
-      after: { name, status: 'active', has_parent_phone: !!(phone && /^1[3-9]\d{9}$/.test(phone)) },
+      after: { name, status: 'active', has_parent_phone: !!phoneOk },
     });
 
     res.json(success({ id, name }));
