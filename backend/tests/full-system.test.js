@@ -119,6 +119,7 @@ const ROUTES = [
   ['GET', '/api/messages/my'], ['PUT', '/api/messages/ID1/read'], ['PUT', '/api/messages/read-all'],
   ['GET', '/api/messages/admin/list'], ['DELETE', '/api/messages/ID1'],
   ['GET', '/api/admin/dashboard'], ['GET', '/api/admin/charts'], ['GET', '/api/admin/export'],
+  ['GET', '/api/admin/audit-logs'],
   ['GET', '/api/admin/suppressions'], ['POST', '/api/admin/suppressions'], ['DELETE', '/api/admin/suppressions/ID1'],
   ['GET', '/api/admin/teachers'], ['GET', '/api/admin/parents'], ['GET', '/api/admin/staff-options'],
   ['POST', '/api/admin/teachers'], ['PUT', '/api/admin/teachers/ID1'], ['DELETE', '/api/admin/teachers/ID1'],

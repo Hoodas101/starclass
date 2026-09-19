@@ -598,6 +598,82 @@
             </p>
           </el-form>
         </div>
+
+        <!-- 操作日志：audit_log 此前只写不读，出事之后无从追溯；本页让留痕真正可查 -->
+        <div v-if="activeTab === 'audit'" class="settings-section">
+          <div class="section-head">
+            <div>
+              <h3 class="section-title">操作日志</h3>
+              <p class="section-desc">
+                记录签到、报名、退款、薪资结算等关键操作的<strong>操作人、时间与变更前后</strong>。
+                发现课时或账目对不上时，可在此查到是谁在什么时候改的。仅管理员可见。
+              </p>
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px">
+            <el-select v-model="auditFilter.entity" placeholder="全部对象" clearable style="width: 160px">
+              <el-option v-for="e in auditFilterOptions.entities" :key="e" :label="auditEntityLabel(e)" :value="e" />
+            </el-select>
+            <el-select v-model="auditFilter.action" placeholder="全部动作" clearable style="width: 160px">
+              <el-option v-for="a in auditFilterOptions.actions" :key="a" :label="auditActionLabel(a)" :value="a" />
+            </el-select>
+            <el-date-picker
+              v-model="auditRange"
+              type="daterange"
+              value-format="YYYY-MM-DD"
+              start-placeholder="开始日期"
+              end-placeholder="结束日期"
+              style="width: 250px"
+            />
+            <el-button type="primary" :icon="Search" @click="onAuditSearch">查询</el-button>
+            <el-button :icon="Refresh" @click="onAuditReset">重置</el-button>
+          </div>
+
+          <el-table v-loading="auditLoading" :data="auditLogs" size="small" border empty-text="暂无操作日志">
+            <el-table-column label="时间" width="150">
+              <template #default="{ row }">{{ fmtAuditTime(row.created_at) }}</template>
+            </el-table-column>
+            <el-table-column label="对象" width="110">
+              <template #default="{ row }">{{ auditEntityLabel(row.entity) }}</template>
+            </el-table-column>
+            <el-table-column label="动作" width="110">
+              <template #default="{ row }">{{ auditActionLabel(row.action) }}</template>
+            </el-table-column>
+            <el-table-column prop="entity_id" label="记录标识" min-width="150" show-overflow-tooltip />
+            <el-table-column prop="actor_id" label="操作人" min-width="150" show-overflow-tooltip />
+            <el-table-column label="变更内容" width="110" align="center">
+              <template #default="{ row }">
+                <el-popover v-if="row.before || row.after" placement="left" :width="380" trigger="click">
+                  <template #reference>
+                    <el-link type="primary" :underline="false">查看</el-link>
+                  </template>
+                  <div style="max-height: 340px; overflow: auto">
+                    <div v-if="row.before" style="margin-bottom: 8px">
+                      <div style="font-weight: 600; margin-bottom: 4px">变更前</div>
+                      <pre style="margin: 0; white-space: pre-wrap; word-break: break-all">{{ fmtAuditJson(row.before) }}</pre>
+                    </div>
+                    <div v-if="row.after">
+                      <div style="font-weight: 600; margin-bottom: 4px">变更后</div>
+                      <pre style="margin: 0; white-space: pre-wrap; word-break: break-all">{{ fmtAuditJson(row.after) }}</pre>
+                    </div>
+                  </div>
+                </el-popover>
+                <span v-else>—</span>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div style="margin-top: 12px; display: flex; justify-content: flex-end">
+            <el-pagination
+              layout="total, prev, pager, next"
+              :total="auditTotal"
+              :current-page="auditPage"
+              :page-size="auditPageSize"
+              @current-change="onAuditPageChange"
+            />
+          </div>
+        </div>
       </div>
     </div>
 
@@ -606,9 +682,9 @@
 
 <script setup>
 import { ref, reactive, onMounted, computed, watch } from 'vue'
-import { Upload, Picture, Download, Bell, Plus, Delete, Document, QuestionFilled, WarningFilled, Refresh, FolderOpened } from '@element-plus/icons-vue'
+import { Upload, Picture, Download, Bell, Plus, Delete, Document, QuestionFilled, WarningFilled, Refresh, FolderOpened, Search } from '@element-plus/icons-vue'
 import request from '@/api/request'
-import { getSettings, saveSettings, generateRenewalNotices, getDataModules, exportData, importData, getBackups, createBackup, deleteBackup } from '@/api/modules'
+import { getSettings, saveSettings, generateRenewalNotices, getDataModules, exportData, importData, getBackups, createBackup, deleteBackup, getAuditLogs } from '@/api/modules'
 import { useSettingsStore } from '@/store/settings'
 import { useUserStore } from '@/store/user'
 import { SCHEMES, CONCEPTS } from '@/constants/terms'
@@ -626,7 +702,8 @@ const tabs = [
   { key: 'leave', label: '请假规则', icon: 'Calendar' },
   { key: 'dashboard', label: '看板设置', icon: 'DataBoard' },
   { key: 'terms', label: '称呼设置', icon: 'EditPen' },
-  { key: 'backup', label: '数据备份', icon: 'FolderOpened', adminOnly: true }
+  { key: 'backup', label: '数据备份', icon: 'FolderOpened', adminOnly: true },
+  { key: 'audit', label: '操作日志', icon: 'Tickets', adminOnly: true }
 ]
 
 // 数据备份等仅管理员可见（其操作接口均为 adminOnly，非管理员访问会 403）
@@ -1044,6 +1121,98 @@ const resetTerms = () => {
 onMounted(() => {
   loadSettings()
   loadDataModules()
+})
+
+// ============================================
+// 操作日志（audit_log 只读查询）
+//
+// 为什么要有这一块：audit_log 此前只写不读——后端 40+ 处 recordAudit 持续留痕，
+// 但没有任何查询入口，出事之后只能整库导出再人工翻找，等于没留痕。
+// 本页提供按「对象 / 动作 / 日期」过滤的只读列表，让留痕真正可查。
+// 接口为 adminOnly，教练与销售访问会 403（本页本身也仅管理员可进入）。
+// ============================================
+const auditLogs = ref([])
+const auditTotal = ref(0)
+const auditPage = ref(1)
+const auditPageSize = ref(20)
+const auditLoading = ref(false)
+const auditRange = ref(null)
+const auditFilter = reactive({ entity: '', action: '' })
+// 下拉候选由接口从库内 DISTINCT 反查：硬编码在前端会随后端新增实体/动作而过期
+const auditFilterOptions = ref({ entities: [], actions: [] })
+
+// 英文枚举的中文对照；未收录的原样显示英文，不至于让管理员看到莫名其妙的空值
+const AUDIT_ENTITY_LABELS = {
+  attendance: '考勤', order: '订单', enrollment: '报名', schedule: '排期',
+  student: '学员', membership_card: '会员卡', card_type: '卡种', refund: '退费',
+  points: '积分', payroll: '薪资', course: '活动', class: '班级',
+  class_member: '班级成员', teacher: '员工', lead: '线索',
+  suppression: '预警抑制', user: '账号', data_import: '数据导入',
+}
+const AUDIT_ACTION_LABELS = {
+  checkin_present: '签到', checkin_late: '签到(迟到)', checkin_absent: '签到(缺勤)',
+  checkin_leave: '签到(请假)', checkin_absent_auto: '自动缺席', checkin_clear: '撤销签到',
+  create: '新增', update: '修改', delete: '删除', cancel: '取消', pause: '暂停', resume: '恢复',
+  activate: '开卡', deduct: '扣课时', refund: '退款', settle: '结算', void_settle: '作废结算',
+  enroll: '报名', enroll_cancel: '取消报名', enroll_request: '报名申请',
+  enroll_approve: '报名通过', enroll_reject: '报名驳回',
+  add: '增加', consume: '消耗', adjust: '调整', remove: '移除',
+  deactivate: '停用', lead_convert: '线索转化', import: '导入',
+  change_password: '修改密码', leave_deduct: '请假扣课', update_amount: '改价',
+}
+const auditEntityLabel = (v) => AUDIT_ENTITY_LABELS[v] || v || '-'
+const auditActionLabel = (v) => AUDIT_ACTION_LABELS[v] || v || '-'
+
+function fmtAuditTime(ms) {
+  if (!ms) return '-'
+  const d = new Date(ms)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+// 历史脏数据可能不是合法 JSON（接口解析失败时会原样返回字符串），这里不能再抛
+function fmtAuditJson(v) {
+  if (v === null || v === undefined) return ''
+  return typeof v === 'string' ? v : JSON.stringify(v, null, 2)
+}
+
+async function loadAuditLogs() {
+  auditLoading.value = true
+  try {
+    const params = { page: auditPage.value, pageSize: auditPageSize.value }
+    if (auditFilter.entity) params.entity = auditFilter.entity
+    if (auditFilter.action) params.action = auditFilter.action
+    // 后端 end 为「含当日」，日期选择器给出的本就是含当日的区间，直接透传
+    if (Array.isArray(auditRange.value) && auditRange.value.length === 2) {
+      params.start = auditRange.value[0]
+      params.end = auditRange.value[1]
+    }
+    // request 拦截器已剥掉外层 {code,data,message}，此处 res 即 payload
+    const res = await getAuditLogs(params)
+    auditLogs.value = (res && res.list) || []
+    auditTotal.value = (res && res.total) || 0
+    if (res && res.filters) auditFilterOptions.value = res.filters
+  } catch (e) {
+    // 非管理员等场景由拦截器提示，这里只保证表格不留上一页的陈旧数据
+    auditLogs.value = []
+    auditTotal.value = 0
+  } finally {
+    auditLoading.value = false
+  }
+}
+
+const onAuditSearch = () => { auditPage.value = 1; loadAuditLogs() }
+const onAuditPageChange = (p) => { auditPage.value = p; loadAuditLogs() }
+const onAuditReset = () => {
+  auditFilter.entity = ''
+  auditFilter.action = ''
+  auditRange.value = null
+  auditPage.value = 1
+  loadAuditLogs()
+}
+
+// 切到该标签时才加载：审计表只增不减，避免每次进设置页都白查一次
+watch(activeTab, (v) => {
+  if (v === 'audit' && auditLogs.value.length === 0 && !auditLoading.value) loadAuditLogs()
 })
 
 // ============================================

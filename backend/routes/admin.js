@@ -1494,6 +1494,76 @@ function syncCoachAccount(phone, name) {
 }
 
 /**
+ * GET /api/admin/audit-logs — 操作日志查询（只读）
+ *
+ * 为什么要有这个接口：audit_log 此前**只写不读**——全仓没有任何查询接口，前端也没有
+ * 页面，管理员出事后只能靠「数据备份」导出整表再人工翻找。对小机构来说等于没留痕，
+ * 前面几十处 recordAudit 的留痕投入无法兑现。本接口让「谁在什么时候改了什么」可查。
+ *
+ * 为什么必须 adminOnly：审计行含全机构操作者标识（actor_id）与业务主键，且能反推
+ * 经营动作（退款、结算、停用），属敏感数据；教练/销售一律不可见。
+ *
+ * 查询参数（全部可选）：entity / action / actorId / start / end（'YYYY-MM-DD'）/ page / pageSize
+ */
+router.get('/audit-logs', adminOnly, (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    // 上限 100：避免前端误传大值把整表拉回来（审计表只增不减，会持续增长）
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 20));
+    const conds = [];
+    const args = [];
+    // 所有用户输入一律走绑定参数，不做字符串拼接（SQL 注入面）
+    if (req.query.entity) { conds.push('entity = ?'); args.push(String(req.query.entity)); }
+    if (req.query.action) { conds.push('action = ?'); args.push(String(req.query.action)); }
+    if (req.query.actorId) { conds.push('actor_id = ?'); args.push(String(req.query.actorId)); }
+    // created_at 是 epoch 毫秒；日期区间取半开 [start, end)，与看板口径一致
+    if (req.query.start) { conds.push('created_at >= ?'); args.push(dayStartMs(String(req.query.start))); }
+    if (req.query.end) { conds.push('created_at < ?'); args.push(dayEndMs(String(req.query.end))); }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+    const total = db.prepare(`SELECT COUNT(*) AS c FROM audit_log ${where}`).get(...args).c;
+    const rows = db.prepare(`
+      SELECT id, entity, entity_id, action, actor_id, actor_role, before_state, after_state, created_at
+      FROM audit_log ${where}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ? OFFSET ?
+    `).all(...args, pageSize, (page - 1) * pageSize);
+
+    // before_state / after_state 存的是 JSON 串，解析后返回以便前端直接渲染；
+    // 解析失败（历史脏数据）保留原串，绝不让一条坏记录把整页查询打成 500。
+    const parse = (s) => {
+      if (!s) return null;
+      try { return JSON.parse(s); } catch (e) { return s; }
+    };
+    res.json(success({
+      list: rows.map((r) => ({
+        id: r.id,
+        entity: r.entity,
+        entity_id: r.entity_id,
+        action: r.action,
+        actor_id: r.actor_id,
+        actor_role: r.actor_role,
+        created_at: r.created_at,
+        before: parse(r.before_state),
+        after: parse(r.after_state),
+      })),
+      total,
+      page,
+      pageSize,
+      // 下拉候选：entity/action 会随代码演进增加，前端硬编码必然过期，故由库里反查。
+      // 审计表小且有 idx_audit_entity 支撑，每次顺带查出代价可忽略。
+      filters: {
+        entities: db.prepare('SELECT DISTINCT entity FROM audit_log ORDER BY entity').all().map((r) => r.entity),
+        actions: db.prepare('SELECT DISTINCT action FROM audit_log ORDER BY action').all().map((r) => r.action),
+      },
+    }));
+  } catch (err) {
+    console.error('[admin audit-logs]', err);
+    res.status(500).json(safeFail('查询操作日志失败'));
+  }
+});
+
+/**
  * GET /api/admin/backup — 下载数据库备份（SQLite 一致性快照）
  * 用于机构数据安全：建议每周备份一次，可下载后存放在本地/网盘
  */

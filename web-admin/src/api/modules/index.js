@@ -91,6 +91,8 @@ export const resumeCard = (data) => request.post('/membership/resume', data)
 export const getDashboard = (params) => request.get('/admin/dashboard', { params })
 export const getCharts = (params) => request.get('/admin/charts', { params })
 export const getExport = (params) => request.get('/admin/export', { params })
+// 操作日志（audit_log）只读查询：仅管理员可调用，用于事后追溯「谁在什么时候改了什么」
+export const getAuditLogs = (params) => request.get('/admin/audit-logs', { params })
 export const getCoachStats = (month) => request.get('/schedules/coach/stats', { params: month ? { month } : {} })
 export const getAdminCoachStats = (month) => request.get('/schedules/admin/coach-stats', { params: month ? { month } : {} })
 export const getOrderStats = () => request.get('/orders/stats')
