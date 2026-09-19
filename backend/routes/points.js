@@ -240,7 +240,44 @@ router.get('/ranking', (req, res) => {
 });
 
 /**
- * POST /api/points/share — 分享训练获得积分（每周 1 次 +20，幂等）
+ * 读取「分享训练」积分 —— 与 checkin.js 的 getPointsRule() 同口径的唯一取值入口。
+ *
+ * settings.points_rules 的真实形态是**规则数组**（见 settings.js 的 DEFAULT_POINTS_RULES）：
+ *   [{ name: '训练签到', enabled: true, points: 10, description: '…' }, …]
+ * 设置页写入的也是这一形态，故按 `name` 关键字「分享」匹配「分享训练」档。
+ *
+ * 兜底原则（与签到保持一致）：
+ *   · 键不存在 / JSON 畸形 / 非数组 / 无匹配档 / points 非数字 → 回退 20（老部署行为不变）
+ *   · enabled === false → 返回 0，即管理员在设置页停用了该档 → 不发分
+ * 不缓存 —— 管理员在设置页改动后下一次分享即生效。
+ *
+ * @returns {number} 非负整数积分（0 表示该档已停用）
+ */
+function getSharePointsRule() {
+  const DEF = 20;
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('points_rules');
+    if (!row || row.value === undefined || row.value === null || row.value === '') return DEF;
+    let parsed;
+    try { parsed = JSON.parse(row.value); } catch (e) { return DEF; }
+    if (!Array.isArray(parsed)) return DEF;
+
+    const rule = parsed.find((r) => r && typeof r === 'object'
+      && typeof r.name === 'string' && r.name.includes('分享'));
+    if (!rule) return DEF;
+    // enabled === false 视为管理员停发该档积分（字段缺省视为启用）
+    if (rule.enabled === false) return 0;
+
+    const n = Number(rule.points);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEF;
+  } catch (e) {
+    console.error('[points share rule]', e && e.stack ? e.stack : e);
+    return DEF;
+  }
+}
+
+/**
+ * POST /api/points/share — 分享训练获得积分（每周 1 次，积分数读设置项，未配置回退 20，幂等）
  * 家长分享小程序/训练页面成功后调用
  */
 router.post('/share', (req, res) => {
@@ -251,10 +288,16 @@ router.post('/share', (req, res) => {
     const weekKey = Math.floor(Date.now() / (7 * 86400000));
     const refId = `share_${openid}_${weekKey}`;
 
+    // 积分取值改为读设置项 points_rules（原先硬编码 20，管理员在设置页改了不生效）
+    const amount = getSharePointsRule();
+    // 该档被管理员停用：不发分，且与「本周已领取」区分开，避免误导家长以为已领过
+    if (amount <= 0) {
+      return res.json(success({ added: 0, disabled: true, message: '分享积分规则已停用' }));
+    }
+
     // 幂等检查 + 发分 + 流水在同一事务内原子完成：
     // 避免并发分享请求同时通过幂等检查而重复发分（reference_id 会被其他业务复用，故不加唯一索引）。
     const currentTime = now();
-    const amount = 20;
     const added = db.transaction(() => {
       const exist = db.prepare('SELECT id FROM point_logs WHERE reference_id = ?').get(refId);
       if (exist) return 0;

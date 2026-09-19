@@ -488,7 +488,15 @@ router.get('/export', adminOnly, (req, res) => {
         break;
       }
       case 'checkin': {
-        const r = range('checkin_time');
+        // 不能用 range('checkin_time')：自动缺席（absent）等行不写 checkin_time（见 routes/checkin.js 的
+        // runAutoAbsent），该列恒为 NULL；SQL 三值逻辑下 `NULL >= ?` 不为真，会把全部缺席记录静默丢弃。
+        // 改用 attendances.date（'YYYY-MM-DD' 文本，所有写入路径均赋值）做区间过滤，
+        // 与考勤列表口径一致（见 routes/attendances.js 的 a.date >= ? / a.date <= ?）。
+        const parts = [];
+        const params = [];
+        if (startDate) { parts.push('a.date >= ?'); params.push(startDate); }
+        if (endDate) { parts.push('a.date <= ?'); params.push(endDate); }
+        const r = { sql: parts.length ? ` AND ${parts.join(' AND ')}` : '', params };
         data = db.prepare(`
           SELECT a.*, s.name as student_name, sc.course_name, sc.start_time, sc.end_time
           FROM attendances a

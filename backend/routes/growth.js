@@ -586,12 +586,26 @@ router.get('/low-classes', (req, res) => {
 router.get('/referrals', (req, res) => {
   try {
     if (!canGrowth(req)) return res.status(403).json(safeFail('无增长中心权限'));
+    // 总数与已转化数按全量 COUNT 统计，不受下面列表 LIMIT 影响：
+    // 原先用 rows.length 当分母，线索超过 200 条后 total 与 conversion 会静默算错，
+    // 而接口对外声称 total 就是全部，属于"显示的数字与实际不符"。
+    const stat = db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN status = 'converted' THEN 1 ELSE 0 END), 0) AS converted
+      FROM leads WHERE source = 'referral'
+    `).get();
+    const total = stat.total;
+    const converted = stat.converted;
+
+    // 列表仍保留 LIMIT 200，避免一次拉取过多；同时返回 listTotal/truncated，
+    // 调用方据此可知列表是否被截断（truncated 为 true 时 total 大于 list.length）。
     const rows = db.prepare(`SELECT * FROM leads WHERE source = 'referral' ORDER BY created_at DESC LIMIT 200`).all();
-    const converted = rows.filter((r) => r.status === 'converted').length;
     res.json(success({
-      total: rows.length,
+      total,
       converted,
-      conversion: rows.length ? Math.round((converted / rows.length) * 1000) / 10 : 0,
+      conversion: total ? Math.round((converted / total) * 1000) / 10 : 0,
+      listTotal: rows.length,
+      truncated: rows.length < total,
       list: rows.map(formatLead),
     }));
   } catch (err) {

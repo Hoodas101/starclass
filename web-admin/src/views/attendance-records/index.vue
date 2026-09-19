@@ -238,7 +238,10 @@ async function loadData() {
     ])
     records.value = listRes.list || []
     total.value = listRes.total || 0
-    if (listRes.summary) Object.assign(summary, listRes.summary)
+    // 卡片与趋势图统一取 /attendances/summary 的全量口径结果：
+    // 列表接口的 summary 历史上只统计当前分页（默认 20 行），与趋势图口径不一致，
+    // 同屏出现两套数字。这里只认一个来源，避免再次分叉。
+    if (sumRes.summary) Object.assign(summary, sumRes.summary)
     trend.value = sumRes.trend || []
     renderTrend()
   } catch (e) {

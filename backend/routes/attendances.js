@@ -74,25 +74,46 @@ function mapRecord(a, s) {
 }
 
 /**
- * 从记录数组汇总课时统计
+ * 排课时长（分钟）的 SQL 表达式（schedules 别名为 s）。
+ * 与 durationMinutes() 保持同一口径：起止时间任一为空则记 0，结束不晚于开始也记 0。
+ * 时间格式为 HH:mm，直接按位截取时分，避免为了算课时把明细行读进内存。
  */
-function computeSummary(rows) {
-  let presentCount = 0;
-  let lateCount = 0;
-  let absentCount = 0;
-  let leaveCount = 0;
-  let attendedMinutes = 0; // 实际出勤课时（仅 present/late 计入）
-  let totalMinutes = 0;    // 出勤记录对应的排课时长合计（含缺勤，用于“应上课时”口径）
+const DURATION_MIN_SQL = `CASE
+    WHEN s.start_time IS NULL OR s.start_time = '' OR s.end_time IS NULL OR s.end_time = '' THEN 0
+    ELSE MAX(0,
+      (CAST(substr(s.end_time, 1, 2) AS INTEGER) * 60 + CAST(substr(s.end_time, 4, 2) AS INTEGER))
+      - (CAST(substr(s.start_time, 1, 2) AS INTEGER) * 60 + CAST(substr(s.start_time, 4, 2) AS INTEGER))
+    )
+  END`;
 
-  for (const r of rows) {
-    if (r.status === 'present') presentCount++;
-    else if (r.status === 'late') lateCount++;
-    else if (r.status === 'absent') absentCount++;
-    else if (r.status === 'leave') leaveCount++;
-    const mins = r.durationMin || 0;
-    if (r.status === 'present' || r.status === 'late') attendedMinutes += mins;
-    totalMinutes += mins;
-  }
+/**
+ * 课时汇总统计（全量口径）
+ * 在 SQL 里按与列表完全相同的 WHERE 条件聚合 COUNT / SUM，只回传一行统计结果。
+ * 此前是对分页后的 rows 做汇总，导致卡片只统计当前页（默认 20 行）而非全部。
+ * @param {string} where 由 buildWhere 生成的 WHERE 片段（含别名 a / s）
+ * @param {Array} params 与 where 对应的绑定参数
+ */
+function computeSummary(where, params) {
+  const row = db.prepare(`
+    SELECT
+      SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END) AS presentCount,
+      SUM(CASE WHEN a.status = 'late' THEN 1 ELSE 0 END) AS lateCount,
+      SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) AS absentCount,
+      SUM(CASE WHEN a.status = 'leave' THEN 1 ELSE 0 END) AS leaveCount,
+      SUM(CASE WHEN a.status IN ('present', 'late') THEN ${DURATION_MIN_SQL} ELSE 0 END) AS attendedMinutes,
+      SUM(${DURATION_MIN_SQL}) AS totalMinutes
+    FROM attendances a
+    LEFT JOIN schedules s ON s.id = a.schedule_id
+    ${where}
+  `).get(...params) || {};
+
+  const presentCount = row.presentCount || 0;
+  const lateCount = row.lateCount || 0;
+  const absentCount = row.absentCount || 0;
+  const leaveCount = row.leaveCount || 0;
+  const attendedMinutes = row.attendedMinutes || 0; // 实际出勤课时（仅 present/late 计入）
+  const totalMinutes = row.totalMinutes || 0;       // 出勤记录对应的排课时长合计（含缺勤，用于“应上课时”口径）
+
   // 应到次数 = 实到 + 缺勤；已批准的请假不算「应到未到」，故不进分母。
   // 必须与 attendanceRate 的分子/分母一致，否则页面上「出勤次数 ÷ 总次数」与「出勤率」两张卡互相矛盾。
   const totalSessions = presentCount + lateCount + absentCount;
@@ -111,20 +132,23 @@ function computeSummary(rows) {
 }
 
 /**
- * 从记录数组生成按日趋势（升序），供前端折线/柱状图使用
+ * 按日趋势（升序），供前端折线/柱状图使用。
+ * 同样在 SQL 里 GROUP BY 聚合，不依赖明细行 —— 否则全量口径下要把整表读进内存。
+ * @param {string} where 由 buildWhere 生成的 WHERE 片段（含别名 a / s）
+ * @param {Array} params 与 where 对应的绑定参数
  */
-function computeTrend(rows) {
-  const map = {};
-  for (const r of rows) {
-    const d = r.date;
-    if (!d) continue;
-    if (!map[d]) map[d] = { date: d, attended: 0, total: 0 };
-    map[d].total += 1;
-    if (r.status === 'present' || r.status === 'late') map[d].attended += 1;
-  }
-  return Object.keys(map)
-    .sort((a, b) => (a < b ? -1 : 1))
-    .map((k) => map[k]);
+function computeTrend(where, params) {
+  return db.prepare(`
+    SELECT a.date AS date,
+      COUNT(*) AS total,
+      SUM(CASE WHEN a.status IN ('present', 'late') THEN 1 ELSE 0 END) AS attended
+    FROM attendances a
+    LEFT JOIN schedules s ON s.id = a.schedule_id
+    ${where}
+      AND a.date IS NOT NULL AND a.date != ''
+    GROUP BY a.date
+    ORDER BY a.date ASC
+  `).all(...params);
 }
 
 /**
@@ -161,7 +185,8 @@ router.get('/', (req, res) => {
       total,
       page,
       pageSize,
-      summary: computeSummary(rows),
+      // 全量口径：与列表同一 WHERE 条件在 SQL 里聚合，不再统计当前页
+      summary: computeSummary(where, params),
     }));
   } catch (err) {
     console.error('[attendances list]', err);
@@ -211,7 +236,8 @@ router.get('/student/:id', (req, res) => {
       total,
       page,
       pageSize,
-      summary: computeSummary(rows),
+      // 全量口径：与列表同一 WHERE 条件在 SQL 里聚合，不再统计当前页
+      summary: computeSummary(where, params),
     }));
   } catch (err) {
     console.error('[attendances student]', err);
@@ -236,25 +262,12 @@ router.get('/summary', (req, res) => {
 
     const { where, params } = buildWhere(req.query);
 
-    // E5：原先把全部考勤行读进内存再 slice(0, 20000)，全员口径下会在峰值时把整张
-    // attendances 表（含大库几十万行）materialize 一遍。LIMIT 下推到 SQL 后由引擎在
-    // 扫描阶段就截断（ORDER BY a.date ASC 可走 idx_attendances_date），内存峰值降为封顶行数。
-    // 语义完全不变：排序键一致，截断点仍是「按 date 升序的前 20000 行」。
-    const SUMMARY_ROW_CAP = 20000;
-    const raw = db.prepare(`
-      SELECT a.*, s.start_time, s.end_time
-      FROM attendances a
-      LEFT JOIN schedules s ON s.id = a.schedule_id
-      ${where}
-      ORDER BY a.date ASC
-      LIMIT ${SUMMARY_ROW_CAP}
-    `).all(...params);
-
-    const rows = raw.map((a) => mapRecord(a, a));
-
+    // 统计与趋势都在 SQL 里聚合（COUNT / SUM / GROUP BY），明细行不进内存。
+    // 此前用 ORDER BY a.date ASC LIMIT 20000 截断，取到的是「最旧」的两万行，
+    // 对「本月出勤」这类场景分子分母都只覆盖历史窗口 —— 口径是错的，已去掉该截断。
     res.json(success({
-      summary: computeSummary(rows),
-      trend: computeTrend(rows),
+      summary: computeSummary(where, params),
+      trend: computeTrend(where, params),
       filters: { studentId: studentId || '', classId: classId || courseId || '', teacherId: teacherId || '', startDate: startDate || '', endDate: endDate || '', status: status || '' },
     }));
   } catch (err) {
