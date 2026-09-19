@@ -508,9 +508,11 @@ router.post('/deduct', (req, res) => {
     const mode = card.billing_mode || 'time';
     if (mode === 'time') {
       db.transaction(() => {
+        // 时效制不消耗课时，count 记 0：回滚路径据此判断「本次没有真实消课」。
+        // 注意：SQL 里的注释必须写成 -- 而非 //，否则 SQLite 报 syntax error。
         db.prepare(`
-          INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
-          SELECT ?, ?, ?, ? WHERE NOT EXISTS (
+          INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at, count)
+          SELECT ?, ?, ?, ?, 0 WHERE NOT EXISTS (
             SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?
           )
         `).run(scheduleId, studentId, card.id, now(), scheduleId, studentId);
@@ -542,13 +544,13 @@ router.post('/deduct', (req, res) => {
       `).run(n, n, now(), card.id, n);
       if (upd.changes === 0) return { err: '剩余训练时长不足' };
       // 一次扣课只落一行流水：deduction_logs 上有 UNIQUE(schedule_id, student_id)，
-      // 消耗 N 课时无法写成 N 行（schema 不动）。用户看到的资产口径是卡上的
-      // remaining_classes / used_classes，两者已按 N 扣减；扣课回滚路径同样按
-      // courses.consume_classes 反向恢复 N，两边对称。
+      // 消耗 N 课时不写成 N 行，而是记在 count 列（迁移 019）。
+      // 这对「显式传 classes=N 的手动扣课」尤其关键：此前回滚路径按课程配置
+      // 重新推导出 1，于是手动扣 3 节后撤销只退 1 节，学员白丢 2 节。
       db.prepare(`
-        INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
-        VALUES (?, ?, ?, ?)
-      `).run(scheduleId, studentId, card.id, now());
+        INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at, count)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(scheduleId, studentId, card.id, now(), n);
       return { cardId: card.id };
     })();
     if (deductOutcome.err) return res.json(fail(deductOutcome.err));

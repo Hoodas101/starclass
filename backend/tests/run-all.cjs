@@ -51,6 +51,7 @@ const SUITES = [
   ['p2-fixes.test.js', 'P2 修复回归'],
   ['finance-refund-regression.cjs', '财务口径 + 退卡金额'],
   ['finance-payroll-regression.cjs', '薪资计算回归'],
+  ['deduction-count-regression.cjs', '撤销签到课时回滚数量（迁移 019）'],
   ['batch9-authz-concurrency.test.cjs', '支付/退款幂等 + 跨教练签到鉴权 + 请求边界'],
   ['batch7-security-guards.test.cjs', 'S3-S11 安全守卫（导入黑名单/课表可见性/广播已读/口令/jwt算法/绑卡频控）'],
   ['full-system.test.js', '全功能系统'],

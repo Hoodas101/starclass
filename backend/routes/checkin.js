@@ -145,9 +145,12 @@ router.post('/teacher', (req, res) => {
           'SELECT * FROM deduction_logs WHERE schedule_id = ? AND student_id = ?'
         ).get(scheduleId, studentId);
         if (ded) {
-          // 回滚课时：恢复量与扣课时一致（courses.consume_classes），否则每次
-          // 「签到 → 改缺席/清除」都会让卡内课时凭空 +1（少扣多还）。
-          const back = resolveConsumeClasses(scheduleId);
+          // 回滚课时：以扣课时记下的真实扣减量为准（迁移 019 的 deduction_logs.count）。
+          // 旧实现在此按 resolveConsumeClasses(scheduleId) 于回滚那一刻重新推导，
+          // 与当初真实扣减量不符时（手动按 classes=N 扣课、或扣课后课程配置被改），
+          // 每次「签到 → 改缺席/清除」都会让卡内课时凭空增减。
+          // 迁移前的历史行 count 为 NULL，回退到旧的推导方式，行为与改动前一致。
+          const back = ded.count != null ? ded.count : resolveConsumeClasses(scheduleId);
           db.prepare(`
             UPDATE member_cards SET remaining_classes = remaining_classes + ?,
               used_classes = MAX(0, used_classes - ?), updated_at = ?
@@ -200,7 +203,8 @@ router.post('/teacher', (req, res) => {
               'SELECT * FROM deduction_logs WHERE schedule_id = ? AND student_id = ?'
             ).get(scheduleId, studentId);
             if (ded) {
-              const back = resolveConsumeClasses(scheduleId);
+              // 同上：以扣课时记录的真实扣减量为准，历史行（count 为 NULL）回退到推导
+              const back = ded.count != null ? ded.count : resolveConsumeClasses(scheduleId);
               db.prepare(`
                 UPDATE member_cards SET remaining_classes = remaining_classes + ?,
                   used_classes = MAX(0, used_classes - ?), updated_at = ?
@@ -342,12 +346,12 @@ function applyArrivalDeduction(studentId, scheduleId, t) {
     WHERE id = ?
   `).run(per, per, t, card.id);
   // 一次扣课一行流水：deduction_logs 上有 UNIQUE(schedule_id, student_id)，
-  // 消耗 N 课时无法写成 N 行。用户看到的资产口径是卡上 remaining_classes / used_classes，
-  // 已按 N 扣减；回滚路径按同一个 resolveConsumeClasses 反向恢复 N。
+  // 消耗 N 课时不写成 N 行，而是记在 count 列（迁移 019）。回滚路径读该列还原 N，
+  // 不再依赖「回滚时重新推导」，也就不会因中途改过课程配置而多还或少还。
   db.prepare(`
-    INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
-    VALUES (?, ?, ?, ?)
-  `).run(scheduleId, studentId, card.id, t);
+    INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at, count)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(scheduleId, studentId, card.id, t, per);
 
   // 扣课成功 → 在同一事务内追加一条收入结转（合同负债 → 收入）。
   // 位置紧贴 deduction_logs 写入之后：上面任一 early return（无卡 / 补课调课 / 已扣过）
