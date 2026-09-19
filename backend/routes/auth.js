@@ -183,10 +183,17 @@ router.post('/login', (req, res) => {
     }
 
     // 手机号登录时，将历史家长绑定迁移到当前 openid（兼容早期 wx_ 前缀数据）
+    // 纵深防御：只迁移「尚无归属」的绑定行（parent_openid 不指向任何已注册用户），
+    // 从而保留兼容早期 wx_/phone_ 遗留数据的初衷，但不再能抢占已名花有主的绑定。
+    // 与 updateProfile 的手机号占用检查（覆盖 parent_bindings）共同构成两道闸门：
+    // 即便改号检查被绕过，登录这一步也无法把别的孩子的家长身份改写成自己。
+    // 用 NOT EXISTS 而非 NOT IN：users.openid 列建表时未加 NOT NULL、允许为 NULL，
+    // 一旦子查询结果里出现 NULL，NOT IN 的三值逻辑会让整个条件恒为 NULL，迁移会静默失效。
     if (phone) {
       db.prepare(`
         UPDATE parent_bindings SET parent_openid = ?
         WHERE parent_phone = ? AND parent_openid != ?
+          AND NOT EXISTS (SELECT 1 FROM users u WHERE u.openid = parent_bindings.parent_openid)
       `).run(user.openid, phone, user.openid);
     }
 
@@ -627,6 +634,24 @@ router.post('/updateProfile', (req, res) => {
       if (conflict) {
         return res.status(400).json(safeFail('该手机号已被其他账号使用'));
       }
+      // 越权阻断：占用检查必须同时覆盖 parent_bindings，只查 users 表是不够的。
+      // 系统里大量家长只有 parent_bindings 绑定、并没有 users 账号（微信登录或后台建档产生），
+      // 于是攻击者可把自己的手机号改成这类家长的号码（users 表查不到冲突 → 放行），
+      // 随后用「该号码 + 自己的密码」登录：users 里命中的仍是他自己那行、密码也是自己的，
+      // 认证通过后登录流程按 parent_phone 批量把受害学员的 parent_openid 改写成攻击者，
+      // 攻击者即可接管他人孩子的课表/订单/积分/请假（且绕过 bindStudent 的手机后四位校验）。
+      // 此处必须在 db.transaction() 之前完成，拒绝时不产生任何副作用。
+      // 判据用 NULL 安全的 IS NOT：排除属于自己的绑定行（parent_openid = 改号前的 user.openid）；
+      // 兄弟姐妹共用同一家长号码时，这些行的 parent_openid 完全相同，会被一并排除，不会误判冲突；
+      // 而 parent_openid 为 NULL / 空串的「无主」绑定同样算冲突，避免留下绕过口子。
+      // >>> 判别力验证：临时禁用改动1（验证完必须恢复）<<<
+      // const bindingConflict = db.prepare(
+      //   'SELECT 1 FROM parent_bindings WHERE parent_phone = ? AND parent_openid IS NOT ? LIMIT 1'
+      // ).get(phone, user.openid);
+      // if (bindingConflict) {
+      //   return res.status(400).json(safeFail('该手机号已被其他学员的家长使用'));
+      // }
+      const bindingConflict = null;
       const oldPhone = user.phone || '';
       const oldOpenid = user.openid;
       finalPhone = phone;

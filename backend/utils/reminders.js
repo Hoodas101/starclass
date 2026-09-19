@@ -251,6 +251,79 @@ function generateLowClassReminders(nowMs = Date.now()) {
   return { sent };
 }
 
+// ---------------------------------------------------------------------------
+// 续费提醒的「天数口径」与「去重键」—— 手动路径（utils/renewal.js）与自动路径
+// （本文件的 generateRenewalReminders）必须共用这一份实现，否则等于没有去重：
+//
+//   两个入口是两条互相独立的实现，各自算天数、各自拼去重键：
+//     · 手动路径（设置页「立即发送续费提醒」/ 跟进生成）用 ceil 差值，
+//       键为 renewal_mc_<cardId>_<daysLeft>；
+//     · 自动路径（每日定时任务 / 队列 worker）用 ±1 天窗口，
+//       键为 renewal_<cardId>_<days>。
+//   前缀不同 → 两条路径写的去重记录互不认账；天数口径不同 → 键里的数字还可能对不上。
+//   结果：同一张卡、同一个档位，机构管理员手动点一次、定时任务再跑一次，
+//   同一位家长就会收到两条一模一样的提醒。
+//   因此这里把天数计算与去重键收口为单一来源，两条路径只允许引用本处函数。
+// ---------------------------------------------------------------------------
+
+/**
+ * 计算会员卡命中的续费提醒档位（两条续费提醒路径共用的唯一天数口径）。
+ *
+ * 判定：遍历配置档位，若到期时间落在 [now + (days-1) 天, now + (days+1) 天]
+ * 之内即算命中该档位（约 2 天宽的窗口）。
+ * 返回值：档位值本身（reminderDays 里的数，如 7），而不是算出来的剩余天数。
+ *   这一点很关键——返回值只取决于配置档位，不随运行时刻漂移，
+ *   因此两条路径对同一张卡同一档位必然得到同一个键 renewal_<cardId>_7。
+ *
+ * 为什么保留 ±1 天窗口：定时任务漏跑一天（服务未启动 / 机器关机 / 进程挂掉）时，
+ * 1 天宽的精确匹配会让该档位被永久跳过，续费提醒再也发不出去；漏发比重复发严重得多。
+ * 窗口放宽到 2 天即可容错，同时因为返回值是稳定的档位值，不会反过来破坏去重。
+ * @param {number} expiresAt 会员卡到期时间戳（毫秒）
+ * @param {number} nowMs 当前时间戳（毫秒）
+ * @param {number[]} reminderDays 配置的提醒档位，如 [15, 7, 1]
+ * @returns {number|null} 命中的档位值；未命中（已过期或不在任何档位窗口内）返回 null
+ */
+function resolveRenewalDaysLeft(expiresAt, nowMs, reminderDays) {
+  if (!Array.isArray(reminderDays) || !reminderDays.length) return null;
+  // 已过期（含到期时刻）不再提醒
+  if (expiresAt <= nowMs) return null;
+  const dayMs = 86400000;
+  for (const days of reminderDays) {
+    if (expiresAt >= nowMs + (days - 1) * dayMs && expiresAt <= nowMs + (days + 1) * dayMs) {
+      return days;
+    }
+  }
+  return null;
+}
+
+/**
+ * 续费提醒去重键 —— 两条路径共用的唯一格式：renewal_<cardId>_<档位值>。
+ * 保留 renewal_ 前缀（自动路径原有格式，routes/messages.js 也按该前缀挂续费动作）。
+ * 档位值来自 resolveRenewalDaysLeft 的返回值，稳定不漂移。
+ * @param {string} cardId
+ * @param {number} daysLeft 命中的档位值（来自 resolveRenewalDaysLeft）
+ * @returns {string}
+ */
+function renewalDedupKey(cardId, daysLeft) {
+  return `renewal_${cardId}_${daysLeft}`;
+}
+
+/**
+ * 判断某张卡的某个续费档位是否已发过提醒（两条路径共用）。
+ * 除新键外，同时兼容历史键 renewal_mc_<cardId>_<daysLeft>：升级前手动路径
+ * 写入的旧记录若不再被识别，同一档位内会被再发一次。这是最小代价的兼容做法，
+ * 不迁移历史数据、不改表，仅多查一个键；此后只写新键。
+ * @param {object} database better-sqlite3 实例（两条路径各自持有的 db）
+ * @param {string} cardId
+ * @param {number} daysLeft
+ * @returns {boolean}
+ */
+function hasRenewalNotification(database, cardId, daysLeft) {
+  return !!database.prepare(
+    'SELECT 1 FROM notifications WHERE template_id IN (?, ?) LIMIT 1'
+  ).get(renewalDedupKey(cardId, daysLeft), `renewal_mc_${cardId}_${daysLeft}`);
+}
+
 /**
  * 续费提醒：扫描即将到期（按推送规则配置的提前天数，默认 15/7/1 天）的会员卡，
  * 向绑定家长发送站内通知（幂等：同一卡同一提醒档位只发一次，template_id 去重）。
@@ -281,49 +354,53 @@ function generateRenewalReminders(nowMs = Date.now()) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   };
 
+  // 与手动路径（utils/renewal.js）同一扫描窗口：一次性取出落在最大档位 +1 天内的卡，
+  // 再用共用函数 resolveRenewalDaysLeft 按 ±1 天窗口判定命中档位。
+  // 上界取 (maxDays + 1) 天是为了容纳最大档位的 +1 天窗口，否则最大档位会漏掉窗口右半侧。
+  // 原实现按档位逐个窗口查询、且键里用的是档位值，手动路径却用计算天数，两者对不上，是重复推送的根因之一。
+  const maxDays = Math.max(...reminderDays);
+  const cards = db.prepare(`
+    SELECT mc.*, pb.parent_openid
+    FROM member_cards mc
+    LEFT JOIN parent_bindings pb ON pb.student_id = mc.student_id AND pb.is_main = 1
+    WHERE mc.status = 'active' AND mc.expires_at > ? AND mc.expires_at <= ?
+  `).all(nowMs, nowMs + (maxDays + 1) * dayMs);
+
   const { terms } = getTerms(db);
   let sent = 0;
-  for (const days of reminderDays) {
-    const start = nowMs + (days - 1) * dayMs;
-    const end = nowMs + (days + 1) * dayMs;
-    const cards = db.prepare(`
-      SELECT mc.*, pb.parent_openid
-      FROM member_cards mc
-      LEFT JOIN parent_bindings pb ON pb.student_id = mc.student_id AND pb.is_main = 1
-      WHERE mc.status = 'active' AND mc.expires_at >= ? AND mc.expires_at <= ?
-    `).all(start, end);
+  for (const card of cards) {
+    // 天数口径与去重键都走共用实现，保证与手动路径完全一致
+    const daysLeft = resolveRenewalDaysLeft(card.expires_at, nowMs, reminderDays);
+    if (daysLeft === null) continue;
+    if (hasRenewalNotification(db, card.id, daysLeft)) continue;
+    if (!card.parent_openid) continue;
 
-    for (const card of cards) {
-      const key = `renewal_${card.id}_${days}`;
-      const exists = db.prepare('SELECT 1 FROM notifications WHERE template_id = ?').get(key);
-      if (exists || !card.parent_openid) continue;
-
-      const expireDate = fmtDate(card.expires_at);
-      // 文案来自「续期提醒」规则的 template（设置页可改），
-      // 可用占位符：{{studentName}}/{{cardType}}/{{days}}/{{expireDate}}
-      // 以及 {{learner}}/{{course}}/{{org}} 等机构称呼占位符
-      const content = renderNotificationTemplate(template, {
-        studentName: card.student_name || '孩子',
-        cardType: card.card_type_name || '会员卡',
-        days: String(days),
-        expireDate,
-      }, terms);
-      const title = applyTerms('会员即将到期提醒', terms);
-      db.prepare(`
-        INSERT INTO notifications (id, user_id, title, content, priority, category, summary, template_id, channel, status, is_broadcast, sent_at, created_at)
-        VALUES (?, ?, ?, ?, 'normal', 'system', ?, ?, 'inapp', 'sent', 0, ?, ?)
-      `).run(
-        `NTF_${key}`.toUpperCase(),
-        card.parent_openid,
-        title,
-        content,
-        content.slice(0, 60),
-        key,
-        nowMs,
-        nowMs
-      );
-      sent++;
-    }
+    const key = renewalDedupKey(card.id, daysLeft);
+    const expireDate = fmtDate(card.expires_at);
+    // 文案来自「续期提醒」规则的 template（设置页可改），
+    // 可用占位符：{{studentName}}/{{cardType}}/{{days}}/{{expireDate}}
+    // 以及 {{learner}}/{{course}}/{{org}} 等机构称呼占位符
+    const content = renderNotificationTemplate(template, {
+      studentName: card.student_name || '孩子',
+      cardType: card.card_type_name || '会员卡',
+      days: String(daysLeft),
+      expireDate,
+    }, terms);
+    const title = applyTerms('会员即将到期提醒', terms);
+    db.prepare(`
+      INSERT INTO notifications (id, user_id, title, content, priority, category, summary, template_id, channel, status, is_broadcast, sent_at, created_at)
+      VALUES (?, ?, ?, ?, 'normal', 'system', ?, ?, 'inapp', 'sent', 0, ?, ?)
+    `).run(
+      `NTF_${key}`.toUpperCase(),
+      card.parent_openid,
+      title,
+      content,
+      content.slice(0, 60),
+      key,
+      nowMs,
+      nowMs
+    );
+    sent++;
   }
   return { sent };
 }
@@ -338,5 +415,9 @@ module.exports = {
   getNotificationRule,
   resolveRuleTemplate,
   renderNotificationTemplate,
+  // 续费提醒的天数口径与去重键：供 utils/renewal.js（手动发送路径）共用，两条路径必须同源
+  resolveRenewalDaysLeft,
+  renewalDedupKey,
+  hasRenewalNotification,
   now,
 };

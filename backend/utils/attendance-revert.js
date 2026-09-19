@@ -108,10 +108,13 @@ function revertDeduction({ scheduleId, studentId, t }) {
  *   · leave —— **保留不动**：请假是独立业务，leave_deduction_logs 里已扣的请假
  *     课时不因活动取消而退还，删除考勤行会破坏请假审批的凭据。
  *
+ * 另：本场次若被用作「补课排期」，其 pending 的 makeup_records 一并置 cancelled。
+ * 不回退会让该缺席被 /makeup/eligible 判定为「已安排补课」而永久隐藏，详见函数末尾注释。
+ *
  * 必须由调用方置于事务内。
  *
  * @param {{scheduleId:string, actorId:string, actorRole:string, reason:string}} p
- * @returns {{reverted:number, revertedClasses:number, revertedPoints:number}}
+ * @returns {{reverted:number, revertedClasses:number, revertedPoints:number, cancelledMakeups:number}}
  */
 function revertScheduleAttendances({ scheduleId, actorId, actorRole, reason }) {
   const rows = db.prepare('SELECT * FROM attendances WHERE schedule_id = ?').all(scheduleId);
@@ -149,7 +152,23 @@ function revertScheduleAttendances({ scheduleId, actorId, actorRole, reason }) {
     });
   }
 
-  return { reverted, revertedClasses, revertedPoints };
+  // 取消排期必须连带作废「指向本场次」的待补课记录。
+  // 不回退的后果：那条 makeup_records 仍停在 pending，而 routes/makeup.js 的
+  // GET /eligible 以 `status != 'cancelled'` 判定「该缺席是否已安排过补课」——
+  // pending 不被该条件排除，于是 hasMakeup=1，该缺席从前端可补课列表里消失；
+  // 管理员想重新安排，又被 /assign 的「该缺席已安排补课，请勿重复安排」挡住。
+  // 净结果是这次课没补成、也没有任何入口能恢复，学员的补课资格凭空消失，
+  // 只能人工改库 —— 正是要消除的返工。
+  // 只动 pending：completed 表示补课已真实上完（checkin.js 标记），置 cancelled 会
+  // 凭空抹掉已完成的补课；已是 cancelled 的无需重复处理。
+  // 一场补课排期可对应多条 makeup_records（不同学员各自补课），故按
+  // makeup_schedule_id 整批更新，不加 LIMIT。
+  const cancelledMakeups = db.prepare(`
+    UPDATE makeup_records SET status = 'cancelled', updated_at = ?
+    WHERE makeup_schedule_id = ? AND status = 'pending'
+  `).run(t, scheduleId).changes;
+
+  return { reverted, revertedClasses, revertedPoints, cancelledMakeups };
 }
 
 module.exports = {

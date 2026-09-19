@@ -321,8 +321,14 @@ function applyArrivalDeduction(studentId, scheduleId, t) {
   // leave_deduction_logs 的记录保留不动（请假路径的幂等依赖该行），此处仅跳过签到侧扣课。
   const leaveDed = db.prepare('SELECT 1 FROM leave_deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
   if (leaveDed) return;
+  // 只有 makeup（补课）才跳过扣课，reschedule（调课）必须走正常扣课路径：
+  //   · makeup：学员缺席时课时已被扣过一次，补课是把这次消耗补偿回来，再扣一次就是重复扣课；
+  //   · reschedule：调课的业务入口（routes/makeup.js 的 /reschedule）要求**原排期没有任何签到记录**
+  //     （否则直接报「原排期已有签到记录，无法调课」），所以原排期必然从未扣过课时；
+  //     若此处再跳过，就会出现「原排期没扣、新排期也不扣」的两头漏扣，学员白上一次课。
+  //     enroll_type='reschedule' 在全后端仅由 makeup.js 的调课路径写入，语义唯一，可安全摘出。
   const makeupEnroll = db.prepare(
-    "SELECT 1 FROM enrollments WHERE schedule_id = ? AND student_id = ? AND enroll_type IN ('makeup', 'reschedule') AND status = 'active'"
+    "SELECT 1 FROM enrollments WHERE schedule_id = ? AND student_id = ? AND enroll_type = 'makeup' AND status = 'active'"
   ).get(scheduleId, studentId);
   if (makeupEnroll) {
     db.prepare(`

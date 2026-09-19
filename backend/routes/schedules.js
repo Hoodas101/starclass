@@ -20,16 +20,33 @@ const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 const { revertScheduleAttendances } = require('../utils/attendance-revert');
 
 /**
- * 排期变更自动通知：向已报名学员的绑定家长发送站内通知
+ * 解析一场排期「已报名学员」的绑定家长 openid，即通知接收人集合。
+ * 取消场景必须在事务提交**之前**调用：事务会把 enrollments 置为 cancelled，
+ * 提交后再查就查不到接收人了（会变成静默不通知）。
  */
-function notifyEnrolledParents(scheduleId, title, content) {
+function resolveEnrolledParents(scheduleId) {
   try {
-    const parents = db.prepare(`
+    return db.prepare(`
       SELECT DISTINCT pb.parent_openid
       FROM enrollments e
       JOIN parent_bindings pb ON pb.student_id = e.student_id
       WHERE e.schedule_id = ? AND e.status = 'active' AND pb.parent_openid != ''
     `).all(scheduleId);
+  } catch (e) {
+    console.error('[schedule notify]', e);
+    return [];
+  }
+}
+
+/**
+ * 排期变更自动通知：向已报名学员的绑定家长发送站内通知
+ * recipients 可选：传入事务提交前解析好的接收人列表（见 resolveEnrolledParents）。
+ * 通知失败（网络 / 微信接口异常）只记日志并返回 0，绝不抛出：调用方的事务已经提交，
+ * 不能因通知失败回滚已生效的变更，也不能让接口返回 500。
+ */
+function notifyEnrolledParents(scheduleId, title, content, recipients) {
+  try {
+    const parents = recipients || resolveEnrolledParents(scheduleId);
     if (!parents.length) return 0;
     const t = now();
     const ins = db.prepare(`
@@ -1170,17 +1187,21 @@ router.get('/:id', (req, res) => {
       (teacherId && teacherId !== existing.teacher_id) ||
       (classroomId && classroomId !== existing.classroom_id) ||
       (status && status !== existing.status);
+    // 通知内容与接收人在事务之前备好，但**发送**延后到事务提交成功之后（见下方事务之后）。
+    // 接收人必须此刻解析：取消场景的事务会把 enrollments 置为 cancelled，提交后再查就取不到了。
+    let notifyPayload = null;
+    let notifyRecipients = null;
     if (changed) {
       const parts = []
       if (date || startTime || endTime) parts.push(`时间调整为 ${date || existing.date} ${startTime || existing.start_time}-${endTime || existing.end_time}`)
       if (teacherId) parts.push(`教练调整为 ${teacher?.name || '待定'}`)
       if (classroomId) parts.push(`场地调整为 ${classroom?.name || '待定'}`)
       if (status === 'cancelled') parts.push('该活动已取消')
-      notifyEnrolledParents(
-        id,
-        '活动变更通知',
-        `「${existing.course_name || '训练活动'}」${parts.join('，')}，请留意最新安排。`
-      );
+      notifyPayload = {
+        title: '活动变更通知',
+        content: `「${existing.course_name || '训练活动'}」${parts.join('，')}，请留意最新安排。`,
+      };
+      notifyRecipients = resolveEnrolledParents(id);
     }
 
     // 通过修改状态取消活动时,级联取消报名(与 DELETE /:id 行为一致),避免"已取消活动仍显示已报名"
@@ -1206,6 +1227,13 @@ router.get('/:id', (req, res) => {
       applyScheduleUpdate();
     }
 
+    // 家长通知必须在事务提交成功之后再发：先发通知后落库时，事务一旦失败（写库异常 / 约束冲突），
+    // 数据库里什么都没变——活动没取消、时间也没调整，家长却已收到「已取消 / 时间调整为…」的
+    // 与事实不符的通知；管理员看到 500 重试还会再推一条重复通知。
+    if (notifyPayload) {
+      notifyEnrolledParents(id, notifyPayload.title, notifyPayload.content, notifyRecipients);
+    }
+
     res.json(success({ id }));
   } catch (err) {
     console.error('[schedule update]', err);
@@ -1223,12 +1251,11 @@ router.delete('/:id', (req, res) => {
     const existing = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
     if (!existing) return res.json(fail('排期不存在'));
 
-    // 先通知已报名家长（此时报名记录仍为 active）
-    notifyEnrolledParents(
-      id,
-      '活动取消通知',
-      `「${existing.course_name || '训练活动'}」（${existing.date} ${existing.start_time || ''}）已取消，感谢理解。`
-    );
+    // 通知内容与接收人此刻备好，发送延后到事务提交成功之后。
+    // 接收人必须在事务之前解析：事务会把报名记录置为 cancelled，提交后再查就取不到家长了。
+    const notifyTitle = '活动取消通知';
+    const notifyContent = `「${existing.course_name || '训练活动'}」（${existing.date} ${existing.start_time || ''}）已取消，感谢理解。`;
+    const notifyRecipients = resolveEnrolledParents(id);
     // 三写必须原子：分开写时中途出错会留下「报名已取消但排期仍是 scheduled」的半截状态
     // —— 课表上还挂着这个活动、家长端仍可见，但报名已被清空，且无法从数据本身判断发生了什么。
     // 回滚（课时 / 积分 / 收入结转）同样塞进这一事务、排在状态更新**之前**：
@@ -1247,6 +1274,11 @@ router.delete('/:id', (req, res) => {
       db.prepare("UPDATE enrollments SET status = 'cancelled', updated_at = ? WHERE schedule_id = ? AND status = 'active'").run(t, id);
       db.prepare("UPDATE schedules SET enrolled_count = 0 WHERE id = ? AND status = 'cancelled'").run(id);
     })();
+
+    // 通知必须在事务提交成功之后发送：先发通知后落库时，事务一旦失败，数据库里活动仍照常进行，
+    // 家长却已收到「已取消」，通知与事实不符；管理员重试还会再推一条重复通知。
+    notifyEnrolledParents(id, notifyTitle, notifyContent, notifyRecipients);
+
     res.json(success({ id }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));

@@ -1217,7 +1217,14 @@ router.delete('/courses/:id', adminOnly, (req, res) => {
         const affected = db.prepare(`
           SELECT student_id, SUM(amount) total FROM point_logs
           WHERE type IN ('earn','checkin') AND reference_id IN (${ph}) GROUP BY student_id
-        `).all(...ids).filter((a) => (a.total || 0) > 0);
+        `).all(...ids).filter((a) => {
+          // 净额为 0 的学员确实不用动：流水整批删除的净变动是 0，余额不动，两边自洽。
+          // 但净额为**负**的必须处理（旧实现用 > 0 把它滤掉了）：净额为负说明这批流水里
+          // 回滚（负值行）多于获得，整批删除后流水净额是**增加** |total| 的，
+          // 余额若不动就会出现「流水净变动 ≠ 余额变动」。下面的 Math.min 对负数天然成立：
+          // min(-10, 30) = -10 → newBal = 30 - (-10) = 40，与流水净增 10 一致。
+          return (a.total || 0) !== 0;
+        });
         db.prepare('DELETE FROM enrollments WHERE schedule_id IN (' + ph + ')').run(...ids);
         db.prepare('DELETE FROM attendances WHERE schedule_id IN (' + ph + ')').run(...ids);
         db.prepare('DELETE FROM leave_requests WHERE schedule_id IN (' + ph + ')').run(...ids);
@@ -1231,12 +1238,15 @@ router.delete('/courses/:id', adminOnly, (req, res) => {
         db.prepare('DELETE FROM coach_comments WHERE schedule_id IN (' + ph + ')').run(...ids);
         db.prepare('DELETE FROM schedules WHERE id IN (' + ph + ')').run(...ids);
         for (const a of affected) {
-          // 上面已把这批流水整批 DELETE（净变动 −a.total），故余额只能按「实际生效量」扣：
-          // 余额只有 30 而要回滚 100 时只能扣到 0（实扣 30）。若照旧扣 a.total，余额被
-          // MAX(0,…) 截断成 0 而流水净减 100，两者永久相差 70 且无自愈。
+          // 上面已把这批流水整批 DELETE，流水净变动恒为 −a.total，余额必须同步变动 −a.total。
+          // · a.total > 0（净获得）：只能扣到 0 为止。余额只有 30 而要回滚 100 时实扣 30，
+          //   若照旧扣 a.total，余额被 MAX(0,…) 截断成 0 而流水净减 100，两者永久相差 70。
+          // · a.total < 0（回滚多于获得）：删掉的是负值行，流水净额反而**增加** |total|，
+          //   余额必须同增 |total| —— 下面的 Math.min 对负数天然成立（min(-10,30) = -10）。
           const acc = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(a.student_id);
           const actual = Math.min(a.total, (acc && acc.balance) || 0);
-          const newBal = ((acc && acc.balance) || 0) - actual; // actual ≤ balance，结果自然 ≥ 0
+          // a.total > 0 时 actual ≤ balance 故结果 ≥ 0；a.total < 0 时结果高于原余额（补回被回滚的分）
+          const newBal = ((acc && acc.balance) || 0) - actual;
           db.prepare(`
             UPDATE points SET
               total_earned = MAX(0, total_earned - ?),
