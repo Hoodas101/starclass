@@ -47,10 +47,55 @@ function notifyEnrolledParents(scheduleId, title, content) {
 // 等散落列已全部收编至 migrations/011（幂等账本），此处不再于 require 时执行 ALTER。
 
 /**
- * 冲突检测函数
- * 检测同一教师或同一场地在同一时间段是否已有排期
+ * 解析一场排期涉及的学员集合。
+ *
+ * 关联路径（已核验，非臆造）：
+ *   1. schedules.student_ids —— 机构内部指定学员名单，逗号分隔文本
+ *      （写入端见 POST / 的 `(student_ids && String(student_ids)) || ''`）；
+ *      管理端表单目前不提供该字段，存量排期多为空串。
+ *   2. enrollments —— 该场次已报名（status='active'）的学员，写入端见 POST /:id/enroll。
+ *   3. 班级模型 —— 与 GET / 的可见性判定 applyClassVisibility（见本文件上方注释）同源：
+ *      新模型 schedules.class_id → class_members；旧模型 schedules.group_course_id → student_class。
  */
-function checkConflict({ teacherId, classroomId, date, startTime, endTime, excludeId = null }) {
+function collectScheduleStudentIds(schedule) {
+  const ids = new Set();
+  const push = (v) => { if (v) ids.add(String(v).trim()); };
+  String((schedule && schedule.student_ids) || '').split(',').forEach(push);
+  if (schedule && schedule.id) {
+    db.prepare("SELECT student_id FROM enrollments WHERE schedule_id = ? AND status = 'active'")
+      .all(schedule.id).forEach((r) => push(r.student_id));
+  }
+  if (schedule && schedule.class_id) {
+    db.prepare('SELECT student_id FROM class_members WHERE class_id = ?')
+      .all(schedule.class_id).forEach((r) => push(r.student_id));
+  } else if (schedule && schedule.group_course_id) {
+    db.prepare('SELECT student_id FROM student_class WHERE class_id = ?')
+      .all(schedule.group_course_id).forEach((r) => push(r.student_id));
+  }
+  return ids;
+}
+
+/**
+ * 依据请求体解析「本次排期涉及的学员集合」（新建 / 改期 / 冲突检测三个入口共用）。
+ * 与 collectScheduleStudentIds 同源：把请求体字段映射成同一形状后复用，避免两套口径。
+ */
+function resolveStudentIds({ studentIds, classId, groupCourseId, scheduleId = null }) {
+  return collectScheduleStudentIds({
+    id: scheduleId,
+    student_ids: Array.isArray(studentIds) ? studentIds.join(',') : studentIds,
+    class_id: classId,
+    group_course_id: groupCourseId,
+  });
+}
+
+/**
+ * 冲突检测函数
+ * 检测同一教师 / 同一场地 / 同一学员在同一时间段是否已有排期
+ *
+ * @param {Set<string>|null} studentIds 本次排期涉及的学员集合（见 resolveStudentIds）；
+ *        为空集合时跳过学员维度。
+ */
+function checkConflict({ teacherId, classroomId, date, startTime, endTime, excludeId = null, studentIds = null }) {
   const excludeClause = excludeId ? ' AND id != ?' : '';
 
   // 教师冲突（标准区间重叠检测：start < new_end AND end > new_start）
@@ -79,6 +124,29 @@ function checkConflict({ teacherId, classroomId, date, startTime, endTime, exclu
     if (classroomConflict) return { conflict: true, type: 'classroom', message: `场地在该时段已被占用: ${classroomConflict.course_name}` };
   }
 
+  // 学员冲突：同一学员被排进同日同时段的两场排期（沿用与教师/场地一致的区间重叠判定）
+  if (studentIds && studentIds.size) {
+    const params = [date, endTime, startTime];
+    if (excludeId) params.push(excludeId);
+    const others = db.prepare(`
+      SELECT * FROM schedules
+      WHERE date = ?
+      AND start_time < ? AND end_time > ?
+      AND status != 'cancelled' ${excludeClause}
+    `).all(...params);
+    for (const other of others) {
+      const otherIds = collectScheduleStudentIds(other);
+      const hit = [...studentIds].filter((sid) => otherIds.has(sid));
+      if (hit.length) {
+        const names = hit.map((sid) => {
+          const stu = db.prepare('SELECT name FROM students WHERE id = ?').get(sid);
+          return (stu && stu.name) || sid;
+        });
+        return { conflict: true, type: 'student', message: `学员在该时段已有排期: ${names.join('、')}` };
+      }
+    }
+  }
+
   return { conflict: false };
 }
 
@@ -102,14 +170,24 @@ function ensureTempCourse() {
   try {
     if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可创建排期'));
     if (!requireStaffPerm(req, res, 'schedule', '排课')) return;
-    const { courseId, courseName, teacherId, teacherName, classroomId, date, startTime, endTime, maxStudents, remark, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class } = req.body;
+    const { courseId, courseName, teacherId, teacherName, classroomId, date, startTime, endTime, maxStudents, remark, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, confirmOverride } = req.body;
     if ((!courseId && !courseName) || !date || !startTime || !endTime) {
       return res.json(fail('活动名称、日期、开始时间、结束时间为必填'));
     }
 
-    // 冲突检测
-    const conflict = checkConflict({ teacherId, classroomId, date, startTime, endTime });
-    if (conflict.conflict) return res.json(fail(conflict.message));
+    // 冲突检测（教师 / 场地 / 学员）。
+    // confirmOverride 仅**管理员**可用：本接口对教练也开放（isCoachReq），
+    // 若不校验角色，教练只要显式传该字段即可绕过全部冲突检测。
+    const overrideAllowed = isAdminReq(req) && confirmOverride === true;
+    const conflict = checkConflict({
+      teacherId,
+      classroomId,
+      date,
+      startTime,
+      endTime,
+      studentIds: resolveStudentIds({ studentIds: student_ids, classId, groupCourseId }),
+    });
+    if (conflict.conflict && !overrideAllowed) return res.json(fail(conflict.message));
 
     // 获取关联名称（支持自定义活动名称 / 手填教练）
     const course = courseId ? db.prepare('SELECT name FROM courses WHERE id = ?').get(courseId) : null;
@@ -145,7 +223,7 @@ function ensureTempCourse() {
 router.post('/recursive', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可创建排期'));
-    const { courseId, courseName, teacherId, teacherName, classroomId, repeatType = 'weekly', weekDays = [], intervalDays = 1, startTime, endTime, startDate, endDate, maxStudents, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class } = req.body;
+    const { courseId, courseName, teacherId, teacherName, classroomId, repeatType = 'weekly', weekDays = [], intervalDays = 1, startTime, endTime, startDate, endDate, maxStudents, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, confirmOverride } = req.body;
     if ((!courseId && !courseName) || !startTime || !endTime || !startDate || !endDate) {
       return res.json(fail('缺少必要参数'));
     }
@@ -185,6 +263,8 @@ router.post('/recursive', (req, res) => {
     const createdSchedules = [];
     const start = new Date(startDate);
     const end = new Date(endDate);
+    // 本次周期性排期涉及的学员集合（与单次创建同源），循环内复用，避免逐日重复查询
+    const recurStudentIds = resolveStudentIds({ studentIds: student_ids, classId, groupCourseId });
 
     let intervalCounter = 0;
     for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
@@ -201,8 +281,15 @@ router.post('/recursive', (req, res) => {
       if (!shouldCreate) continue;
 
       const dateStr = formatDate(d.getTime());
-      const conflict = checkConflict({ teacherId, classroomId, date: dateStr, startTime, endTime });
-      if (conflict.conflict) continue;
+      const conflict = checkConflict({
+        teacherId,
+        classroomId,
+        date: dateStr,
+        startTime,
+        endTime,
+        studentIds: recurStudentIds,
+      });
+      if (conflict.conflict && confirmOverride !== true) continue;
 
       const id = generateId('sch_');
       db.prepare(`
@@ -887,7 +974,7 @@ router.get('/:id', (req, res) => {
     if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可修改排期'));
     if (!requireStaffPerm(req, res, 'schedule', '排课')) return;
     const { id } = req.params;
-    const { courseId, teacherId, classroomId, date, startTime, endTime, maxStudents, status, remark, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class } = req.body;
+    const { courseId, teacherId, classroomId, date, startTime, endTime, maxStudents, status, remark, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, confirmOverride } = req.body;
 
     const existing = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
     if (!existing) return res.json(fail('排期不存在'));
@@ -912,6 +999,14 @@ router.get('/:id', (req, res) => {
     const checkStart = startTime || existing.start_time;
     const checkEnd = endTime || existing.end_time;
 
+    // 学员集合：字段未传（undefined）时沿用原排期；scheduleId 传本场次，使本场已报名学员也纳入判定
+    const effectiveStudentIds = resolveStudentIds({
+      studentIds: student_ids !== undefined ? student_ids : existing.student_ids,
+      classId: classId !== undefined ? classId : existing.class_id,
+      groupCourseId: groupCourseId !== undefined ? groupCourseId : existing.group_course_id,
+      scheduleId: id,
+    });
+
     const conflict = checkConflict({
       teacherId: checkTeacherId,
       classroomId: checkClassroomId,
@@ -919,8 +1014,11 @@ router.get('/:id', (req, res) => {
       startTime: checkStart,
       endTime: checkEnd,
       excludeId: id,
+      studentIds: effectiveStudentIds,
     });
-    if (conflict.conflict) return res.json(fail(conflict.message));
+    // 同 POST /：override 仅管理员可用，教练不得绕过冲突检测
+    const overrideAllowed = isAdminReq(req) && confirmOverride === true;
+    if (conflict.conflict && !overrideAllowed) return res.json(fail(conflict.message));
 
     // 名称解析：字段显式传空串（''）表示“清除”，未传（undefined）表示“保持不变”。
     // 传了 ID 但查不到档案时同样清空名称，避免 id 与 name 不一致。
@@ -1024,15 +1122,24 @@ router.delete('/:id', (req, res) => {
 
 /**
  * POST /api/schedules/conflict-check — 冲突检测
- * Body: { teacherId, classroomId, date, startTime, endTime, excludeId }
+ * Body: { teacherId, classroomId, date, startTime, endTime, excludeId,
+ *         classId, groupCourseId, student_ids }  — 后三者用于推导学员维度
  */
 router.post('/conflict-check', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可用冲突检测'));
-    const { teacherId, classroomId, date, startTime, endTime, excludeId } = req.body;
+    const { teacherId, classroomId, date, startTime, endTime, excludeId, classId, groupCourseId, student_ids } = req.body;
     if (!date || !startTime || !endTime) return res.json(fail('日期和时间不能为空'));
 
-    const conflict = checkConflict({ teacherId, classroomId, date, startTime, endTime, excludeId });
+    const conflict = checkConflict({
+      teacherId,
+      classroomId,
+      date,
+      startTime,
+      endTime,
+      excludeId,
+      studentIds: resolveStudentIds({ studentIds: student_ids, classId, groupCourseId, scheduleId: excludeId }),
+    });
     res.json(success(conflict));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
