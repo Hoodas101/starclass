@@ -20,6 +20,8 @@ const { getChurnRules } = require('../utils/churn');
 // 建档查重（手机号相同 = 强重复，阻止同一人被录成两份）
 // normalizePhone / PHONE_RE 与查重同源：导入时先规范化再校验，避免同一号码两套判据
 const { findDuplicateStudents, normalizePhone, PHONE_RE } = require('../utils/duplicate');
+// 已删除 / 已归档学员的排除条件（学员下拉与 growth 预警共用同一判据）
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
 // member_no / archived / qr_exp 列已收编至 migrations/011。
 // 会员编号回填：只补空号（从现有最大编号继续），绝不重排已有编号——
@@ -384,8 +386,14 @@ router.get('/', (req, res) => {
       ${orderBy} LIMIT ? OFFSET ?
     `).all(...params, pageSize, offset);
 
-    // 状态展示：归档优先；其次用会员卡派生状态（暂停/已结束/已退费/流失），避免列表恒显「正常」
-    const mapped = list.map((r) => ({ ...r, status: r.archived ? 'archived' : (r.mem_status || r.status) }));
+    // 状态展示：已删除（status='refunded'）优先 —— 它只由 DELETE 写入，是学员自身的记录；
+    // 其次是归档；最后才用会员卡派生状态（暂停/已结束/已退费/流失），避免列表恒显「正常」。
+    // 注意不能写成 `r.mem_status || r.status`：mem_status 的 CASE 带 ELSE 'none'，恒为真值，
+    // 会把学员自身的 status（含已删除）永远吞掉 —— 已删学员因此显示成「在读」。
+    const mapped = list.map((r) => ({
+      ...r,
+      status: r.status === 'refunded' ? 'refunded' : (r.archived ? 'archived' : (r.mem_status || r.status)),
+    }));
     res.json(success({ list: mapped, total, page, pageSize }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
@@ -401,7 +409,9 @@ router.get('/options', (req, res) => {
   try {
     if (!canViewStudents(req)) return res.status(403).json(safeFail('无成员查看权限'));
     const { q, includeArchived } = req.query;
-    let where = 'WHERE s.archived = 0';
+    // 默认排除已归档与已删除学员：只认 archived 会漏掉「删除时未置 archived」的历史数据，
+    // 而学员下拉用于上课记录等人肉选择场景，混进已删学员会被误选、写脏考勤。
+    let where = `WHERE ${ACTIVE_STUDENT_SQL}`;
     const params = [];
     if (includeArchived === '1') where = 'WHERE 1=1';
     if (q) {
@@ -797,7 +807,9 @@ router.delete('/:id', requireAuth, (req, res) => {
 
     // 归档（软删除）并解绑家长绑定：避免家长端仍可见已退费成员，与课程删除级联一致
     const tx = db.transaction(() => {
-      db.prepare("UPDATE students SET status = 'refunded', updated_at = ? WHERE id = ?").run(now(), id);
+      // archived 必须一并置 1：学员列表默认只显示 archived = 0，只改 status 的话
+      // 已删学员仍留在列表里（且因会员卡仍有效而被派生状态覆盖成「在读」），删除等于没删。
+      db.prepare("UPDATE students SET status = 'refunded', archived = 1, updated_at = ? WHERE id = ?").run(now(), id);
       db.prepare('DELETE FROM parent_bindings WHERE student_id = ?').run(id);
     });
     tx();

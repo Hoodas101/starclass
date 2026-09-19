@@ -19,6 +19,8 @@ const { parseItems, itemLineTotal, itemQuantity } = require('../utils/items');
 // 「推送规则 → 缺席通知」的读取与文案渲染：与续费/训练提醒共用同一实现（utils/reminders.js）
 const { getNotificationRule, resolveRuleTemplate, renderNotificationTemplate } = require('../utils/reminders');
 const { getTerms } = require('../utils/terms');
+// 已删除 / 已归档学员的排除条件（自动缺席与 growth 预警共用同一判据）
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
 /**
  * 读取积分规则 —— 签到积分的唯一取值入口（替代原先散落在两处的硬编码 10 / 5）。
@@ -604,9 +606,14 @@ function runAutoAbsent(dateStr) {
     const missingStudents = db.prepare(`
       SELECT e.student_id, e.student_name
       FROM enrollments e
+      JOIN students s ON s.id = e.student_id
       LEFT JOIN attendances a ON a.schedule_id = e.schedule_id AND a.student_id = e.student_id
       WHERE e.schedule_id = ? AND e.status = 'active' AND a.id IS NULL
+        AND ${ACTIVE_STUDENT_SQL}
     `).all(schedule.id);
+    // 上面这条排除不可删：删除学员只置 students.status='refunded'、不清理 enrollments，
+    // 漏掉它的话定时任务会**每天**为已删学员插一条 absent 并给家长推送缺席通知，
+    // 考勤统计与出勤率也随之失真（家长还会收到早已退学孩子的训练提醒）。
 
     for (const stu of missingStudents) {
       const id = generateId('att_');

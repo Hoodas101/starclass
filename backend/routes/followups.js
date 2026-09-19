@@ -20,6 +20,9 @@ const {
   EXPIRED_WINDOW_DAYS,
 } = require('../utils/renewal');
 const { getChurnRules } = require('../utils/churn');
+// 已删除 / 已归档学员的排除条件（与 growth 预警、自动缺席共用同一判据）：
+// 跟进任务是自动生成并派给人去打的，把已删学员算进来等于制造无效待办。
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
 // follow_ups 建表与索引已收编至 migrations/014
 
@@ -89,6 +92,7 @@ router.post('/generate', (req, res) => {
       LEFT JOIN parent_bindings pb ON pb.student_id = mc.student_id AND pb.is_main = 1
       WHERE mc.status = 'active' AND mc.expires_at > ?
         AND mc.expires_at <= ? + ?
+        AND ${ACTIVE_STUDENT_SQL}
     `).all(t - RENEWAL_WARN_DAYS * DAY, t, (RENEWAL_WARN_DAYS + 1) * DAY);
     for (const c of expiring) {
       const daysLeft = Math.ceil((c.expires_at - t) / DAY);
@@ -120,6 +124,7 @@ router.post('/generate', (req, res) => {
         AND mc.expires_at IS NOT NULL
         AND mc.expires_at <= ?
         AND mc.expires_at >= ? - ?
+        AND ${ACTIVE_STUDENT_SQL}
         AND NOT EXISTS (
           SELECT 1 FROM member_cards c3
           WHERE c3.student_id = mc.student_id
@@ -202,6 +207,7 @@ router.post('/generate', (req, res) => {
              (SELECT MAX(a.date) FROM attendances a WHERE a.student_id = s.id) as last_date
       FROM students s
       WHERE s.status = 'active'
+        AND ${ACTIVE_STUDENT_SQL}
         AND (SELECT MAX(a.date) FROM attendances a WHERE a.student_id = s.id) IS NOT NULL
     `).all();
     for (const s of churned) {
@@ -232,6 +238,7 @@ router.post('/generate', (req, res) => {
       LEFT JOIN parent_bindings pb ON pb.student_id = mc.student_id AND pb.is_main = 1
       WHERE mc.status = 'active' AND mc.billing_mode = 'count'
         AND mc.remaining_classes > 0 AND mc.remaining_classes <= ?
+        AND ${ACTIVE_STUDENT_SQL}
     `).all(LOW_CLASS_THRESHOLD);
     for (const c of lowClass) {
       const id = insertTask({

@@ -17,6 +17,8 @@ const { parseItems, itemLineTotal } = require('../utils/items');
 const { resolveConsumeClasses } = require('../utils/deduction');
 // 退卡与订单退款共用同一套退费规则引擎（refund_rules），避免同一笔钱两条路径两个金额
 const { computeRefundSuggestion } = require('../utils/refund');
+// 已删除（status='refunded'）/ 已归档学员的统一排除条件（学员表别名须为 s）
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
 // schema 列（paused_at/billing_mode/points_reward/product_type 等）已收编至 migrations/011；
 // 此处仅保留数据回填。
@@ -818,6 +820,7 @@ router.get('/expiring', (req, res) => {
       FROM member_cards mc
       JOIN students s ON s.id = mc.student_id
       WHERE mc.status = 'active' AND mc.expires_at <= ? AND mc.expires_at > ?
+        AND ${ACTIVE_STUDENT_SQL}
       ORDER BY mc.expires_at ASC
     `).all(threshold, now());
 

@@ -12,6 +12,8 @@ const { getChurnRules } = require('../utils/churn');
 const { findDuplicateStudents } = require('../utils/duplicate');
 // 续费 / 课时预警的统一口径常量（与 followups.js 共用同一来源，避免两处阈值各写一份）
 const { RENEWAL_WARN_DAYS, LOW_CLASS_THRESHOLD, EXPIRED_WINDOW_DAYS } = require('../utils/renewal');
+// 已删除 / 已归档学员的排除条件（三处预警共用同一判据，避免各写一份后逐渐走样）
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
 // 增长中心权限：管理员或拥有「growth」权限的员工（销售等）
 function canGrowth(req) {
@@ -446,6 +448,7 @@ router.get('/churn', (req, res) => {
         (SELECT MAX(c.expires_at) FROM member_cards c WHERE c.student_id = s.id AND c.status IN ('active','paused')) as last_expires_at
       FROM students s
       WHERE EXISTS (SELECT 1 FROM member_cards c WHERE c.student_id = s.id)
+        AND ${ACTIVE_STUDENT_SQL}
     `).all();
 
     const list = rows.map((r) => {
@@ -505,6 +508,7 @@ router.get('/renewal', (req, res) => {
       FROM member_cards c
       JOIN students s ON s.id = c.student_id
       WHERE c.status IN ('active','paused','expired')
+        AND ${ACTIVE_STUDENT_SQL}
         AND c.expires_at IS NOT NULL
         AND c.expires_at <= ? + ?
         AND c.expires_at >= ? - ?
@@ -560,6 +564,7 @@ router.get('/low-classes', (req, res) => {
       FROM member_cards mc
       JOIN students s ON s.id = mc.student_id
       WHERE mc.status = 'active' AND mc.billing_mode = 'count' AND mc.remaining_classes <= ? AND mc.remaining_classes > 0
+        AND ${ACTIVE_STUDENT_SQL}
       ORDER BY mc.remaining_classes ASC
     `).all(threshold);
     // 同时保留 snake_case 原字段（既有调用方在用）与 camelCase 别名（与续费清单统一，前端可复用同一套渲染逻辑）

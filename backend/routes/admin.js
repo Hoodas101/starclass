@@ -11,6 +11,8 @@ const { success, fail, safeFail, generateId, getOpenId, getActor, recordAudit, f
 const { parseItems, itemQuantity, itemLineTotal } = require('../utils/items');
 // 员工默认口令的唯一定义处（登录/改密/强制拦截共用，避免多处硬编码分叉）
 const { getStaffDefaultPassword } = require('../utils/security');
+// 已删除（status='refunded'）/ 已归档学员的统一排除条件（学员表别名须为 s）
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
 // E3：把 date(paid_at/1000,'unixepoch','localtime') 这类表达式谓词改写为 paid_at 的毫秒区间比较。
 // 函数包裹的列用不上索引 → 看板每次调用对 orders 全表扫描 13 次；016 迁移建的 idx_orders_paid_at
@@ -87,8 +89,8 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const spSql = spName ? ' AND salesperson = ?' : '';
     const spParams = spName ? [spName] : [];
 
-    // 核心指标
-    const totalStudents = db.prepare("SELECT COUNT(*) as count FROM students WHERE status = 'active'").get().count;
+    // 核心指标（在册成员：已删除/已归档学员不计入，否则看板数字虚高）
+    const totalStudents = db.prepare(`SELECT COUNT(*) as count FROM students s WHERE s.status = 'active' AND ${ACTIVE_STUDENT_SQL}`).get().count;
     const totalTeachers = db.prepare("SELECT COUNT(*) as count FROM teachers WHERE status = 'active'").get().count;
     const totalCourses = db.prepare("SELECT COUNT(*) as count FROM courses WHERE is_active = 1").get().count;
 
@@ -267,21 +269,29 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
       itemStats = [];
     }
 
-    // 即将到期卡（7天内）
+    // 即将到期卡（7天内）—— 已删除/已归档学员的卡不计入，否则是无效续费提醒的虚高数字
     const expiringCards = db.prepare(
-      "SELECT COUNT(*) as count FROM member_cards WHERE status = 'active' AND expires_at < ? AND expires_at > ?"
+      `SELECT COUNT(*) as count FROM member_cards mc
+       JOIN students s ON s.id = mc.student_id
+       WHERE mc.status = 'active' AND mc.expires_at < ? AND mc.expires_at > ? AND ${ACTIVE_STUDENT_SQL}`
     ).get(currentTime + 7 * 86400000, currentTime).count;
 
     // 到场率：统一口径见 utils.attendanceRate（迟到计到场，请假不计入分母）
     const attendanceRatePct = attendanceRate({ present: todayCheckins, late: todayLate, absent: todayAbsent });
 
     // 总会员卡数
-    // 有效会员卡：仅统计进行中且未过期的卡（过期卡不计入有效统计）
-    const totalCards = db.prepare("SELECT COUNT(*) as count FROM member_cards WHERE status = 'active' AND expires_at > ?").get(currentTime).count;
+    // 有效会员卡：仅统计进行中且未过期的卡（过期卡不计入有效统计）；
+    // 已删除/已归档学员的卡一并排除（学员删除时不会动 member_cards，卡会滞留成 active）
+    const totalCards = db.prepare(`
+      SELECT COUNT(*) as count FROM member_cards mc
+      JOIN students s ON s.id = mc.student_id
+      WHERE mc.status = 'active' AND mc.expires_at > ? AND ${ACTIVE_STUDENT_SQL}
+    `).get(currentTime).count;
     // 有效会员：持有进行中且未过期会员卡的学员人数（去重；区别于“在读成员”全量统计）
     const validMembers = db.prepare(`
-      SELECT COUNT(DISTINCT student_id) as count FROM member_cards
-      WHERE status = 'active' AND expires_at > ?
+      SELECT COUNT(DISTINCT mc.student_id) as count FROM member_cards mc
+      JOIN students s ON s.id = mc.student_id
+      WHERE mc.status = 'active' AND mc.expires_at > ? AND ${ACTIVE_STUDENT_SQL}
     `).get(currentTime).count;
 
     // 总积分发放
@@ -477,7 +487,7 @@ router.get('/export', adminOnly, (req, res) => {
         data = db.prepare(`SELECT s.*, 
             (SELECT pb.parent_name FROM parent_bindings pb WHERE pb.student_id = s.id AND pb.is_main = 1 LIMIT 1) as parent_name,
             (SELECT pb.parent_phone FROM parent_bindings pb WHERE pb.student_id = s.id AND pb.is_main = 1 LIMIT 1) as parent_phone
-          FROM students s WHERE s.status = ?${r.sql} ORDER BY s.created_at DESC`).all('active', ...r.params);
+          FROM students s WHERE s.status = ? AND ${ACTIVE_STUDENT_SQL}${r.sql} ORDER BY s.created_at DESC`).all('active', ...r.params);
         filename = 'students.csv';
         break;
       }
@@ -1261,12 +1271,25 @@ router.get('/courses/:id/members', adminOnly, (req, res) => {
   try {
     const cls = db.prepare('SELECT id, name FROM courses WHERE id = ?').get(req.params.id);
     if (!cls) return res.json(fail('班级不存在'));
+    // 已删除（status='refunded'）/ 已归档（archived=1）学员不占旧模型（student_class）名册。
+    // 注意：此处学员表别名是 st 不是 s，故未复用 utils/student-state 的 ACTIVE_STUDENT_SQL，
+    // 条件与之一致；日后改判据时两处都要改。
     const list = db.prepare(`
       SELECT sc.id AS link_id, sc.student_id, sc.role, sc.joined_at,
-             st.name, st.avatar, st.gender, st.age
+             st.name, st.avatar, st.gender,
+             -- 原先直接取 st.age，但 students 表根本没有 age 列（只有 birthday），
+             -- 这条查询对任何调用恒 500 且被 catch 吞掉，名册永远空白。
+             -- 改为按 birthday 派生，口径与学员列表（students.js）完全一致，
+             -- 否则同一学员在名册页与学员页会显示两个不同的年龄。
+             CASE
+               WHEN st.birthday IS NOT NULL AND st.birthday != ''
+               THEN CAST((julianday('now') - julianday(st.birthday)) / 365.25 AS INTEGER)
+               ELSE NULL
+             END AS age
       FROM student_class sc
       LEFT JOIN students st ON st.id = sc.student_id
       WHERE sc.class_id = ?
+        AND COALESCE(st.archived, 0) = 0 AND COALESCE(st.status, '') <> 'refunded'
       ORDER BY sc.joined_at ASC
     `).all(req.params.id);
     res.json(success({ list, total: list.length, classId: cls.id, className: cls.name }));
@@ -1294,7 +1317,8 @@ router.post('/courses/:id/members', adminOnly, (req, res) => {
     let added = 0;
     for (const sid of ids) {
       if (!sid) continue;
-      const stu = db.prepare('SELECT id FROM students WHERE id = ?').get(sid);
+      // 已删除/已归档学员不得被重新分班：与「不存在」同等处理，静默跳过
+      const stu = db.prepare(`SELECT s.id FROM students s WHERE s.id = ? AND ${ACTIVE_STUDENT_SQL}`).get(sid);
       if (!stu) continue;
       added += ins.run(generateId('sc_'), sid, req.params.id, t).changes;
     }
@@ -1371,9 +1395,10 @@ router.get('/students/:id/classes', adminOnly, (req, res) => {
  */
 router.post('/students/:id/classes', adminOnly, (req, res) => {
   try {
-    const stu = db.prepare('SELECT id FROM students WHERE id = ?').get(req.params.id);
-    if (!stu) return res.json(fail('学员不存在'));
-    const want = Array.isArray(req.body.classIds) ? req.body.classIds.filter(Boolean) : [];
+  // 已删除/已归档学员不得被重新分班
+  const stu = db.prepare(`SELECT s.id FROM students s WHERE s.id = ? AND ${ACTIVE_STUDENT_SQL}`).get(req.params.id);
+  if (!stu) return res.json(fail('学员不存在'));
+  const want = Array.isArray(req.body.classIds) ? req.body.classIds.filter(Boolean) : [];
     const tx = db.transaction(() => {
       const current = db.prepare('SELECT class_id FROM student_class WHERE student_id = ?')
         .all(req.params.id).map(r => r.class_id);

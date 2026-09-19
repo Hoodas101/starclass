@@ -14,6 +14,8 @@ const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, formatDate, getWeekDayDate, parsePagination, isAdminReq, isCoachReq, isStaffReq, canViewStudentData } = require('../utils');
 const { requireStaffPerm } = require('../middleware/authz');
+// 已删除 / 已归档学员的排除条件（排期涉及学员的收集与 growth 预警共用同一判据）
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
 /**
  * 排期变更自动通知：向已报名学员的绑定家长发送站内通知
@@ -71,6 +73,15 @@ function collectScheduleStudentIds(schedule) {
   } else if (schedule && schedule.group_course_id) {
     db.prepare('SELECT student_id FROM student_class WHERE class_id = ?')
       .all(schedule.group_course_id).forEach((r) => push(r.student_id));
+  }
+  // 剔除已删除 / 已归档学员：删除学员只置 students.status='refunded'、不清理
+  // enrollments / class_members / student_class，他们仍会被上面三条查询收进来。
+  // 不剔除的后果是冲突检测把已删学员算成「时间冲突」，直接挡住一次正常排课的保存。
+  if (ids.size) {
+    const list = [...ids];
+    const ph = list.map(() => '?').join(',');
+    db.prepare(`SELECT s.id FROM students s WHERE s.id IN (${ph}) AND NOT (${ACTIVE_STUDENT_SQL})`)
+      .all(...list).forEach((r) => ids.delete(r.id));
   }
   return ids;
 }

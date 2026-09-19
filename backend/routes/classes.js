@@ -29,6 +29,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, escapeLike, parsePagination, isAdminReq, isCoachReq, isStaffReq, canViewStudentData, getActor, recordAudit } = require('../utils');
+// 已删除（status='refunded'）/ 已归档学员的统一排除条件（学员表别名须为 s）
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
 // 班级查询辅助：返回班级或 404
 function getClassOr404(id) {
@@ -91,9 +93,14 @@ router.get('/', (req, res) => {
     }
 
     const total = db.prepare(`SELECT COUNT(*) c FROM classes c ${where}`).get(...params).c;
+    // member_count 必须与名册 /:id/members 同口径（排除已删/已归档学员），
+    // 否则会出现「列表写着 10 人、打开名册只有 9 人」——两处数字互相印证不上。
+    // 班级列表是一次查多个班级，故用相关子查询逐班统计，而不是只查单个班级。
     const list = db.prepare(`
       SELECT c.*,
-        (SELECT COUNT(*) FROM class_members cm WHERE cm.class_id = c.id) AS member_count,
+        (SELECT COUNT(*) FROM class_members cm
+           LEFT JOIN students s ON s.id = cm.student_id
+           WHERE cm.class_id = c.id AND ${ACTIVE_STUDENT_SQL}) AS member_count,
         (SELECT name FROM courses WHERE id = c.course_id) AS course_name,
         (SELECT name FROM teachers WHERE id = c.coach_id) AS coach_name,
         (SELECT name FROM classrooms WHERE id = c.classroom_id) AS classroom_name
@@ -115,7 +122,12 @@ router.get('/:id', (req, res) => {
     if (!isStaffReq(req)) return res.status(403).json(safeFail('无班级查看权限'));
     const cls = getClassOr404(req.params.id);
     if (!cls) return res.json(fail('班级不存在'));
-    const memberCount = db.prepare('SELECT COUNT(*) c FROM class_members WHERE class_id = ?').get(req.params.id).c;
+    // 与名册 /:id/members 同口径：已删/已归档学员不计入成员数，避免详情与名册数字对不上
+    const memberCount = db.prepare(`
+      SELECT COUNT(*) c FROM class_members cm
+      LEFT JOIN students s ON s.id = cm.student_id
+      WHERE cm.class_id = ? AND ${ACTIVE_STUDENT_SQL}
+    `).get(req.params.id).c;
     const scheduleCount = db.prepare("SELECT COUNT(*) c FROM schedules WHERE class_id = ? AND status != 'cancelled'").get(req.params.id).c;
     const course = cls.course_id ? db.prepare('SELECT name FROM courses WHERE id = ?').get(cls.course_id) : null;
     const coach = cls.coach_id ? db.prepare('SELECT name FROM teachers WHERE id = ?').get(cls.coach_id) : null;
@@ -203,7 +215,9 @@ router.get('/:id/members', (req, res) => {
     const { keyword, role } = req.query;
     const { page, pageSize, offset } = parsePagination(req.query);
 
-    let where = 'WHERE cm.class_id = ?';
+    // 已删除（status='refunded'）/ 已归档学员不占名册、不占名额：
+    // 名册与总数共用同一 where，避免「列表已过滤、总数没过滤」导致的分页错位
+    let where = `WHERE cm.class_id = ? AND ${ACTIVE_STUDENT_SQL}`;
     const params = [req.params.id];
     if (role) { where += ' AND cm.role = ?'; params.push(role); }
     if (keyword) {
@@ -258,10 +272,18 @@ router.post('/:id/members', (req, res) => {
       VALUES (?, ?, ?, 'member', ?)
     `);
     db.transaction(() => {
-      const current = db.prepare('SELECT COUNT(*) c FROM class_members WHERE class_id = ?').get(req.params.id).c;
+      // 容量基数只算「在册」学员：已删/已归档学员虽仍留在 class_members 里，
+      // 但不应继续占名额，否则他们的残留行会让分班误报「班级容量已满」而挡住正常入班。
+      // 用 LEFT JOIN 保留孤立行（学员行不存在时 s.* 为 NULL，COALESCE 兜底仍计入），与名册查询口径一致。
+      const current = db.prepare(`
+        SELECT COUNT(*) c FROM class_members cm
+        LEFT JOIN students s ON s.id = cm.student_id
+        WHERE cm.class_id = ? AND ${ACTIVE_STUDENT_SQL}
+      `).get(req.params.id).c;
       for (const sid of ids) {
         if (!sid) continue;
-        const stu = db.prepare('SELECT id FROM students WHERE id = ?').get(sid);
+        // 已删除/已归档学员不得被重新分班（与「不存在」同等处理，静默跳过）
+        const stu = db.prepare(`SELECT s.id FROM students s WHERE s.id = ? AND ${ACTIVE_STUDENT_SQL}`).get(sid);
         if (!stu) continue;
         if (cls.max_members > 0 && (current + added) >= cls.max_members) {
           const err = new Error(`班级容量已满（上限 ${cls.max_members} 人）`);
