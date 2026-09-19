@@ -409,6 +409,9 @@ async function main() {
   if (parentToken) {
     const r = await call('GET', '/api/attendances', { token: parentToken });
     rec('B-403-staffOnly-vs-parent', 'GET /api/attendances', r.status === 403, `status=${r.status}`);
+    // 积分排行榜含全机构学员姓名与积分，仅员工可见；家长调用必须 403 而非拿到名单
+    const rRank = await call('GET', '/api/points/ranking', { token: parentToken });
+    rec('B-403-staffOnly-vs-parent', 'GET /api/points/ranking', rRank.status === 403, `status=${rRank.status}`);
   }
   // 排课创建权限：教练可创建（isCoachReq），销售不可（仍 403）
   {

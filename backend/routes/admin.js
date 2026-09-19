@@ -997,12 +997,10 @@ router.delete('/teachers/:id', adminOnly, (req, res) => {
     if (existing.phone) {
       db.prepare("UPDATE users SET status = 'inactive', token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE phone = ?").run(now(), existing.phone);
     }
-    // 该教师未来的排课置空待重新分配（保留课程，避免家长端显示已停用教师）
-    db.prepare(`
-      UPDATE schedules SET teacher_id = '', teacher_name = '', updated_at = ?
-      WHERE teacher_id = ? AND status = 'scheduled' AND date >= ?
-    `).run(now(), req.params.id, new Date().toISOString().slice(0, 10));
-    // 停用教师会同步停用登录账号并清空未来排课，属权限与排课变更，必须留痕
+    // 停用只影响账号可用性，不动历史/未来排期数据：排期上的教练字段是对
+    // 「这节课当时安排了谁」的事实记录，不因账号停用而消失。保留它可使停用与
+    // 重新启用完全对称，避免重新启用后无法回填、管理员被迫逐条手工重排（返工）。
+    // 停用教师会同步停用登录账号，属权限变更，必须留痕
     const actor = getActor(req);
     recordAudit(db, {
       entity: 'teacher',
@@ -1011,7 +1009,7 @@ router.delete('/teachers/:id', adminOnly, (req, res) => {
       actorId: actor.id,
       actorRole: actor.role,
       before: { name: existing.name },
-      after: { status: 'inactive', schedules_cleared: true },
+      after: { status: 'inactive', schedules_cleared: false },
     });
     res.json(success({ id: req.params.id }));
   } catch (err) {

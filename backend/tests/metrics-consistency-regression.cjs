@@ -225,7 +225,8 @@ function callMakeupCancel(body) {
 }
 function callPointsRanking() {
   const res = mockRes();
-  getHandler(pointsRouter, 'get', '/ranking')(mockReq({ query: { limit: '100' } }), res);
+  // /api/points/ranking 现为员工专属（非员工 403），故须以管理员身份调用
+  getHandler(pointsRouter, 'get', '/ranking')(asAdmin({ query: { limit: '100' } }), res);
   return res;
 }
 function callGrowthRanking() {

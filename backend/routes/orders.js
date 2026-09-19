@@ -14,6 +14,13 @@ const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, ha
 const { parseItems } = require('../utils/items');
 // 退费规则引擎已抽到 utils/refund：refund-preview / refund / 退卡（membership）共用同一口径
 const { computeRefundSuggestion } = require('../utils/refund');
+// 手机号归一化与建档查重同源（utils/duplicate）：库里 parent_bindings.parent_phone 存的是
+// 归一化后的纯数字串，比对导入文件里的号码前必须同样归一化，否则「138 0013 8000」这类
+// 带空格/分隔符的写法会漏配，订单就会退化成只按姓名匹配。
+const { normalizePhone } = require('../utils/duplicate');
+// 「学员是否已失效（已删除/已归档）」的单一事实来源：导入匹配学员时必须排除已退学的人，
+// 否则历史订单会被挂到早已删除的学员头上（要求 SQL 中学员表别名为 s）。
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
 // 销售权限：管理员或拥有「sales」权限的员工（销售）
 function canSales(req) {
@@ -245,11 +252,17 @@ router.post('/import', (req, res) => {
 
     const okCount = [];
     const failed = [];
+    // 导入文件显式带 orderNo 的行命中已存在的订单号时记入这里（跳过而非报错）
+    const skipped = [];
 
     const insertOrder = db.prepare(`
       INSERT INTO orders (id, order_no, user_id, student_id, student_name, order_type, items, total_amount, discount_amount, payable_amount, status, salesperson, remark, is_1v1, created_at, updated_at)
       VALUES (?, ?, '', ?, ?, 'membership', ?, ?, 0, ?, 'pending', ?, ?, 0, ?, ?)
     `);
+
+    // orders.order_no 是 UNIQUE 列：重复导入同一份文件时若不先查重，会直接撞唯一约束抛异常，
+    // 整批回滚并返回 500，用户既不知道哪几行重复、其余行也一起丢。先查后跳，属正常业务分支。
+    const orderNoExists = db.prepare('SELECT 1 FROM orders WHERE order_no = ? LIMIT 1');
 
     // 整批导入单事务提交：任一行出现未预期异常即整体回滚，避免半批订单入库。
     // 行级校验失败只记入 failed 不影响其余行；校验通过的行走 settleOrder，
@@ -269,17 +282,26 @@ router.post('/import', (req, res) => {
           return;
         }
 
+        // 仅对导入文件显式提供了 orderNo 的行查重：orderNo 为空时走下方随机生成逻辑，
+        // 生成的订单号天然唯一，无法也无需查重。命中即跳过该行，不影响其余行与本批事务。
+        const rawOrderNo = String(r.orderNo || '').trim();
+        if (rawOrderNo && orderNoExists.get(rawOrderNo)) {
+          skipped.push({ row: idx + 2, orderNo: rawOrderNo, reason: '订单号已存在，已跳过' });
+          return;
+        }
+
         // 匹配成员：优先姓名+电话，其次姓名
         let student = null;
         if (phone) {
           student = db.prepare(`
             SELECT s.id, s.name FROM students s
             JOIN parent_bindings pb ON pb.student_id = s.id
-            WHERE s.name = ? AND pb.parent_phone = ? LIMIT 1
-          `).get(studentName, phone);
+            WHERE s.name = ? AND pb.parent_phone = ? AND ${ACTIVE_STUDENT_SQL} LIMIT 1
+          `).get(studentName, normalizePhone(phone));
         }
         if (!student) {
-          student = db.prepare('SELECT id, name FROM students WHERE name = ? ORDER BY created_at DESC LIMIT 1').get(studentName);
+          // 退而按姓名匹配：同样必须排除已删除/已归档学员；students 补别名 s 以复用 ACTIVE_STUDENT_SQL
+          student = db.prepare(`SELECT s.id, s.name FROM students s WHERE s.name = ? AND ${ACTIVE_STUDENT_SQL} ORDER BY s.created_at DESC LIMIT 1`).get(studentName);
         }
         if (!student) {
           failed.push({ row: idx + 2, reason: `未找到成员「${studentName}」` });
@@ -290,7 +312,7 @@ router.post('/import', (req, res) => {
         const t = now();
         let paidTs = r.paidDate ? new Date(String(r.paidDate).trim() + 'T12:00:00').getTime() : t;
         if (!Number.isFinite(paidTs)) paidTs = t; // 非法日期回退为当前时间，防止 NaN 写入
-        const orderNo = String(r.orderNo || '').trim() || `ORD${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        const orderNo = rawOrderNo || `ORD${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
         const items = [{ itemType: 'product', itemName, quantity: 1, unitPrice: amount, totalPrice: amount }];
         insertOrder.run(id, orderNo, student.id, student.name, JSON.stringify(items), amount, amount, String(r.salesperson || '').trim(), String(r.remark || '').trim(), t, t);
         const order = {
@@ -320,7 +342,8 @@ router.post('/import', (req, res) => {
       });
     })();
 
-    res.json(success({ success: okCount.length, failed, created: okCount.length }));
+    // skipped 为「订单号已存在」被跳过的行数，skippedRows 给出具体行号与订单号，供界面提示用户
+    res.json(success({ success: okCount.length, failed, created: okCount.length, skipped: skipped.length, skippedRows: skipped }));
   } catch (err) {
     console.error('[orders import]', err);
     res.status(500).json(safeFail('导入失败，请稍后重试'));
@@ -509,11 +532,21 @@ router.post('/:id/refund', (req, res) => {
       if (upd.changes === 0) return { conflict: true };
 
       if (isFull) {
-        // 全额退款：将关联的会员卡标记为已退款
+        // 全额退款：将关联的会员卡标记为已退款，并回收卡内剩余权益
+        // 必须与下方「部分退款」分支保持同一口径：只置 status='refunded' 而不清零剩余课时/有效期，
+        // 会出现「退全款反而保留课时」的倒置——学员拿走全部退款，卡内剩余权益却原样留着。
         const cards = db.prepare('SELECT * FROM member_cards WHERE order_id = ?').all(order.id);
         for (const card of cards) {
-          db.prepare('UPDATE member_cards SET status = ?, updated_at = ? WHERE id = ?').run('refunded', currentTime, card.id);
+          if ((card.billing_mode || 'time') === 'count') {
+            // 次数卡：回收的课时计入 used_classes，维持 total = remaining + used 恒等式
+            // （SQL 中两处赋值均基于更新前的行值，先后顺序不影响结果）。
+            db.prepare('UPDATE member_cards SET status = ?, used_classes = used_classes + remaining_classes, remaining_classes = 0, updated_at = ? WHERE id = ?').run('refunded', currentTime, card.id);
+          } else {
+            // 时效卡：清零剩余有效期，与部分退款分支一致
+            db.prepare('UPDATE member_cards SET status = ?, expires_at = ?, updated_at = ? WHERE id = ?').run('refunded', currentTime, currentTime, card.id);
+          }
         }
+        if (cards.length > 0) clawback = '全额退款已同步回收卡内剩余权益';
         // 全额退款：回收购买赠送的积分（按 订单+商品 维度查找，支持多商品订单）
         const rewardLogs = db.prepare("SELECT * FROM point_logs WHERE reference_id GLOB ? AND type = 'earn'").all('order_' + order.id + '*');
         let totalReward = 0;
@@ -646,7 +679,8 @@ router.put('/:id', (req, res) => {
     // 改价与支付流水同步必须同事务：中途失败会留下「订单已改价、流水仍旧金额」的对账裂缝
     db.transaction(() => {
       if (syncPaymentAmount !== null) {
-        db.prepare('UPDATE payments SET amount = ? WHERE order_id = ?').run(syncPaymentAmount, id);
+        // 退款流水必须排除（payments.status='refunded'），否则改价会连带改写退款金额/符号，账目净额算错
+        db.prepare("UPDATE payments SET amount = ? WHERE order_id = ? AND status <> 'refunded'").run(syncPaymentAmount, id);
       }
       db.prepare(`UPDATE orders SET ${fields.join(', ')}, updated_at = ? WHERE id = ?`).run(...params);
 

@@ -697,6 +697,9 @@ const doImportStudents = async (rows) => {
     // 学员已建成功、但家长绑定未建的行：不计入失败，必须单独提示，
     // 否则这些家长永远收不到通知且无人察觉
     warnings: (res.warnings || []).map((w) => `第 ${w.row} 行：${w.reason}`),
+    // 查重命中而跳过的行：不算失败，但必须如实展示，
+    // 否则老师会以为「导入 100 条只建了 60 条」是系统漏数据
+    skipped: (res.skippedRows || []).map((s) => `第 ${s.row} 行：${s.reason}`),
   }
 }
 

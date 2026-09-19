@@ -40,9 +40,11 @@
 
       <div v-if="importResult" class="import-result" :class="(importResult.failed.length || importWarnings.length) ? 'has-failed' : 'ok'">
         <p>
-          导入完成：成功 {{ importResult.success }} 条，失败 {{ importResult.failed.length }} 条<template v-if="importWarnings.length">，另有 {{ importWarnings.length }} 条未建立家长绑定</template>。
+          导入完成：成功 {{ importResult.success }} 条，失败 {{ importResult.failed.length }} 条<template v-if="importSkipped.length">，另有 {{ importSkipped.length }} 条已存在被跳过</template><template v-if="importWarnings.length">，另有 {{ importWarnings.length }} 条未建立家长绑定</template>。
         </p>
         <div v-for="(f, i) in importResult.failed.slice(0, 6)" :key="i" class="preview-error-item">{{ f }}</div>
+        <div v-for="(s, i) in importSkipped.slice(0, 6)" :key="'s' + i" class="preview-warn-item">{{ s }}</div>
+        <div v-if="importSkipped.length > 6" class="preview-warn-item">… 其余 {{ importSkipped.length - 6 }} 条因已存在被跳过略</div>
         <div v-for="(w, i) in importWarnings.slice(0, 6)" :key="'w' + i" class="preview-warn-item">{{ w }}</div>
         <div v-if="importWarnings.length > 6" class="preview-warn-item">… 其余 {{ importWarnings.length - 6 }} 条未建立家长绑定略</div>
       </div>
@@ -81,6 +83,9 @@ const importing = ref(false)
 const importResult = ref(null)
 // 未建立家长绑定的行（仅成员导入会返回 warnings；订单导入没有，故兜底为空数组）
 const importWarnings = computed(() => (importResult.value && importResult.value.warnings) || [])
+// 查重命中而跳过的行（仅成员导入会返回 skipped；订单导入没有，故兜底为空数组）。
+// 必须显示出来，否则「导入 100 条只建了 60 条」在界面上完全看不出原因。
+const importSkipped = computed(() => (importResult.value && importResult.value.skipped) || [])
 
 const open = () => {
   visible.value = true
@@ -161,7 +166,7 @@ const applyParsed = (objects, errors) => {
 const doImport = async () => {
   try {
     await ElMessageBox.confirm(
-      `即将导入 ${previewRows.value.length} 条数据${parseErrors.value.length ? `，${parseErrors.value.length} 行存在问题将跳过` : ''}。导入会按现有接口规则新增记录（按自然键去重），请确认无误后再继续。`,
+      `即将导入 ${previewRows.value.length} 条数据${parseErrors.value.length ? `，${parseErrors.value.length} 行存在问题将跳过` : ''}。姓名+手机号已存在的成员会被自动跳过、不会重复创建；任一行导入失败会整批回滚。请确认无误后再继续。`,
       '确认导入',
       { type: 'warning', confirmButtonText: '开始导入', cancelButtonText: '取消' }
     )

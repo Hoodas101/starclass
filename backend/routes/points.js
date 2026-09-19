@@ -9,7 +9,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, isAdminReq, canViewStudentData, recordAudit } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, isAdminReq, isStaffReq, canViewStudentData, recordAudit } = require('../utils');
 
 /**
  * GET /api/points/balance — 积分余额
@@ -196,6 +196,7 @@ router.get('/logs', (req, res) => {
  */
 router.get('/ranking', (req, res) => {
   try {
+    if (!isStaffReq(req)) return res.status(403).json(safeFail('无积分排行榜查看权限'));
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     // 当前登录者（家长）的主绑定成员，用于排行榜"我"的高亮
     let myStudentId = null;

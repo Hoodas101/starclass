@@ -498,8 +498,10 @@ router.post('/deduct', (req, res) => {
     if (existing) return res.json(fail('已扣过训练时长，无需重复扣课'));
 
     // 查找学员当前生效的会员卡（优先指定卡）
+    // 显式指定 cardId 时也必须校验 status = 'active'：订单全额退款只把卡标记为 status='refunded'，
+    // 并不会清零 remaining_classes，若不校验 status，学员拿回全额退款后仍可显式传该卡 id 继续扣课时。
     let card = cardId
-      ? db.prepare('SELECT * FROM member_cards WHERE id = ? AND student_id = ?').get(cardId, studentId)
+      ? db.prepare("SELECT * FROM member_cards WHERE id = ? AND student_id = ? AND status = 'active'").get(cardId, studentId)
       : db.prepare(
           "SELECT * FROM member_cards WHERE student_id = ? AND status = 'active' AND expires_at > ? ORDER BY expires_at ASC LIMIT 1"
         ).get(studentId, now());
@@ -605,6 +607,11 @@ router.post('/refund', (req, res) => {
       const card = db.prepare('SELECT * FROM member_cards WHERE id = ? AND student_id = ?').get(cardId, studentId);
       if (!card) return { err: '会员卡不存在' };
       if (card.status === 'refunded') return { err: '该卡已退过' };
+      // 已随订单取消的卡不得再退费：orders.js 的取消已支付订单分支（cancel_paid）会把
+      // 该单支付流水整体置为 refunded、回收赠送积分并把卡置为 'cancelled'，语义上钱已退回。
+      // 此处若放行，会形成第二笔真实现金支出；且原单状态已非 paid，退款额也挂不上原单
+      // （见下方载体订单注释），等于一笔支出无人知晓。
+      if (card.status === 'cancelled') return { err: '该卡已随订单取消，不可再退费' };
 
       // 卡类型（membership_cards）上的 refundable 是机构对「这类卡能不能退」的开关：
       // 此前该字段全仓无任何代码读取（死字段），退卡接口可绕过卡类型设置强行退款。
@@ -621,7 +628,10 @@ router.post('/refund', (req, res) => {
       let order = null; // 规则引擎需要完整订单对象（id / payable_amount / refunded_amount）
       if (card.order_id) {
         orderId = card.order_id;
-        order = db.prepare('SELECT id, items, total_amount, payable_amount, refunded_amount FROM orders WHERE id = ?').get(card.order_id);
+        // status 必须一并取出：下方决定是否把退款额累加回原订单时要用 order.status 判断，
+        // 少了它该判断恒为 undefined === 'paid' → false，导致每笔退卡都改走载体订单分支、
+        // 原订单的 refunded_amount 再也不累加（订单永远停留在 paid，财务口径断裂）。
+        order = db.prepare('SELECT id, items, total_amount, payable_amount, refunded_amount, status FROM orders WHERE id = ?').get(card.order_id);
         if (order) {
           orderPayable = Number(order.payable_amount) || 0;
           orderRefundedSoFar = Number(order.refunded_amount) || 0;
@@ -699,12 +709,17 @@ router.post('/refund', (req, res) => {
       // 更新卡状态：次数卡同时回收剩余课时并计入已用，理由与订单退款路径一致
       // （orders.js 退款回收）—— 只置 status='refunded' 而留着 remaining_classes，
       // 会让一张已退掉的卡仍显示「剩余 18 节」，且 total = remaining + used 不成立。
-      // 时效卡不消耗课时，不做此处理。
-      // 注意：退费金额 refundAmount 已在上面按 remaining_classes 算完，此处归零不影响已算金额。
+      // 时效卡不消耗课时，不做课时回收；但同样要清零剩余有效期（expires_at = 当前时间），
+      // 与次数卡回收剩余课时形成对称口径：两条分支都必须把「卡内剩余资产」清零。
+      // 此前只置 status，剩余有效期原样保留，等于把「已退卡仍有可用时长」这个事实
+      // 交给下游的 status='active' 过滤去兜底 —— 一旦那个过滤被改动，已退的卡就会
+      // 带着剩余有效期复活（与次数卡「只归零 remaining」是同一类脆弱设计）。
+      // 注意：退费金额 refundAmount 已在上面按 remaining_classes / 剩余有效期算完，
+      // 此处清零不影响已算金额。
       if ((card.billing_mode || 'time') === 'count') {
         db.prepare("UPDATE member_cards SET status = 'refunded', used_classes = used_classes + remaining_classes, remaining_classes = 0, updated_at = ? WHERE id = ?").run(currentTime, cardId);
       } else {
-        db.prepare("UPDATE member_cards SET status = 'refunded', updated_at = ? WHERE id = ?").run(currentTime, cardId);
+        db.prepare("UPDATE member_cards SET status = 'refunded', expires_at = ?, updated_at = ? WHERE id = ?").run(currentTime, currentTime, cardId);
       }
 
       // 回收购买时赠送的积分（仅本卡对应商品的奖励，订单含多商品时不影响其他商品权益）
@@ -739,7 +754,14 @@ router.post('/refund', (req, res) => {
             `).run(generateId('PLG'), studentId, -actual, newBal, refId, currentTime);
           }
         }
-        // 原订单累计已退金额增加本次退额；累计达订单金额时整单标记已退（保证财务口径一致）
+      }
+
+      // 原订单累计已退金额增加本次退额；累计达订单金额时整单标记已退（保证财务口径一致）。
+      // 只有「原订单存在、且仍是 paid」时原订单才能承载本笔退款额；其余情况——
+      // 卡是后台直接发放的（POST /api/membership/activate 写 order_id=''）、订单行已找不到、
+      // 或订单已非 paid（已取消/已退完）——都必须落到下面的载体订单，否则这笔现金支出
+      // 在财务上完全没有载体（详见下方载体订单注释）。
+      if (orderId && order && order.status === 'paid') {
         db.prepare(`
           UPDATE orders SET
             refunded_amount = MIN(payable_amount, refunded_amount + ?),
@@ -747,9 +769,52 @@ router.post('/refund', (req, res) => {
             updated_at = ?
           WHERE id = ? AND status = 'paid'
         `).run(refundAmount, refundAmount, currentTime, orderId);
+      } else if (refundAmount > 0) {
+        // === 退款载体订单（隐形约定，改动统计口径前必读）===
+        // 本系统所有财务视图（finance.js 的 summary / monthly / by-product / by-sales、
+        // admin.js 看板的今日/本周/本年/本月收入）统一以
+        //   SUM(payable_amount) − SUM(refunded_amount)
+        // 计算净额，并用 `order_type != 'refund'` 把退款流水行（RFND）排除在外。
+        // 因此要让这笔现金支出真正进入统计，载体行必须满足：
+        //   · payable_amount = 0        —— 它不是收入；写 0，净额才会是 −refundAmount
+        //   · refunded_amount = 本笔实退金额
+        //   · status='refunded' 且 paid_at = 当前时间 —— 同时满足 status IN ('paid','refunded')
+        //     与 paid_at 区间谓词，按日 / 按月的 KPI 才统计得到
+        //   · order_type 绝不能写 'refund' —— 会被上述谓词一并排除
+        //     （finance.js:57/65/75/129/198/210/321/408、admin.js:148/152/161/165），钱照样消失
+        // 切勿把 payable_amount 也写成 refundAmount：那会让 gross 与 refund 相抵、净额变 0。
+        const carrierId = generateId('ORD');
+        const carrierNo = `ORDS${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+        db.prepare(`
+          INSERT INTO orders (id, order_no, student_id, student_name, order_type, items,
+            total_amount, discount_amount, payable_amount, refunded_amount, status, paid_at, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 'refund_standalone', ?, 0, 0, 0, ?, 'refunded', ?, ?, ?)
+        `).run(carrierId, carrierNo, studentId, card.student_name,
+          // items 结构与 orders.js 正常订单保持一致（itemType/itemName/quantity/unitPrice/totalPrice）；
+          // 金额相关字段一律填 0 —— 这笔钱记在 refunded_amount 上，若这里也记价格会被重复计算。
+          // 取「退卡退费」这个可读名字，是为了让 /by-product 展开后显示成一行正常项目
+          // （revenue 0 / refunded X / net −X），而不是落进「未命名」桶里。
+          JSON.stringify([{
+            itemType: 'refund',
+            itemName: '退卡退费',
+            quantity: 1,
+            unitPrice: 0,
+            totalPrice: 0,
+            cardId,
+            reason,
+            standalone: true,
+          }]),
+          refundAmount, currentTime, currentTime, currentTime);
       }
 
       // 创建退款订单
+      // 定时炸弹警告：本行 order_type='refund' 且 payable_amount=refundAmount、refunded_amount=0。
+      // 它当前被所有财务谓词的 `order_type != 'refund'` 排除，因此不进统计（这是正确的）；
+      // 但一旦将来有人放开该过滤，它会被当成**正收入 refundAmount** 计入 gross。
+      // 放开过滤之前，必须先把它改成 payable_amount=0 / refunded_amount=refundAmount，
+      // 或统一改由上方 order_type='refund_standalone' 的载体订单记账。
+      // 另注：tests/finance-refund-regression.cjs 依赖它当前的形态（该套件按
+      // `order_type = 'refund'` 统计行数、并要求 payable_amount <= 240），改它的值会破坏既有测试。
       const refundOrderId = generateId('RFND');
       // order_no 有 UNIQUE 约束：同一毫秒内连续退卡/同事务重试时纯时间戳必撞（回归测试实测）
       const orderNo = `RF${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;

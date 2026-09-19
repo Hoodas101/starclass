@@ -153,9 +153,12 @@ router.post('/', (req, res) => {
 /**
  * POST /api/students/import — 批量导入成员（CSV 解析后由前端提交 JSON）
  * Body: { rows: [{ name, gender, birthday, school, grade, level, parentName, phone, remark }] }
- * 返回 { success, created, failed: [{ row, reason }], unlinked, warnings: [{ row, name, phone, reason }] }
+ * 返回 { success, created, failed: [{ row, reason }], unlinked, warnings: [{ row, name, phone, reason }],
+ *        skipped, skippedRows: [{ row, name, phone, reason }] }
  * 说明：warnings 只表示「学员已建成功、但家长绑定未建」，不计入 failed。
  *       学员本身建成了就不算失败，但不能因此把它报成完整成功。
+ *       skipped 是查重命中而跳过的行（自然键：家长手机号优先，无有效手机号时用姓名），
+ *       属正常业务分支，不计入 failed，也不会触发整批回滚。
  */
 router.post('/import', (req, res) => {
   try {
@@ -170,12 +173,52 @@ router.post('/import', (req, res) => {
       const failed = [];
       // 学员已建成功、但家长绑定未建的行：既不算失败，也不能报成完整成功
       const warnings = [];
+      // 查重命中而跳过的行：正常业务分支，既不是失败，也绝不触发整批回滚
+      const skipped = [];
+      // 「已删除 / 已归档」判据唯一来源 ACTIVE_STUDENT_SQL（archived=1 或 status='refunded'）。
+      // 已删学员同样参与查重，否则用户删错后重新导入会凭空多出一份重复档案。
+      const inactiveStmt = db.prepare(`SELECT ${ACTIVE_STUDENT_SQL} AS active FROM students s WHERE s.id = ?`);
+      const isInactive = (sid) => { const st = inactiveStmt.get(sid); return !(st && st.active); };
       rows.forEach((r, idx) => {
         const name = String(r.name || '').trim();
         if (!name) {
           failed.push({ row: idx + 2, reason: '姓名不能为空' });
           return;
         }
+        // 手机号先规范化再校验：Excel 复制来的号码常带空格、横线、括号、全角数字或 +86 前缀，
+        // 直接拿原始串跑 ^1[3-9]\d{9}$ 会把这类行整行判为「没有手机号」而静默跳过家长绑定，
+        // 结果学员建了、家长却永远绑不上，之后所有家长通知都发不到人且无人察觉。
+        const phoneRaw = String(r.phone || '').trim();
+        const phone = normalizePhone(phoneRaw);
+        const phoneOk = PHONE_RE.test(phone);
+
+        // ── 导入查重（自然键）──
+        // 与建档查重同源：优先家长手机号，且必须先 normalizePhone 归一后再比，
+        // 否则「138 0013 8000」这类带空格的号码会被判成没有手机号而漏查；无有效手机号时退回姓名匹配。
+        // 命中即跳过、不重复建档 —— 前端导入弹窗已明确承诺「姓名+手机号已存在的成员会被自动跳过」，
+        // 后端必须真的做，否则就是假承诺，用户会放心地重复导入。
+        const dup = findDuplicateStudents({ name, phone: phoneOk ? phone : '' });
+        let hit = phoneOk ? dup.list.find(x => x.strength === 'strong') : null;
+        if (!hit) {
+          // 手机号没命中时按姓名兜底：软删除（DELETE /:id）会把 parent_bindings 一并删除，
+          // 已删学员因此再也查不到手机号，只能靠姓名找回 —— 否则「删错了再导一次」会凭空
+          // 多出一份重复档案（课时/积分/订单再次裂开）。同名「在档」学员是弱信号，不拦。
+          const nameHits = dup.list.filter(x => x.strength === 'weak');
+          hit = nameHits.find(c => !phoneOk || isInactive(c.id)) || null;
+        }
+        if (hit) {
+          const by = hit.strength === 'strong' ? '手机号' : '姓名';
+          skipped.push({
+            row: idx + 2,
+            name,
+            phone: phoneOk ? phone : phoneRaw,
+            reason: isInactive(hit.id)
+              ? `已存在同${by}的已删除/已归档成员「${hit.name}」，本次跳过；如需重新建档请先恢复该档案或更换${by}`
+              : `已存在同${by}的成员「${hit.name}」，本次跳过，不重复建档`,
+          });
+          return;
+        }
+
         const id = generateId('stu_');
         const t = now();
         const statusVal = String(r.status || '').trim() || 'active';
@@ -187,12 +230,6 @@ router.post('/import', (req, res) => {
         `).run(id, name, String(r.gender || '').trim(), String(r.birthday || '').trim(), String(r.school || '').trim(),
           String(r.grade || '').trim(), String(r.level || '').trim(), String(r.remark || '').trim(), statusVal, joinDateVal, t, t);
 
-        // 手机号先规范化再校验：Excel 复制来的号码常带空格、横线、括号、全角数字或 +86 前缀，
-        // 直接拿原始串跑 ^1[3-9]\d{9}$ 会把这类行整行判为「没有手机号」而静默跳过家长绑定，
-        // 结果学员建了、家长却永远绑不上，之后所有家长通知都发不到人且无人察觉。
-        const phoneRaw = String(r.phone || '').trim();
-        const phone = normalizePhone(phoneRaw);
-        const phoneOk = PHONE_RE.test(phone);
         if (phoneOk) {
           const parentNameVal = String(r.parentName || '').trim() || `${name}家长`;
           const openid = `phone_${phone}`;
@@ -247,10 +284,10 @@ router.post('/import', (req, res) => {
         });
       }
 
-      return { okCount, failed, warnings };
+      return { okCount, failed, warnings, skipped };
     });
 
-    const { okCount, failed, warnings } = runImport();
+    const { okCount, failed, warnings, skipped } = runImport();
     // 批量导入属批量改写业务数据的高危操作，必须留痕（批次无单一主键，entityId 留空）
     const actor = getActor(req);
     recordAudit(db, {
@@ -259,12 +296,22 @@ router.post('/import', (req, res) => {
       action: 'import',
       actorId: actor.id,
       actorRole: actor.role,
-      // 审计如实记录「未建家长绑定」的行数，否则事后无从判断这批学员的家长能否收到通知
-      after: { created: okCount.length, failed: failed.length, unlinked: warnings.length },
+      // 审计如实记录「未建家长绑定」的行数，否则事后无从判断这批学员的家长能否收到通知；
+      // skipped 同样入账，避免「导入 100 条只建了 60 条」在审计里看不出原因
+      after: { created: okCount.length, failed: failed.length, unlinked: warnings.length, skipped: skipped.length },
     });
     // 保持 success / created / failed 结构不变（前端与既有调用方依赖），
-    // 新增 unlinked + warnings 如实说明哪些学员没建上家长绑定。
-    res.json(success({ success: okCount.length, failed, created: okCount.length, unlinked: warnings.length, warnings }));
+    // 新增 unlinked + warnings 如实说明哪些学员没建上家长绑定，
+    // 新增 skipped + skippedRows 如实说明哪些行因查重被跳过（不再静默少导入几条）。
+    res.json(success({
+      success: okCount.length,
+      failed,
+      created: okCount.length,
+      unlinked: warnings.length,
+      warnings,
+      skipped: skipped.length,
+      skippedRows: skipped,
+    }));
   } catch (err) {
     console.error('[students import]', err);
     res.status(500).json(safeFail('导入失败，请稍后重试'));
@@ -503,10 +550,40 @@ router.get('/home/data', (req, res) => {
     // 就能批量拉取全机构在训孩子的姓名。
     const isStaff = isStaffReq(req);
 
+    // 家长可见班级集合（新旧两类模型取并集：student_class / class_members）。
+    // 与 schedules.js 的 parentVisibleClassIds + applyClassVisibility 同一判定规则：
+    // 两类班级字段均为空的排期属「全员可见」，家长也可见。
+    let parentClassIds = [];
+    if (!isStaff && openid) {
+      const boundIds = db.prepare('SELECT DISTINCT student_id FROM parent_bindings WHERE parent_openid = ?')
+        .all(openid).map((r) => r.student_id).filter(Boolean);
+      if (boundIds.length) {
+        const ph = boundIds.map(() => '?').join(',');
+        parentClassIds = [
+          ...db.prepare(`SELECT DISTINCT class_id FROM student_class WHERE student_id IN (${ph})`).all(...boundIds).map((r) => r.class_id),
+          ...db.prepare(`SELECT DISTINCT class_id FROM class_members WHERE student_id IN (${ph})`).all(...boundIds).map((r) => r.class_id),
+        ];
+      }
+    }
+
     // 某一天的训练活动（今天 / 明天共用同一构建逻辑）
     const buildClassList = (dateStr) => {
       const list = [];
-      const schedules = db.prepare('SELECT * FROM schedules WHERE date = ? AND status = ? ORDER BY start_time ASC').all(dateStr, 'scheduled');
+      // 家长首页此前无差别拉取全机构当日排期并按班分组，家长因此能看到其他班级、
+      // 其他孩子的活动安排。现按「家长可见班级」限定；员工分支不受影响，仍看全量。
+      let where = 'WHERE date = ? AND status = ?';
+      const params = [dateStr, 'scheduled'];
+      if (!isStaff) {
+        where += " AND ((COALESCE(group_course_id,'') = '' AND COALESCE(class_id,'') = '')";
+        if (parentClassIds.length) {
+          const ph = parentClassIds.map(() => '?').join(',');
+          where += ` OR (COALESCE(group_course_id,'') != '' AND group_course_id IN (${ph}))`;
+          where += ` OR (COALESCE(class_id,'') != '' AND class_id IN (${ph}))`;
+          params.push(...parentClassIds, ...parentClassIds);
+        }
+        where += ')';
+      }
+      const schedules = db.prepare(`SELECT * FROM schedules ${where} ORDER BY start_time ASC`).all(...params);
       for (const s of schedules) {
         // 该活动报名状态（当前孩子是否已报名 + 报名孩子名单，供活动卡展示）
         const enr = db.prepare(`

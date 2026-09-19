@@ -492,8 +492,40 @@ router.get('/my', (req, res) => {
       ORDER BY s.date ASC, s.start_time ASC, e.created_at ASC
     `).all(openid);
 
+    // 角色隔离：家长端「我的排期」此前直接返回 s.*，把机构内部备注 remark（实际
+    // 可能写「家长投诉过」「欠费待催」）一并带出。虽限本人孩子已报名的场次，但不
+    // 构成暴露内部备注的理由。非工作人员改用白名单构造；price_per_class 保留
+    // （家长查看自己孩子所报课程的价格属合理需求），remark 等内部字段不再返回。
+    const isStaff = isStaffReq(req);
+    const list = schedules.map((s) => (isStaff ? s : {
+      id: s.id,
+      course_id: s.course_id,
+      course_name: s.course_name,
+      teacher_id: s.teacher_id,
+      teacher_name: s.teacher_name,
+      classroom_id: s.classroom_id,
+      classroom_name: s.classroom_name,
+      date: s.date,
+      start_time: s.start_time,
+      end_time: s.end_time,
+      duration_minutes: s.duration_minutes,
+      max_students: s.max_students,
+      enrolled_count: s.enrolled_count,
+      status: s.status,
+      group_course_id: s.group_course_id,
+      group_name: s.group_name,
+      class_id: s.class_id,
+      class_name: s.class_name,
+      allow_self_booking: s.allow_self_booking,
+      is_recursive: s.is_recursive,
+      price_per_class: s.price_per_class,
+      student_id: s.student_id,
+      student_name: s.student_name,
+      created_by: s.created_by,
+    }));
+
     // 统一返回 { list }，与小程序端各页面解析结构保持一致
-    res.json(success({ list: schedules, total: schedules.length }));
+    res.json(success({ list, total: list.length }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }
@@ -958,6 +990,16 @@ router.get('/:id', (req, res) => {
     // 已报名成员（仅当前场次，防止混入同课程其他场次报名）
     // 角色隔离：工作人员（管理员/教练）可见完整名单；家长仅可见自己绑定成员在该场次的报名与考勤
     const isStaff = isStaffReq(req);
+    // 角色隔离：家长只能访问「自己孩子所在班级」的排期。此前不校验归属，家长带上
+    // 自己的 token 传任意 schedule id 即可拉取任意排期详情（含机构内部备注与定价）。
+    // 可见性规则与 GET / 的 applyClassVisibility 同源，避免两处口径漂移。
+    if (!isStaff) {
+      const visParams = [req.params.id];
+      const visWhere = applyClassVisibility('WHERE id = ?', visParams, parentVisibleClassIds(req));
+      if (!db.prepare(`SELECT 1 FROM schedules ${visWhere}`).get(...visParams)) {
+        return res.status(403).json(safeFail('无排期查看权限'));
+      }
+    }
     let students;
     if (isStaff) {
       students = db.prepare(`
@@ -981,8 +1023,36 @@ router.get('/:id', (req, res) => {
       students = [];
     }
 
-    // 角色隔离：student_ids 为机构内部指定学员名单，非工作人员不得见（防按 id 枚举读他人名册）
-    const publicSchedule = isStaff ? s : { ...s, student_ids: '' };
+    // 角色隔离：非工作人员（家长）改用**白名单**构造返回对象。此前只是把
+    // student_ids 置空、其余整行原样返回，家长因此仍能读到 remark（内部备注，
+    // 可能写「家长投诉」「欠费」等）等机构内部字段。白名单在新增列时不会自动
+    // 泄露，比逐字段删除更安全。price_per_class 属家长合理可见范围，予以保留。
+    const parentSchedule = {
+      id: s.id,
+      course_id: s.course_id,
+      course_name: s.course_name,
+      teacher_id: s.teacher_id,
+      teacher_name: s.teacher_name,
+      classroom_id: s.classroom_id,
+      classroom_name: s.classroom_name,
+      date: s.date,
+      start_time: s.start_time,
+      end_time: s.end_time,
+      duration_minutes: s.duration_minutes,
+      max_students: s.max_students,
+      enrolled_count: s.enrolled_count,
+      status: s.status,
+      group_course_id: s.group_course_id,
+      group_name: s.group_name,
+      class_id: s.class_id,
+      class_name: s.class_name,
+      allow_self_booking: s.allow_self_booking,
+      is_recursive: s.is_recursive,
+      // price_per_class 保留：这是家长自己孩子实际报名的客单价，非机构成本/利润，
+      // 与 GET /my 口径一致（两处对家长都是「自己孩子已报名的课」）。
+      price_per_class: s.price_per_class,
+    };
+    const publicSchedule = isStaff ? s : parentSchedule;
     res.json(success({
       ...publicSchedule,
       is_registered: isRegistered,

@@ -706,24 +706,53 @@ router.post('/points/adjust', (req, res) => {
     const t = now();
     const beforeBalance = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId)?.balance || 0;
 
-    if (type === 'consume') {
-      const p = db.prepare('SELECT * FROM points WHERE student_id = ?').get(studentId);
-      if (!p || p.balance < amount) return res.json(fail('积分余额不足'));
-      db.prepare('UPDATE points SET total_consumed = total_consumed + ?, balance = balance - ?, updated_at = ? WHERE student_id = ?')
-        .run(amount, amount, t, studentId);
-    } else {
-      const existAcc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(studentId);
-      if (!existAcc) {
-        db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-          .run(generateId('PTS'), studentId, student.name, amount, amount, t);
-      } else {
-        db.prepare('UPDATE points SET total_earned = total_earned + ?, balance = balance + ?, updated_at = ? WHERE student_id = ?')
-          .run(amount, amount, t, studentId);
-      }
+    // 重复提交拦截：本接口没有幂等键，请求超时重试、或用户关掉弹窗再开一次重发，
+    // 都会把同一笔加减分再写一遍；而流水里两笔完全相同，事后无从分辨哪一笔是误发。
+    // 故在任何写入之前，按「操作者 + 学员 + 类型 + 金额 + 原因」查最近 60 秒内是否已有同样的调整，命中即拒绝。
+    // point_logs 无操作者列，操作者取自同一接口写入的 audit_log（entity='points' / action='adjust'）。
+    const DUP_WINDOW_MS = 60 * 1000;
+    const dupCutoff = t - DUP_WINDOW_MS;
+    const dupActor = getOpenId(req);
+    const duplicated = db.prepare(`
+      SELECT 1 FROM point_logs pl
+      WHERE pl.student_id = ? AND pl.type = ? AND pl.amount = ? AND IFNULL(pl.reason, '') = ?
+        AND pl.created_at >= ?
+        AND EXISTS (
+          SELECT 1 FROM audit_log al
+          WHERE al.entity = 'points' AND al.entity_id = pl.student_id
+            AND al.action = 'adjust' AND al.actor_id = ? AND al.created_at >= ?
+        )
+      LIMIT 1
+    `).get(studentId, type, amount, reason || '', dupCutoff, dupActor, dupCutoff);
+    if (duplicated) {
+      return res.json(fail('疑似重复提交：60 秒内已有一笔相同的手工积分调整，本次未执行；如确需再调整，请稍候或更改金额/原因'));
     }
-    const balance = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId)?.balance || 0;
-    db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(generateId('PLG'), studentId, type, amount, balance, reason, t);
+
+    // 余额变更与流水必须同生共死：若分两步，一旦流水写入失败就会出现「余额已扣/已加但无流水」，
+    // 事后既对不上账也无从追溯。返回响应的代码留在事务之外。
+    let balance = 0;
+    let insufficient = false;
+    db.transaction(() => {
+      if (type === 'consume') {
+        const p = db.prepare('SELECT * FROM points WHERE student_id = ?').get(studentId);
+        if (!p || p.balance < amount) { insufficient = true; return; }
+        db.prepare('UPDATE points SET total_consumed = total_consumed + ?, balance = balance - ?, updated_at = ? WHERE student_id = ?')
+          .run(amount, amount, t, studentId);
+      } else {
+        const existAcc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(studentId);
+        if (!existAcc) {
+          db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+            .run(generateId('PTS'), studentId, student.name, amount, amount, t);
+        } else {
+          db.prepare('UPDATE points SET total_earned = total_earned + ?, balance = balance + ?, updated_at = ? WHERE student_id = ?')
+            .run(amount, amount, t, studentId);
+        }
+      }
+      balance = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId)?.balance || 0;
+      db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(generateId('PLG'), studentId, type, amount, balance, reason, t);
+    })();
+    if (insufficient) return res.json(fail('积分余额不足'));
     // 积分可兑换属有价资产，手工调整必须可追责：记录操作者与调整前后余额
     recordAudit(db, {
       entity: 'points',
