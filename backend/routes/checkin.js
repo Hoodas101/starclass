@@ -13,6 +13,68 @@ const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, n
 const { requireStaffPerm } = require('../middleware/authz');
 // 每次课消耗的课时数（courses.consume_classes）：与手工扣课路径共用同一实现
 const { resolveConsumeClasses } = require('../utils/deduction');
+// 订单明细（orders.items）解析：全后端唯一实现，兼容「数组元素为 JSON 字符串」的双重编码形态。
+// 收入结转需要从订单明细里取行小计推导单位课时价，禁止在本文件自行 JSON.parse。
+const { parseItems, itemLineTotal, itemQuantity } = require('../utils/items');
+
+/**
+ * 读取积分规则 —— 签到积分的唯一取值入口（替代原先散落在两处的硬编码 10 / 5）。
+ *
+ * settings.points_rules 的真实形态是**规则数组**（backend/routes/settings.js:100
+ * 的 DEFAULT_POINTS_RULES 即其规范默认值）：
+ *   [{ name: '训练签到', enabled: true, points: 10, description: '…' }, …]
+ * 设置页写入的也是这一形态，因此按 `name` 关键字匹配：
+ *   · 「签到」档（名称含「签到」且不含「迟到」）→ present
+ *   · 「迟到」档（名称含「迟到」）            → late（真实默认集里没有该档 → 回退 5）
+ * 兼容形态：若某天该键被写成对象 `{ present, late }`，同样按字段读取。
+ *
+ * 兜底原则：键不存在 / JSON 畸形 / 字段非数字，一律回退默认档 present=10、late=5；
+ * 任何异常都不得让签到流程失败。不缓存 —— 管理员在设置页改动后下一次点名即生效。
+ *
+ * @returns {{present: number, late: number}} 非负整数积分
+ */
+function getPointsRule() {
+  const DEF = { present: 10, late: 5 };
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('points_rules');
+    if (!row || row.value === undefined || row.value === null || row.value === '') return DEF;
+    let parsed;
+    try { parsed = JSON.parse(row.value); } catch (e) { return DEF; }
+
+    // 非负整数兜底：非法值（NaN / 负数 / 非数字）回退默认档
+    const num = (v, dft) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : dft;
+    };
+
+    // 对象形态（宽松兼容，真实数据中未出现）
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { present: num(parsed.present, DEF.present), late: num(parsed.late, DEF.late) };
+    }
+    if (!Array.isArray(parsed)) return DEF;
+
+    const match = (kw, excludeKw) => parsed.find((r) => {
+      if (!r || typeof r !== 'object') return false;
+      const name = typeof r.name === 'string' ? r.name : '';
+      if (!name.includes(kw)) return false;
+      return !(excludeKw && name.includes(excludeKw));
+    });
+    // enabled === false 视为管理员停发该档积分（字段缺省视为启用）
+    const pointsOf = (rule, dft) => {
+      if (!rule) return dft;
+      if (rule.enabled === false) return 0;
+      return num(rule.points, dft);
+    };
+
+    return {
+      present: pointsOf(match('签到', '迟到'), DEF.present),
+      late: pointsOf(match('迟到'), DEF.late),
+    };
+  } catch (e) {
+    console.error('[checkin points rule]', e && e.stack ? e.stack : e);
+    return DEF;
+  }
+}
 
 /**
  * POST /api/checkin/teacher — 教师批量签到确认
@@ -93,6 +155,9 @@ router.post('/teacher', (req, res) => {
           `).run(back, back, t, ded.card_id);
           db.prepare('DELETE FROM deduction_logs WHERE id = ?').run(ded.id);
         }
+        // 课时已退回卡内 → 对应已结转的收入必须同步冲销，否则「清除签到」后
+        // 合同负债会被系统性低估（钱退回了卡里，收入却还挂在账上）。
+        revertRevenueRecognition(scheduleId, studentId);
         db.prepare('DELETE FROM attendances WHERE schedule_id = ? AND student_id = ?')
           .run(scheduleId, studentId);
         recordAudit(db, {
@@ -108,7 +173,9 @@ router.post('/teacher', (req, res) => {
         return;
       }
 
-      const pointsEarned = status === 'present' ? 10 : (status === 'late' ? 5 : 0);
+      // 积分取值改为读设置项 points_rules（原先硬编码 10 / 5，管理员在设置页改了不生效）
+      const pointsRule = getPointsRule();
+      const pointsEarned = status === 'present' ? pointsRule.present : (status === 'late' ? pointsRule.late : 0);
 
       // 单学员「upsert + 积分 + 扣课」逻辑：状态变更时的积分/课时补偿原子化，避免数据虚高或漏发。
       // 事务边界在整批一层（见下方 runBatch），此处不再单独开事务。
@@ -141,6 +208,8 @@ router.post('/teacher', (req, res) => {
               `).run(back, back, now(), ded.card_id);
               db.prepare('DELETE FROM deduction_logs WHERE id = ?').run(ded.id);
             }
+            // 同上：课时退回 → 同步冲销已结转收入，保持结转台账与课时台账一致
+            revertRevenueRecognition(scheduleId, studentId);
           } else if (!oldIsEarn && newIsEarn) {
             // 旧=非签到 → 新=签到：发放新积分，并镜像首次签到的扣课逻辑（幂等不变）
             if (pointsEarned > 0) {
@@ -279,6 +348,11 @@ function applyArrivalDeduction(studentId, scheduleId, t) {
     INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
     VALUES (?, ?, ?, ?)
   `).run(scheduleId, studentId, card.id, t);
+
+  // 扣课成功 → 在同一事务内追加一条收入结转（合同负债 → 收入）。
+  // 位置紧贴 deduction_logs 写入之后：上面任一 early return（无卡 / 补课调课 / 已扣过）
+  // 都代表「本次没有真实消课」，此时不得结转，否则会凭空虚增已确认收入。
+  recordRevenueRecognition({ card, scheduleId, classes: per, t });
 }
 
 /**
@@ -330,7 +404,8 @@ router.post('/parent', (req, res) => {
       }
     }
 
-    const pointsEarned = 10;
+    // 家长扫码签到 = 「签到」档（present）；原先硬编码 10，管理员在设置页改了不生效
+    const pointsEarned = getPointsRule().present;
     const t = now();
     // Attendance + points + class deduction in one immediate transaction:
     // the existence check above and the INSERT below are a check-then-act pair,
@@ -640,6 +715,119 @@ function isUniqueViolation(e) {
   return code === 'SQLITE_CONSTRAINT_UNIQUE'
     || code === 'SQLITE_CONSTRAINT_PRIMARYKEY'
     || /UNIQUE constraint failed/i.test(msg);
+}
+
+// ============ 收入结转（合同负债）辅助函数 ============
+
+/**
+ * revenue_recognitions 表是否存在（迁移 017 未执行时为 false）。
+ * 新增的是旁路台账：老库尚未迁移时只跳过结转，绝不让既有签到流程报错。
+ * 不做结果缓存 —— 建表后无需重启即生效，且这是一次极廉价的 sqlite_master 点查
+ * （只在「扣课成功」这一低频分支上发生）。
+ */
+function hasRevenueRecognitionTable() {
+  try {
+    return !!db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'revenue_recognitions'"
+    ).get();
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * 从卡的**关联订单**推导单位课时价（元/课时）。
+ * 关联关系取 member_cards.order_id —— 由 orders.js / membership.js 建卡时写入，
+ * 是唯一能确定「这张卡到底是按哪笔钱买的」的凭据。
+ * 刻意**不**跨订单模糊匹配（例如按 student_id + card_type_id 去别的订单里找）：
+ * 同一学员可能以不同价格买过同类卡，那样推导出的单价是猜的。
+ *
+ * @returns {{unit:number, lineTotal:number, totalClasses:number, orderId:string}|null}
+ *          null 表示无法可靠推导 —— 调用方必须写 amount=0 / basis='unresolved'
+ */
+function deriveUnitPrice(card) {
+  if (!card || !card.order_id) return null;
+  const order = db.prepare('SELECT id, items, total_amount, payable_amount FROM orders WHERE id = ?').get(card.order_id);
+  if (!order) return null;
+  // 整单折扣比例（实付 / 标价）。与退卡（membership.js）同一口径：
+  // 结转基数是**实际收到的钱**，不是标价。若按标价结转，折扣单的累计结转额
+  // 会超过订单实付，合同负债（已收未结转）因此出现负数。
+  const orderTotal = Number(order.total_amount) || 0;
+  const orderPayable = Number(order.payable_amount) || 0;
+  const discountRatio = (orderTotal > 0 && orderPayable > 0 && orderPayable < orderTotal)
+    ? orderPayable / orderTotal : 1;
+  // 必须走 utils/items：双重编码（数组元素本身是 JSON 字符串）时直接取字段恒为 undefined
+  const items = parseItems(order.items);
+  if (!items.length) return null;
+  // 精确匹配本卡商品：优先 itemId（orders.js 写入字段），历史脏数据缺 itemId 时按卡类型名匹配。
+  // 不退回 items[0] —— 多明细订单会把别的商品价格算到本卡头上。
+  const item = items.find((i) => i.itemId && String(i.itemId) === String(card.card_type_id))
+    || items.find((i) => i.itemName && card.card_type_name && i.itemName === card.card_type_name);
+  if (!item) return null;
+  const rawLine = itemLineTotal(item);
+  const lineTotal = discountRatio < 1 ? Math.round(rawLine * discountRatio) : rawLine;
+  // 总课时数优先取卡上登记值（售出时的真实课时数），取不到才回退订单项数量
+  const totalClasses = Number(card.total_classes) > 0 ? Number(card.total_classes) : itemQuantity(item);
+  if (!(lineTotal > 0) || !(totalClasses > 0)) return null;
+  return { unit: lineTotal / totalClasses, lineTotal, totalClasses, orderId: order.id };
+}
+
+/**
+ * 写一条收入结转记录。**必须由调用方置于「扣课成功」的同一事务内**，
+ * 使课时台账（member_cards / deduction_logs）与结转台账原子一致。
+ * 本函数不自开事务 —— 内层再开事务会与外层 immediate 事务嵌套报错。
+ *
+ * 金额口径：amount = round(单位课时价 × 本次结转课时数)，单位为**整数元**。
+ * 无法可靠推导单价时写 amount = 0 且 basis = 'unresolved'（只留痕、不计金额），
+ * **绝不猜测金额**。
+ *
+ * 错误处理遵循本文件既有约定（见 applyArrivalDeduction / isUniqueViolation 注释）：
+ * 只对「表不存在」做优雅降级，其余真实故障一律向上抛出、让整批回滚，
+ * 避免出现「课时扣了、结转却没记」的静默账目漂移。
+ */
+function recordRevenueRecognition({ card, scheduleId, classes, t }) {
+  if (!hasRevenueRecognitionTable()) return;
+  const schedule = db.prepare('SELECT course_id, course_name FROM schedules WHERE id = ?').get(scheduleId);
+  // 考勤行在上方已写入（家长/教师两条路径均是先 INSERT 考勤再扣课），此处回查以填充 attendance_id
+  const att = db.prepare('SELECT id FROM attendances WHERE schedule_id = ? AND student_id = ?')
+    .get(scheduleId, card.student_id);
+
+  const derived = deriveUnitPrice(card);
+  let amount = 0;
+  let basis = 'unresolved';
+  if (derived) {
+    amount = Math.round(derived.unit * classes);
+    basis = `unit=${derived.unit}元/课时(行小计${derived.lineTotal}/总课时${derived.totalClasses}); order=${derived.orderId}; classes=${classes}`;
+  }
+
+  db.prepare(`
+    INSERT INTO revenue_recognitions (id, order_id, student_id, schedule_id, attendance_id,
+      course_id, course_name, classes, amount, recognized_at, basis, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    generateId('rr_'),
+    derived ? derived.orderId : (card.order_id || null),
+    card.student_id,
+    scheduleId,
+    (att && att.id) || null,
+    (schedule && schedule.course_id) || null,
+    (schedule && schedule.course_name) || null,
+    classes,
+    amount,
+    t,
+    basis,
+    t
+  );
+}
+
+/**
+ * 冲销某排期+学员的结转记录（课时回滚时调用：清除签到、签到改为缺席/请假）。
+ * DELETE 天然幂等，重复调用安全。表不存在时静默跳过。
+ */
+function revertRevenueRecognition(scheduleId, studentId) {
+  if (!hasRevenueRecognitionTable()) return;
+  db.prepare('DELETE FROM revenue_recognitions WHERE schedule_id = ? AND student_id = ?')
+    .run(scheduleId, studentId);
 }
 
 module.exports = router;

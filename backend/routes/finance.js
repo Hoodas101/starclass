@@ -104,6 +104,37 @@ router.get('/summary', (req, res) => {
     const netRevenue = (paidOrders.total_revenue || 0) - (refunded.refund_amount || 0);
     const netProfit = netRevenue - (coachPay.total_pay || 0);
 
+    // ── 新增：权责发生制口径（**只增不改**，上方收付实现制字段的取值与语义原样保留）──
+    // 背景：教培为预收费行业，收款当天把整笔预收款确认为收入不符合经济实质 ——
+    // 只有学员实际消课的部分才是收入，未消课部分是机构的合同负债。
+    //   · recognizedRevenue：区间内已消课结转确认的收入（按 recognized_at 落区间）
+    //   · contractLiability：全期「已收未结转」= 全期已收净额 − 全期累计已结转。
+    //     刻意**不加日期条件** —— 负债是时点存量（截至今日还欠多少课时），
+    //     用区间口径会算成「区间内新增负债」，语义错误。
+    // 容错：revenue_recognitions 表不存在（迁移 017 未执行）时整体降级为 0，
+    // 不让本接口 500；此时 contractLiability 一并置 0，避免「已收全额都算负债」的误导值。
+    let recognizedRevenue = 0;
+    let contractLiability = 0;
+    try {
+      recognizedRevenue = db.prepare(
+        'SELECT COALESCE(SUM(amount), 0) AS v FROM revenue_recognitions WHERE recognized_at >= ? AND recognized_at <= ?'
+      ).get(start, end).v || 0;
+      const recognizedAllTime = db.prepare(
+        'SELECT COALESCE(SUM(amount), 0) AS v FROM revenue_recognitions'
+      ).get().v || 0;
+      // 与 revenue.gross 同一行集合（含已全额退款订单，其退款在同口径内冲减），保证两者可比
+      const collectedAllTime = db.prepare(`
+        SELECT COALESCE(SUM(payable_amount - refunded_amount), 0) AS v
+        FROM orders
+        WHERE status IN ('paid', 'refunded') AND order_type != 'refund'
+      `).get().v || 0;
+      contractLiability = collectedAllTime - recognizedAllTime;
+    } catch (e) {
+      recognizedRevenue = 0;
+      contractLiability = 0;
+      console.error('[finance summary recognition]', e && e.message);
+    }
+
     res.json(success({
       period: { start, end },
       revenue: {
@@ -132,6 +163,11 @@ router.get('/summary', (req, res) => {
         refunded: t.refunded,
         net: t.revenue - t.refunded,
       })),
+      // 以下为**新增**的权责发生制口径字段，与上方收付实现制字段并存、互不影响。
+      // 老前端不读这些字段即完全无感；新前端可据此展示「已确认收入 / 合同负债」。
+      recognizedRevenue,
+      contractLiability,
+      note: '新增权责发生制口径：recognizedRevenue 为区间内已消课结转确认的收入，contractLiability 为全期「已收未消课」的合同负债（全期已收净额 − 全期累计已结转）。原有 revenue.gross/net、profit、byType 仍为收付实现制口径（按订单 paid_at 全额确认），两套口径并存、互不影响。',
     }));
   } catch (err) {
     console.error('[finance summary]', err);
