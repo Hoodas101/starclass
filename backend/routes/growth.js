@@ -8,6 +8,8 @@ const db = require('../db');
 const { generateId, success, fail, safeFail, now, parsePagination, hasPerm, getReqUser, escapeLike, isAdminReq, recordAudit, getActor, getOpenId } = require('../utils');
 const leadSuggestions = require('../utils/lead-suggestions');
 const { getChurnRules } = require('../utils/churn');
+// 建档查重（与 POST /api/students 同一判据）
+const { findDuplicateStudents } = require('../utils/duplicate');
 
 // 增长中心权限：管理员或拥有「growth」权限的员工（销售等）
 function canGrowth(req) {
@@ -205,7 +207,7 @@ router.post('/leads/:id/convert', (req, res) => {
     if (!row) return res.json(fail('线索不存在'));
     if (row.status === 'converted') return res.json(fail('该线索已成交，请勿重复转化'));
     const t = now();
-    const { rewardPoints, rewardReason = '线索成交奖励', createStudent, createOrder } = req.body || {};
+    const { rewardPoints, rewardReason = '线索成交奖励', createStudent, createOrder, confirmDuplicate, linkStudentId } = req.body || {};
     // 状态流转、建成员、建订单、发奖励同事务：此前分两步，发奖失败时线索已标记成交，
     // 再点会命中「已成交」拒绝，奖励永远补不上（且读-改-写积分账户存在竞态）。
     const result = db.transaction(() => {
@@ -228,6 +230,29 @@ router.post('/leads/:id/convert', (req, res) => {
           // 故按「缺少必填信息」跳过，不写占位手机号（字段清单与 students.js 创建成员一致）。
           out.studentSkipped = '线索缺少有效手机号，未创建成员';
         } else {
+          // 建档查重：线索转成交是最容易重复建档的入口 —— 销售往往不知道这孩子是否已有档案。
+          // 判据与 POST /api/students 一致（家长手机号相同 = 强重复）。
+          //
+          // 注意「一个家长手机号绑定多个孩子」（兄弟姐妹）是真实场景，
+          // 因此命中多个候选时**不能替用户决定**，必须回传候选让其指定。
+          // confirmDuplicate：操作者已看到候选并坚持新建（如双胞胎共用同一家长手机号）
+          const dup = confirmDuplicate ? { list: [], hasStrong: false } : findDuplicateStudents({ name, phone });
+          const strong = dup.list.filter((x) => x.strength === 'strong');
+          let targetId = String(linkStudentId || '').trim();
+          // 只允许链接到本次命中的候选，避免传入任意 ID 产生越权关联
+          if (targetId && !strong.some((x) => x.id === targetId)) targetId = '';
+          // 唯一命中：直接复用已有档案，从源头消掉重复录入（而不是建完再让用户去合并）
+          if (!targetId && strong.length === 1) targetId = strong[0].id;
+
+          if (targetId) {
+            db.prepare('UPDATE leads SET student_id = ?, updated_at = ? WHERE id = ?').run(targetId, t, req.params.id);
+            out.studentId = targetId;
+            out.studentLinked = true; // 复用已有档案（未新建）
+            out.duplicate = dup.list;
+          } else if (strong.length > 1) {
+            out.studentSkipped = '该手机号关联了多名成员，请指定要关联的成员';
+            out.duplicate = dup.list;
+          } else {
           const studentId = generateId('stu_');
           db.prepare(`
             INSERT INTO students (id, name, gender, birthday, school, grade, hobby, level, height, weight, bmi, remark, status, join_date, member_no, created_at, updated_at)
@@ -257,7 +282,9 @@ router.post('/leads/:id/convert', (req, res) => {
           }
 
           db.prepare('UPDATE leads SET student_id = ?, updated_at = ? WHERE id = ?').run(studentId, t, req.params.id);
-          out.studentId = studentId;
+            out.studentId = studentId;
+            out.studentCreated = true;
+          } // 无重复（或已确认要新建）→ 建立新档案
         }
       }
 
@@ -328,7 +355,12 @@ router.post('/leads/:id/convert', (req, res) => {
     // 收到的响应与改造前逐字节一致，便于灰度期间前端/测试做严格比对。
     if (createStudent === true || createOrder === true) {
       if (result.studentId) payload.studentId = result.studentId;
+      // 复用已有档案（未新建）——前端据此提示"已关联到已有成员"
+      if (result.studentLinked) payload.studentLinked = true;
+      if (result.studentCreated) payload.studentCreated = true;
     }
+    // 疑似重复档案候选：唯一命中时已自动复用；多个命中（如兄弟姐妹共用家长手机号）需人工指定
+    if (result.duplicate && result.duplicate.length) payload.duplicate = result.duplicate;
     if (result.studentSkipped) payload.studentSkipped = result.studentSkipped;
     if (result.orderId) payload.orderId = result.orderId;
     if (result.orderSkipped) payload.orderSkipped = result.orderSkipped;

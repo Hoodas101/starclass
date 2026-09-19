@@ -1037,7 +1037,7 @@ const submitAdd = async () => {
         loadStudentDetail(selectedStudent.value.id)
       }
     } else {
-      await addStudent({
+      const payload = {
         name: addForm.name,
         gender: addForm.gender,
         birthday: addForm.birthday,
@@ -1050,7 +1050,26 @@ const submitAdd = async () => {
         parentName: addForm.parentName,
         phone: addForm.phone,
         remark: addForm.remark
-      })
+      }
+      const res = await addStudent(payload)
+      // 查重：手机号已存在时不静默建档。同一孩子被录两遍会让课时/积分/订单/考勤全裂成两份，
+      // 且两边都可能已产生消费记录，几乎无法自动合并，只能人工核对返工。
+      // 因此先让操作者确认，确认后才真正新建。
+      if (res && res.duplicate && Array.isArray(res.candidates) && res.candidates.length) {
+        const strong = res.candidates.filter((c) => c.strength === 'strong')
+        const main = strong[0] || res.candidates[0]
+        const more = res.candidates.length > 1 ? `（另有 ${res.candidates.length - 1} 条疑似）` : ''
+        try {
+          await ElMessageBox.confirm(
+            `已存在「${main.name}」${main.member_no ? '（' + main.member_no + '）' : ''}使用同一家长手机号${more}，请确认是否为不同的人。`,
+            '疑似重复档案',
+            { confirmButtonText: '确认是不同的人，仍然新建', cancelButtonText: '取消', type: 'warning' }
+          )
+        } catch (e) {
+          return // 取消：保持弹窗打开，便于操作者修改信息或改用已有档案
+        }
+        await addStudent({ ...payload, confirmDuplicate: true })
+      }
       ElMessage.success('成员添加成功')
     }
     addDialogVisible.value = false

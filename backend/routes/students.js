@@ -17,6 +17,8 @@ const { parseItems } = require('../utils/items');
 // 流失阈值唯一来源（settings.churn_rules）——与 followups / growth 同源，
 // 避免同一学员在不同页面被判定为「流失」的时间不一致
 const { getChurnRules } = require('../utils/churn');
+// 建档查重（手机号相同 = 强重复，阻止同一人被录成两份）
+const { findDuplicateStudents } = require('../utils/duplicate');
 
 // member_no / archived / qr_exp 列已收编至 migrations/011。
 // 会员编号回填：只补空号（从现有最大编号继续），绝不重排已有编号——
@@ -68,8 +70,18 @@ function canViewStudents(req) {
 router.post('/', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可新增成员'));
-    const { name, gender, birthday, school, grade, hobby, remark, level, height, weight, bmi, phone, parentName } = req.body;
+    const { name, gender, birthday, school, grade, hobby, remark, level, height, weight, bmi, phone, parentName, confirmDuplicate } = req.body;
     if (!name) return res.json(fail('成员姓名不能为空'));
+
+    // 建档查重：同一孩子被录两遍会让课时/积分/订单/考勤全部裂成两份且难以合并。
+    // 手机号相同视为强重复 → 不直接建档，回传候选让操作者确认（confirmDuplicate 表示已确认）。
+    // 仅同名不拦截（小机构同名常见），但在候选里一并给出供人工判断。
+    if (!confirmDuplicate) {
+      const dup = findDuplicateStudents({ name, phone });
+      if (dup.hasStrong) {
+        return res.json(success({ duplicate: true, candidates: dup.list }));
+      }
+    }
 
     const id = generateId('stu_');
     // 新建学员即分配会员编号（避免留空：空号曾触发整体重排导致全员编号漂移）

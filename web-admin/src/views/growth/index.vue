@@ -629,14 +629,50 @@ const removeLead = async (row) => {
   loadLeads(); loadFunnel()
 }
 
+// 转成交：可选择一并建档 + 生成待收银订单。
+// 此前销售点完「成交」还要去成员页把同一个孩子重录一遍（姓名/手机号/家长），
+// 是典型的重复录入；这里让一次点击把线索→成员→订单串起来。
+const runConvert = async (id, leadName, hasStudent) => {
+  let createStudent = false
+  if (!hasStudent) {
+    try {
+      await ElMessageBox.confirm(
+        `是否同时为「${leadName}」创建成员档案并生成待收银订单？\n后续只需在收银台补全卡种与金额。若该线索的手机号已存在成员，系统会自动关联到已有档案而不会重复新建。`,
+        '一并建档',
+        {
+          confirmButtonText: '建档并生成订单',
+          cancelButtonText: '仅标记成交',
+          type: 'warning',
+        }
+      )
+      createStudent = true
+    } catch (e) {
+      createStudent = false // 取消 / 关闭 → 仅标记成交
+    }
+  }
+  const res = await convertLead(id, { createStudent, createOrder: createStudent })
+  let msg = '已标记成交'
+  if (res && res.studentLinked) msg = '已标记成交，并关联到已有成员档案（未重复新建）'
+  else if (res && res.studentCreated) msg = '已标记成交，已创建成员档案与待收银订单'
+  else if (res && res.studentSkipped) msg = `已标记成交；${res.studentSkipped}`
+  ElMessage.success(msg)
+  // 一个家长手机号可能绑定多个孩子（兄弟姐妹），此时无法自动判断应关联谁
+  if (res && res.duplicate && res.duplicate.length > 1) {
+    ElMessageBox.alert(
+      `该线索的手机号关联了 ${res.duplicate.length} 名成员，未能自动判断应关联哪一个。请到成员页手动关联，或改用能唯一标识该成员的手机号后重试。`,
+      '需人工确认关联成员',
+      { type: 'warning' }
+    )
+  }
+}
+
 const handleConvert = async (row) => {
   try {
     await ElMessageBox.confirm(`确认将「${row.name}」标记为已成交？`, '转成交', { type: 'success' })
   } catch (e) {
     return // 用户取消
   }
-  await convertLead(row.id, {})
-  ElMessage.success('已标记成交')
+  await runConvert(row.id, row.name, !!row.student_id)
   loadLeads(); loadFunnel()
 }
 
@@ -646,8 +682,7 @@ const convertFromDialog = async () => {
   } catch (e) {
     return // 用户取消
   }
-  await convertLead(leadForm.id, {})
-  ElMessage.success('已标记成交')
+  await runConvert(leadForm.id, leadForm.name, !!leadForm.student_id)
   leadDialogOpen.value = false
   loadLeads(); loadFunnel()
 }
