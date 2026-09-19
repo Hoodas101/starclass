@@ -14,7 +14,7 @@ const crypto = require('crypto');
 const db = require('../db');
 // attendanceRate 别名 calcAttendanceRate：本文件 /:id/stats 内已有同名局部变量，
 // 直接解构会同名遮蔽。到场率口径全站唯一，必须复用而非另写公式。
-const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, escapeLike, now, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, isAdminReq, JWT_SECRET: QR_SECRET, attendanceRate: calcAttendanceRate } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, escapeLike, now, formatDate, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, isAdminReq, JWT_SECRET: QR_SECRET, attendanceRate: calcAttendanceRate } = require('../utils');
 const { parseItems } = require('../utils/items');
 // 流失阈值唯一来源（settings.churn_rules）——与 followups / growth 同源，
 // 避免同一学员在不同页面被判定为「流失」的时间不一致
@@ -912,11 +912,53 @@ router.delete('/:id', requireAuth, (req, res) => {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可删除成员'));
 
     // 归档（软删除）并解绑家长绑定：避免家长端仍可见已退费成员，与课程删除级联一致
+    const today = formatDate(Date.now());
+    let releasedEnrolls = 0;
     const tx = db.transaction(() => {
       // archived 必须一并置 1：学员列表默认只显示 archived = 0，只改 status 的话
       // 已删学员仍留在列表里（且因会员卡仍有效而被派生状态覆盖成「在读」），删除等于没删。
       db.prepare("UPDATE students SET status = 'refunded', archived = 1, updated_at = ? WHERE id = ?").run(now(), id);
       db.prepare('DELETE FROM parent_bindings WHERE student_id = ?').run(id);
+
+      // 作废待补课权益：否则自动排补课时会把一个已删除学员塞进未来的场次。
+      db.prepare("UPDATE makeup_records SET status = 'cancelled', updated_at = ? WHERE student_id = ? AND status = 'pending'")
+        .run(now(), id);
+
+      // 释放未来场次的报名名额。
+      // 此前删除学员只置 archived、不清理 enrollments，于是他继续占着未来场次的名额：
+      // schedules.js:887 的容量闸（enrolled_count >= max_students）会据此误判「已满」，
+      // 其他孩子报不进来；教练看到的应到名单里却是一个已不在学员列表中的人。
+      // 与「取消报名」同源口径：删 enrollments 行 + 递减 enrolled_count，**不涉及课时回滚**
+      //（课时在签到 / 请假审批时扣，报名本身不占课时）。
+      // 只清理**尚未发生**的场次：已产生 attendance 的说明课已经上了，属历史事实，
+      // 追溯删除会让往期统计与教练课时费被改写 —— 那才是另一种错。
+      const future = db.prepare(`
+        SELECT e.id AS enroll_id, e.schedule_id
+        FROM enrollments e
+        JOIN schedules sc ON sc.id = e.schedule_id
+        WHERE e.student_id = ? AND e.status = 'active'
+          AND sc.status = 'scheduled' AND sc.date >= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM attendances a
+            WHERE a.schedule_id = e.schedule_id AND a.student_id = e.student_id
+          )
+      `).all(id, today);
+
+      const bySchedule = new Map();
+      for (const r of future) {
+        if (!bySchedule.has(r.schedule_id)) bySchedule.set(r.schedule_id, []);
+        bySchedule.get(r.schedule_id).push(r.enroll_id);
+      }
+      for (const [scheduleId, enrollIds] of bySchedule) {
+        const del = db.prepare(
+          `DELETE FROM enrollments WHERE id IN (${enrollIds.map(() => '?').join(',')})`
+        ).run(...enrollIds);
+        if (del.changes > 0) {
+          db.prepare('UPDATE schedules SET enrolled_count = MAX(0, enrolled_count - ?), updated_at = ? WHERE id = ?')
+            .run(del.changes, now(), scheduleId);
+          releasedEnrolls += del.changes;
+        }
+      }
     });
     tx();
     // 软删除（退费归档）并解绑家长，需留痕
@@ -927,7 +969,7 @@ router.delete('/:id', requireAuth, (req, res) => {
       action: 'delete',
       actorId: actor.id,
       actorRole: actor.role,
-      after: { status: 'refunded', parents_unbound: true },
+      after: { status: 'refunded', parents_unbound: true, future_enrolls_released: releasedEnrolls },
     });
     res.json(success({ id, status: 'refunded' }));
   } catch (err) {

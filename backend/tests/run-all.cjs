@@ -64,6 +64,7 @@ const SUITES = [
   ['phone-login-mcp-regression.cjs', '默认口令强制改密（微信快捷登录不得绕过 mcp 闸门）'],
   ['attendance-trend-consistency-regression.cjs', '出勤口径一致性（趋势「应到」=== 汇总「应到次数」）'],
   ['leave-deduction-visibility-regression.cjs', '请假扣课可见（会员卡明细并入 leave_deduction_logs，排除 mode=days）'],
+  ['student-delete-release-regression.cjs', '删除学员释放未来场次名额（容量闸 + 历史场次不追溯）'],
   ['batch7-security-guards.test.cjs', 'S3-S11 安全守卫（导入黑名单/课表可见性/广播已读/口令/jwt算法/绑卡频控）'],
   ['full-system.test.js', '全功能系统'],
 ];
