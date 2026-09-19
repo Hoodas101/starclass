@@ -75,52 +75,85 @@ function settleOrder(order, paidAt) {
 /**
  * 仅在订单已标记为 paid 之后调用：根据订单明细创建会员卡 / 发放购买积分。
  * 不做订单状态标记与支付流水写入，避免被重复调用（如支付回调路径已写过流水时）。
+ *
+ * 幂等策略：
+ *   · 建卡按「订单 + 卡种」计数补齐（wanted − issued），重复调用不再多发。
+ *     一张订单合法地对应多张卡（多卡种 / 同卡种多份），故绝不能对 order_id 加唯一约束。
+ *   · 积分按 reference_id = 'order_<订单>_<商品>' 去重。
+ * 计数、建卡与发积分同处一个事务，避免并发下重复发放。
  */
 function grantOrderBenefits(order, paidAt) {
   const currentTime = paidAt || now();
   const items = parseItems(order.items);
   // 解析为空但订单确有 items 原文 → 极可能是坏数据/双重编码异常，静默跳过会漏发会员卡与积分
-  if (order.items && parseItems(order.items).length === 0) console.error('grantOrderBenefits: 订单 items 解析为空，可能漏发权益', order && order.id);
-  for (const item of items) {
-    const productId = item.itemId;
-    if (!productId) continue;
-    const product = db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(productId);
-    if (!product) continue;
+  if (order.items && items.length === 0) console.error('grantOrderBenefits: 订单 items 解析为空，可能漏发权益', order && order.id);
 
-    const isCard = (product.product_type || 'membership') === 'membership' && product.billing_mode !== 'goods';
-
-    if (isCard && (item.itemType === 'membershipCard' || order.order_type === 'membership')) {
-      const cardId = generateId('CARD');
-      const expiresAt = calcCardExpiresAt(currentTime, product.valid_days, product.billing_mode || 'time');
-      db.prepare(`
-        INSERT INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name,
-          total_classes, remaining_classes, activated_at, expires_at, status, order_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
-      `).run(cardId, product.id, product.name, product.billing_mode || 'time', order.student_id, order.student_name,
-        product.total_classes, product.total_classes, currentTime, expiresAt, order.id, currentTime, currentTime);
+  // 建卡与发积分整体事务化：better-sqlite3 为同步 API，单机单进程下事务天然串行，
+  // 使「统计已发张数 + 插入」成为原子步骤，避免并发请求都读到 issued=0 而各发一套。
+  db.transaction(() => {
+    // 预扫：统计本单每个卡种「应当发卡」的明细条数，作为期望张数 wanted。
+    // 一单可合法包含同一卡种的多条明细（如同一卡种买两份），故按条数累计而非按卡种去重。
+    const wantedByProduct = new Map();
+    for (const item of items) {
+      const productId = item.itemId;
+      if (!productId) continue;
+      const product = db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(productId);
+      if (!product) continue;
+      const isCard = (product.product_type || 'membership') === 'membership' && product.billing_mode !== 'goods';
+      if (!isCard) continue;
+      if (!(item.itemType === 'membershipCard' || order.order_type === 'membership')) continue;
+      wantedByProduct.set(product.id, (wantedByProduct.get(product.id) || 0) + 1);
     }
 
-    // 购买产品（会员卡或实物商品）赠送积分（幂等：按 订单+商品 去重；受积分规则开关控制）
-    const reward = (product.points_reward || 0);
-    if (reward > 0 && isPurchasePointsEnabled()) {
-      const refId = 'order_' + order.id + '_' + product.id;
-      const exist = db.prepare('SELECT id FROM point_logs WHERE reference_id = ?').get(refId);
-      if (!exist) {
-        const student = db.prepare('SELECT name FROM students WHERE id = ?').get(order.student_id);
-        const acc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(order.student_id);
-        if (!acc && student) {
-          db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-            .run(generateId('PTS'), order.student_id, student.name, reward, reward, currentTime);
-        } else {
-          db.prepare('UPDATE points SET total_earned = total_earned + ?, balance = balance + ?, updated_at = ? WHERE student_id = ?')
-            .run(reward, reward, currentTime, order.student_id);
+    for (const item of items) {
+      const productId = item.itemId;
+      if (!productId) continue;
+      const product = db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(productId);
+      if (!product) continue;
+
+      const isCard = (product.product_type || 'membership') === 'membership' && product.billing_mode !== 'goods';
+
+      if (isCard && (item.itemType === 'membershipCard' || order.order_type === 'membership')) {
+        // 幂等：只补发缺口 wanted − issued（≤0 则一张都不发）。
+        // issued 统计**不按 status 过滤**：已退卡/已取消同样算「发过」，不能自动补发。
+        // 注意：SQL 注释必须用 --，SQLite 不认 //。
+        const wanted = wantedByProduct.get(product.id) || 0;
+        const issued = db.prepare('SELECT COUNT(*) AS c FROM member_cards WHERE order_id = ? AND card_type_id = ?')
+          .get(order.id, product.id).c;
+        for (let n = issued; n < wanted; n++) {
+          const cardId = generateId('CARD');
+          const expiresAt = calcCardExpiresAt(currentTime, product.valid_days, product.billing_mode || 'time');
+          db.prepare(`
+            INSERT INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name,
+              total_classes, remaining_classes, activated_at, expires_at, status, order_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+          `).run(cardId, product.id, product.name, product.billing_mode || 'time', order.student_id, order.student_name,
+            product.total_classes, product.total_classes, currentTime, expiresAt, order.id, currentTime, currentTime);
         }
-        const bal = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(order.student_id)?.balance || reward;
-        db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, description, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-          .run(generateId('PLG'), order.student_id, 'earn', reward, bal, '购买「' + product.name + '」赠送积分', refId, '购买产品赠送', currentTime);
+      }
+
+      // 购买产品（会员卡或实物商品）赠送积分（幂等：按 订单+商品 去重；受积分规则开关控制）
+      const reward = (product.points_reward || 0);
+      if (reward > 0 && isPurchasePointsEnabled()) {
+        const refId = 'order_' + order.id + '_' + product.id;
+        const exist = db.prepare('SELECT id FROM point_logs WHERE reference_id = ?').get(refId);
+        if (!exist) {
+          const student = db.prepare('SELECT name FROM students WHERE id = ?').get(order.student_id);
+          const acc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(order.student_id);
+          if (!acc && student) {
+            db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+              .run(generateId('PTS'), order.student_id, student.name, reward, reward, currentTime);
+          } else {
+            db.prepare('UPDATE points SET total_earned = total_earned + ?, balance = balance + ?, updated_at = ? WHERE student_id = ?')
+              .run(reward, reward, currentTime, order.student_id);
+          }
+          const bal = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(order.student_id)?.balance || reward;
+          db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, description, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            .run(generateId('PLG'), order.student_id, 'earn', reward, bal, '购买「' + product.name + '」赠送积分', refId, '购买产品赠送', currentTime);
+        }
       }
     }
-  }
+  })();
 }
 
 /**

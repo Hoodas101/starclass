@@ -132,15 +132,24 @@ router.post('/teacher', (req, res) => {
           const acc = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
           if (acc) {
             const back = existing.points_earned;
-            const newBal = Math.max(0, (acc.balance || 0) - back);
+            // 记账必须按「实际生效量」而非「请求扣除量」：
+            // 余额只有 3 而 back 是 10 时，余额只能扣到 0（实扣 3），流水就必须记 -3。
+            // 旧实现把请求量 back 写进流水、余额却截到 0，实扣 3 却记 -10，
+            // 从此 SUM(point_logs.amount) 与 points.balance 永久对不上且无自愈
+            // ——积分可兑换、属有价资产，兑换时即账实不符。
+            // 业务语义不变：余额不足时仍是「扣到 0 为止、不报失败」。
+            const actual = Math.min(back, acc.balance || 0);
+            const newBal = (acc.balance || 0) - actual; // actual ≤ balance，结果自然 ≥ 0
+            // total_earned 是累计获得口径，同样按实际生效量扣；MAX(0, …) 仅防御历史脏数据
+            // （正常情况下 total_earned ≥ balance ≥ actual，不会触发截断）。
             db.prepare(`
               UPDATE points SET total_earned = MAX(0, total_earned - ?), balance = ?, updated_at = ?
               WHERE student_id = ?
-            `).run(back, newBal, t, studentId);
+            `).run(actual, newBal, t, studentId);
             db.prepare(`
               INSERT INTO point_logs (id, student_id, type, amount, balance, reference_id, reason, description, created_at)
               VALUES (?, ?, 'checkin', ?, ?, ?, '清除签到记录，回滚积分', '清除签到记录回滚积分', ?)
-            `).run(generateId('plog_'), studentId, -back, newBal, scheduleId, t);
+            `).run(generateId('plog_'), studentId, -actual, newBal, scheduleId, t);
           }
         }
         // 回滚次数卡扣课（若已扣）
@@ -709,15 +718,22 @@ function reversePoints(studentId, amount, referenceId, description) {
   if (!(amount > 0)) return;
   const acc = db.prepare('SELECT * FROM points WHERE student_id = ?').get(studentId);
   if (!acc) return; // 账户不存在则无需回滚
-  const newBal = Math.max(0, (acc.balance || 0) - amount);
+  // 与「清除签到回滚」同一口径：流水只记实际生效的扣减量。
+  // 余额只有 3 却要回滚 10 时，实扣 3 就必须记 -3；记 -10 会让
+  // SUM(point_logs.amount) 与 points.balance 永久相差 7 且无自愈。
+  // 业务语义不变：余额不足时仍是「扣到 0 为止、不报失败」。
+  const actual = Math.min(amount, acc.balance || 0);
+  const newBal = (acc.balance || 0) - actual; // actual ≤ balance，结果自然 ≥ 0
+  // total_earned 同按实际生效量扣；MAX(0, …) 仅防御历史脏数据
+  // （正常情况下 total_earned ≥ balance ≥ actual，不会触发截断）。
   db.prepare(`
     UPDATE points SET total_earned = MAX(0, total_earned - ?), balance = ?, updated_at = ?
     WHERE student_id = ?
-  `).run(amount, newBal, now(), studentId);
+  `).run(actual, newBal, now(), studentId);
   db.prepare(`
     INSERT INTO point_logs (id, student_id, type, amount, balance, reference_id, reason, description, created_at)
     VALUES (?, ?, 'checkin', ?, ?, ?, ?, ?, ?)
-  `).run(generateId('plog_'), studentId, -amount, newBal, referenceId, description, description, now());
+  `).run(generateId('plog_'), studentId, -actual, newBal, referenceId, description, description, now());
 }
 
 /**
