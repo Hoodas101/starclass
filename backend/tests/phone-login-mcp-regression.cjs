@@ -38,7 +38,13 @@
  *   node tests/phone-login-mcp-regression.cjs
  *   KEEP_TEST_DB=1 node tests/phone-login-mcp-regression.cjs   （保留临时库排查）
  *
- * 注：本文件是新增的独立套件，**未**登记进 tests/run-all.cjs（由维护者统一登记）。
+ * 后续扩展（同类漏洞，不是单点）：排查 auth.js 全部签发 JWT 的出口后发现共 5 处 ——
+ *   密码登录 / wx-login / phone-login / updateProfile 重签 / changePassword 重签，
+ * 其中 **wx-login（微信一键登录，同样不校验密码）也漏发 mcp**，与 phone-login 属同一类洞。
+ * 故本套件扩出 T6 覆盖 wx-login；同时把判据统一收敛到 auth.js 的 staffMustChangePassword()，
+ * 5 处出口共用同一判据，避免将来再次分叉出新的漏网出口。
+ *
+ * 注：已登记进 tests/run-all.cjs。
  */
 'use strict';
 
@@ -58,8 +64,11 @@ const realFetch = globalThis.fetch;
 // 当前桩要返回的手机号：各用例切换它即可复用同一个进程（getWxAccessToken 有模块级缓存，
 // 换手机号不会重新取 token，不影响）。
 let stubPhone = '13800000000';
+// wx-login 走 /sns/jscode2session 换 openid（routes/auth.js:249），同样需要桩
+let stubOpenid = 'wx_oauth_default';
 let stubTokenCalls = 0;
 let stubPhoneCalls = 0;
+let stubSessionCalls = 0;
 globalThis.fetch = async (url, opts) => {
   const u = String(url);
   if (u.includes('/cgi-bin/token')) {
@@ -69,6 +78,10 @@ globalThis.fetch = async (url, opts) => {
   if (u.includes('/wxa/business/getuserphonenumber')) {
     stubPhoneCalls++;
     return { ok: true, status: 200, json: async () => ({ phone_info: { phoneNumber: stubPhone } }) };
+  }
+  if (u.includes('/sns/jscode2session')) {
+    stubSessionCalls++;
+    return { ok: true, status: 200, json: async () => ({ openid: stubOpenid }) };
   }
   return realFetch(url, opts);
 };
@@ -128,6 +141,15 @@ function mkUser(id, openid, phone, nickname, role, password) {
 async function phoneLogin(phone) {
   stubPhone = phone;
   return call('POST', '/api/auth/phone-login', { body: { code: 'stub' } });
+}
+
+/**
+ * 走 wx-login（微信一键登录，routes/auth.js:236）：用 code 换 openid 后直接登录，
+ * **不校验密码**。role 必须与库中该账号的角色一致，否则会被「身份不匹配」拒绝。
+ */
+async function wxLogin(openid, role) {
+  stubOpenid = openid;
+  return call('POST', '/api/auth/wx-login', { body: { code: 'stub', role } });
 }
 
 const mcpOf = (token) => {
@@ -332,6 +354,59 @@ async function main() {
       !!d && d.mustChangePassword === false, JSON.stringify(d));
     const token = (d && d.token) || '';
     rec('T5-3 token mcp === 0', !!token && mcpOf(token) === 0, `mcp=${mcpOf(token)}`);
+  }
+
+  // ============================================================
+  // T6. wx-login（微信一键登录）：与 phone-login 同属「不校验密码」的通道，必须带 mcp
+  // ============================================================
+  console.log('\n\x1b[1m[T6] wx-login 微信一键登录同样必须带 mcp（同类漏洞，判别项）\x1b[0m');
+  {
+    mkUser('user_wx_admin_def', 'wx_t6_admin_def', null, '默认口令管理员(微信)', 'admin', '123456');
+    mkUser('user_wx_admin_ok', 'wx_t6_admin_ok', null, '已改密管理员(微信)', 'admin', 'StrongPwd#2026');
+
+    const res = await wxLogin('wx_t6_admin_def', 'admin');
+    const d = res.data && res.data.data;
+    rec('T6-1 wx-login 200 且 code=0（桩 openid 命中账号，流程端到端跑通）',
+      res.status === 200 && res.data && res.data.code === 0,
+      `status=${res.status} body=${JSON.stringify(res.data)}`);
+    rec('T6-2 微信桩生效：jscode2session 被调用过',
+      stubSessionCalls > 0, `sessionCalls=${stubSessionCalls}`);
+    rec('T6-3 mustChangePassword === true', !!d && d.mustChangePassword === true, JSON.stringify(d));
+    const token = (d && d.token) || '';
+    rec('T6-4 [判别] token mcp === 1（修复前 wx-login 不下发 mcp，此处为 undefined）',
+      !!token && mcpOf(token) === 1, `mcp=${mcpOf(token)}`);
+
+    const prevForce = process.env.FORCE_PASSWORD_CHANGE;
+    try {
+      process.env.FORCE_PASSWORD_CHANGE = '1';
+      const blocked = await call('GET', '/api/students', { token });
+      rec('T6-5 [判别] 访问受保护接口 → 403 且 code=4031',
+        blocked.status === 403 && blocked.data && blocked.data.code === 4031,
+        `status=${blocked.status} body=${JSON.stringify(blocked.data)}`);
+    } finally {
+      if (prevForce === undefined) delete process.env.FORCE_PASSWORD_CHANGE;
+      else process.env.FORCE_PASSWORD_CHANGE = prevForce;
+    }
+
+    // 对照组：已改密的管理员不得被误判、不得被拦
+    const resOk = await wxLogin('wx_t6_admin_ok', 'admin');
+    const dOk = resOk.data && resOk.data.data;
+    rec('T6-6 [对照] 已改密管理员 wx-login：mustChangePassword === false',
+      !!dOk && dOk.mustChangePassword === false, JSON.stringify(dOk));
+    const tokenOk = (dOk && dOk.token) || '';
+    rec('T6-7 [对照] 已改密管理员 token mcp === 0',
+      !!tokenOk && mcpOf(tokenOk) === 0, `mcp=${mcpOf(tokenOk)}`);
+    const prevForce2 = process.env.FORCE_PASSWORD_CHANGE;
+    try {
+      process.env.FORCE_PASSWORD_CHANGE = '1';
+      const ok = await call('GET', '/api/students', { token: tokenOk });
+      rec('T6-8 [对照] 已改密管理员可正常访问受保护接口（不出现 4031）',
+        ok.status === 200 && !(ok.data && ok.data.code === 4031),
+        `status=${ok.status} body=${JSON.stringify(ok.data)}`);
+    } finally {
+      if (prevForce2 === undefined) delete process.env.FORCE_PASSWORD_CHANGE;
+      else process.env.FORCE_PASSWORD_CHANGE = prevForce2;
+    }
   }
 
   console.log(`\n\x1b[1m结果汇总：PASS ${passed}  FAIL ${failed}\x1b[0m`);

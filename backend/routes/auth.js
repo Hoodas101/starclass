@@ -25,6 +25,27 @@ const PARENT_PHONE_LOGIN = process.env.PARENT_PHONE_LOGIN
   ? process.env.PARENT_PHONE_LOGIN === 'true'
   : process.env.NODE_ENV !== 'production';
 
+/**
+ * 员工是否仍在使用系统默认口令（→ 登录后必须改密）。
+ *
+ * 收敛成单一判据的原因：本文件有 5 处签发 JWT 的出口（密码登录 / wx-login /
+ * phone-login / updateProfile 重签 / changePassword 重签）。判据若在各处各写一遍，
+ * 只要有一处漏写 mcp claim，server.js:179 的强制改密闸门就被绕开 ——
+ * wx-login 与 phone-login 都是**不校验密码**的登录通道，漏一处即等于默认口令长期有效。
+ *
+ * 注意 password 的空值守卫：utils/index.js 的 verifyPassword 内部对 storedHash
+ * 直接调用 .startsWith，历史员工数据 password 可能为 NULL/空串，传 null 会抛
+ * TypeError 被外层 catch 吞成 500，把正常登录打成故障。
+ * @param {object} user users 表的一行
+ * @returns {boolean}
+ */
+function staffMustChangePassword(user) {
+  return !!user
+    && ['admin', 'coach', 'sales'].includes(user.role)
+    && typeof user.password === 'string' && user.password.length > 0
+    && verifyPassword(getStaffDefaultPassword(), user.password).valid;
+}
+
 // 头像类型与扩展名按文件头（魔数）识别，不依赖客户端声明的 MIME / 扩展名。
 function detectImageType(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 12) return null;
@@ -199,9 +220,7 @@ router.post('/login', (req, res) => {
 
     // 仍是默认口令 → 登录后必须改密。只在登录时比对一次（bcrypt 开销大），
     // 结果作为 JWT claim 下发，由鉴权中间件读取，避免每请求重复比对。
-    const mustChangePassword = isCredential
-      && ['admin', 'coach', 'sales'].includes(user.role)
-      && verifyPassword(getStaffDefaultPassword(), user.password).valid;
+    const mustChangePassword = isCredential && staffMustChangePassword(user);
 
     // 生成 JWT Token（tv = token_version，用于服务端吊销：停用/改密/降级后旧 Token 失效）
     const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0, mcp: mustChangePassword ? 1 : 0 });
@@ -286,10 +305,15 @@ router.post('/wx-login', async (req, res) => {
       user.avatar = avatarUrl || user.avatar;
     }
 
-    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0 });
+    // wx-login 用微信 openid 直接登录、**不校验密码**，与 phone-login 同属不校验密码的通道。
+    // 若此处不带 mcp，密码仍是默认口令的员工改用微信一键登录即可绕开
+    // server.js:179 的强制改密闸门，使默认口令长期有效。
+    const mustChangePassword = staffMustChangePassword(user);
+    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0, mcp: mustChangePassword ? 1 : 0 });
     res.json(success({
       openid: user.openid,
       token,
+      mustChangePassword,
       userId: user.id,
       role: user.role,
       permissions: resolvePerms(user),
@@ -403,15 +427,10 @@ router.post('/phone-login', async (req, res) => {
       user.avatar = avatarUrl;
     }
 
-    // 与密码登录（:202）同一判据：密码仍是系统默认口令 → 登录后必须改密。
-    // 此前 phone-login 下发的 token 不带 mcp claim，员工改用微信手机号快捷登录即可绕开
-    // server.js:179 的强制改密拦截，使默认口令长期有效（账号接管面）。
-    // 先判 user.password 非空：verifyPassword 内部对 storedHash 直接调用 startsWith，
-    // 早期员工数据 password 可能为 NULL/空串，传 null 会抛 TypeError 把登录打成 500。
-    const mustChangePassword =
-      ['admin', 'coach', 'sales'].includes(user.role)
-      && typeof user.password === 'string' && user.password.length > 0
-      && verifyPassword(getStaffDefaultPassword(), user.password).valid;
+    // phone-login 用微信 code 换真实手机号、**不校验密码**；此前下发的 token 不带 mcp claim，
+    // 员工改用微信手机号快捷登录即可绕开 server.js:179 的强制改密拦截，使默认口令长期有效
+    //（账号接管面）。判据复用 staffMustChangePassword（内含 password 空值守卫）。
+    const mustChangePassword = staffMustChangePassword(user);
 
     const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0, mcp: mustChangePassword ? 1 : 0 });
     res.json(success({
@@ -746,7 +765,10 @@ router.post('/updateProfile', (req, res) => {
     res.json(success({
       openid: finalOpenid,
       // openid 可能因手机号变更而改变；重新签发 JWT，避免旧 token 的 openid 失效导致后续请求身份错乱
-      token: generateToken({ openid: finalOpenid, userId: user.id, role: user.role, tv: user.token_version || 0 }),
+      // 重签 token 必须重新判定 mcp，否则「登录时带 mcp → 改资料后重签」会静默丢掉闸门标记。
+      // 当前 updateProfile 不在 server.js 的 FORCE_PWD_ALLOWED_PATHS 内、够不到，
+      // 但保留判据可防止白名单将来变动、或闸门被临时关闭期间丢标记造成绕过。
+      token: generateToken({ openid: finalOpenid, userId: user.id, role: user.role, tv: user.token_version || 0, mcp: staffMustChangePassword(user) ? 1 : 0 }),
       userId: user.id,
       role: user.role,
       nickname: cleanNickname,
@@ -806,7 +828,10 @@ router.post('/changePassword', (req, res) => {
     });
     res.json(success({
       updated: true,
-      token: generateToken({ openid: freshUser.openid, userId: freshUser.id, role: freshUser.role, tv: freshUser.token_version || 0 }),
+      // 改密后重签必须重新判定：若用户把密码改成**仍是默认口令**（如又改回 123456），
+      // 新 token 必须继续带 mcp，否则「改密 → 拿到无 mcp 的新 token」就成了一条
+      // 绕过强制改密的捷径，整套默认口令治理形同虚设。
+      token: generateToken({ openid: freshUser.openid, userId: freshUser.id, role: freshUser.role, tv: freshUser.token_version || 0, mcp: staffMustChangePassword(freshUser) ? 1 : 0 }),
     }));
   } catch (err) {
     console.error('[changePassword]', err);
