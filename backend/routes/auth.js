@@ -644,14 +644,12 @@ router.post('/updateProfile', (req, res) => {
       // 判据用 NULL 安全的 IS NOT：排除属于自己的绑定行（parent_openid = 改号前的 user.openid）；
       // 兄弟姐妹共用同一家长号码时，这些行的 parent_openid 完全相同，会被一并排除，不会误判冲突；
       // 而 parent_openid 为 NULL / 空串的「无主」绑定同样算冲突，避免留下绕过口子。
-      // >>> 判别力验证：临时禁用改动1（验证完必须恢复）<<<
-      // const bindingConflict = db.prepare(
-      //   'SELECT 1 FROM parent_bindings WHERE parent_phone = ? AND parent_openid IS NOT ? LIMIT 1'
-      // ).get(phone, user.openid);
-      // if (bindingConflict) {
-      //   return res.status(400).json(safeFail('该手机号已被其他学员的家长使用'));
-      // }
-      const bindingConflict = null;
+      const bindingConflict = db.prepare(
+        'SELECT 1 FROM parent_bindings WHERE parent_phone = ? AND parent_openid IS NOT ? LIMIT 1'
+      ).get(phone, user.openid);
+      if (bindingConflict) {
+        return res.status(400).json(safeFail('该手机号已被其他学员的家长使用'));
+      }
       const oldPhone = user.phone || '';
       const oldOpenid = user.openid;
       finalPhone = phone;
