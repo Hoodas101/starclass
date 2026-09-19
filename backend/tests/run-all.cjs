@@ -19,6 +19,12 @@ const { spawnSync } = require('child_process');
 
 const backendDir = path.join(__dirname, '..');
 
+// 回归套件的夹具账号用的就是 seed 默认口令 123456。若开启「默认口令强制改密」，
+// 除改密接口外的所有请求都会被鉴权中间件拦下，16 个套件会全军覆没而非发现真实回归。
+// 故此处统一关闭（env 会随 spawnSync 传给各子进程）；该强制行为本身由
+// batch7-security-guards.test.cjs 的用例在自己的进程内显式开启后覆盖。
+process.env.FORCE_PASSWORD_CHANGE = process.env.FORCE_PASSWORD_CHANGE || '0';
+
 // 顺序有意为之：先跑「离线直调处理器 + 自带隔离库」的轻套件（快、失败定位准），
 // 再跑「启动 HTTP 服务」的重套件（full-system 最慢，放最后）。
 //

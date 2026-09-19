@@ -7,6 +7,8 @@ const db = require('../db');
 const fs = require('fs');
 const path = require('path');
 const { generateId, generateToken, success, fail, safeFail, getOpenId, escapeLike, now, hashPassword, verifyPassword, resolvePerms, getActor, recordAudit } = require('../utils');
+// 默认口令的唯一定义处：登录判定「是否仍是默认口令」、改密拦截「新密码不得仍是默认口令」共用
+const { getStaffDefaultPassword } = require('../utils/security');
 
 // 微信 access_token 内存缓存（有效期内的 token 复用，避免频繁请求微信接口）
 let _wxAccessToken = '';
@@ -188,12 +190,19 @@ router.post('/login', (req, res) => {
       `).run(user.openid, phone, user.openid);
     }
 
+    // 仍是默认口令 → 登录后必须改密。只在登录时比对一次（bcrypt 开销大），
+    // 结果作为 JWT claim 下发，由鉴权中间件读取，避免每请求重复比对。
+    const mustChangePassword = isCredential
+      && ['admin', 'coach', 'sales'].includes(user.role)
+      && verifyPassword(getStaffDefaultPassword(), user.password).valid;
+
     // 生成 JWT Token（tv = token_version，用于服务端吊销：停用/改密/降级后旧 Token 失效）
-    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0 });
+    const token = generateToken({ openid: user.openid, userId: user.id, role: user.role, tv: user.token_version || 0, mcp: mustChangePassword ? 1 : 0 });
 
     res.json(success({
       openid: user.openid,
       token,
+      mustChangePassword,
       userId: user.id,
       role: user.role,
       permissions: resolvePerms(user),
@@ -737,6 +746,14 @@ router.post('/changePassword', (req, res) => {
     }
     if (!newPassword || newPassword.length < 6 || newPassword.length > 20) {
       return res.status(400).json(safeFail('新密码需为 6-20 位'));
+    }
+    // 「默认口令强制改密」的闭环：若允许新密码仍是默认口令，用户会原地打转，
+    // 每次登录都被拦却又无法解除。
+    if (newPassword === getStaffDefaultPassword()) {
+      return res.json(fail('新密码不能是系统默认口令'));
+    }
+    if (oldPassword && newPassword === oldPassword) {
+      return res.json(fail('新密码不能与原密码相同'));
     }
 
     // 改密同时 bump token_version：使该账号其他设备的旧 Token 立即失效；

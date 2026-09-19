@@ -192,11 +192,22 @@ router.get('/coach/:id', (req, res) => {
 router.put('/coach/:id/rule', (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(403).json(safeFail('仅管理员可设置薪资规则'));
-    const teacher = db.prepare("SELECT id, name FROM teachers WHERE id = ?").get(req.params.id);
+    const teacher = db.prepare("SELECT id, name, pay_rule, class_fee FROM teachers WHERE id = ?").get(req.params.id);
     if (!teacher) return res.json(fail('教练不存在'));
+    const beforeRule = getPayRule(teacher);
     const rule = normalizeRule(req.body.payRule);
     db.prepare("UPDATE teachers SET pay_rule = ? WHERE id = ?")
       .run(JSON.stringify(rule), req.params.id);
+    // 薪资规则决定该教练后续所有计薪金额，改写规则必须留痕（完整新旧规则可追责）
+    recordAudit(db, {
+      entity: 'teacher',
+      entityId: req.params.id,
+      action: 'pay_rule_update',
+      actorId: getOpenId(req),
+      actorRole: req.userRole || '',
+      before: { payRule: beforeRule },
+      after: { payRule: rule },
+    });
     res.json(success({ payRule: rule, summary: ruleSummary(rule) }));
   } catch (err) {
     console.error('[payroll rule save]', err);

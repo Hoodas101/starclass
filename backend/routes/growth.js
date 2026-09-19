@@ -685,6 +685,7 @@ router.post('/points/adjust', (req, res) => {
     const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
     if (!student) return res.json(fail('成员不存在'));
     const t = now();
+    const beforeBalance = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId)?.balance || 0;
 
     if (type === 'consume') {
       const p = db.prepare('SELECT * FROM points WHERE student_id = ?').get(studentId);
@@ -704,6 +705,16 @@ router.post('/points/adjust', (req, res) => {
     const balance = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId)?.balance || 0;
     db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(generateId('PLG'), studentId, type, amount, balance, reason, t);
+    // 积分可兑换属有价资产，手工调整必须可追责：记录操作者与调整前后余额
+    recordAudit(db, {
+      entity: 'points',
+      entityId: studentId,
+      action: 'adjust',
+      actorId: getOpenId(req),
+      actorRole: req.userRole || '',
+      before: { points: beforeBalance },
+      after: { points: balance, delta: type === 'consume' ? -amount : amount },
+    });
     res.json(success({ balance }));
   } catch (err) {
     res.status(500).json(safeFail('调整积分失败'));

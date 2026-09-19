@@ -174,6 +174,22 @@ router.post('/', (req, res) => {
         const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
         settleOrder(order, paidAt || currentTime);
       }
+
+      // 建单即确定应收金额，status='paid' 时还会立即结算建卡发积分；
+      // overrideAmount 可绕过项目标价任意定价，必须留痕（保留原始 totalAmount，让「被人为改过价」在审计里可见）
+      const auditAfter = { orderNo, studentId, totalAmount, payableAmount, status };
+      if (overrideAmount !== undefined && isFinite(Number(overrideAmount)) && Number(overrideAmount) >= 0) {
+        auditAfter.overridden = true;
+      }
+      recordAudit(db, {
+        entity: 'order',
+        entityId: id,
+        action: 'create',
+        actorId: openid,
+        actorRole: req.userRole || '',
+        before: null,
+        after: auditAfter,
+      });
     })();
 
     res.json(success({ orderId: id, orderNo, totalAmount, payableAmount, discountAmount }));
@@ -257,6 +273,18 @@ router.post('/import', (req, res) => {
         settleOrder(order, paidTs);
         okCount.push({ studentName, itemName, amount });
       });
+
+      // 批量导入每一行都会结算建卡发分，逐条留痕会产生几千行噪音；此处只写一条汇总
+      // （count=成功导入条数，settled=实际结算条数，本流程中二者相等）
+      recordAudit(db, {
+        entity: 'order',
+        entityId: '',
+        action: 'import',
+        actorId: getOpenId(req),
+        actorRole: req.userRole || '',
+        before: null,
+        after: { count: okCount.length, settled: okCount.length },
+      });
     })();
 
     res.json(success({ success: okCount.length, failed, created: okCount.length }));
@@ -337,6 +365,22 @@ router.post('/:id/pay', (req, res) => {
         .run(generateId('PAY'), paidOrder.id, paidOrder.order_no, paidOrder.user_id, paidOrder.payable_amount, 'wechat', 'success', currentTime, currentTime);
       // 仅激活会员卡 + 发积分（grantOrderBenefits 内部按 订单+商品 幂等去重），不再重复置订单状态
       grantOrderBenefits(paidOrder, currentTime);
+
+      // 收款是资金流入的关键节点：置 paid 并写入支付流水、发放权益；退款已有审计，收款更必须留痕
+      recordAudit(db, {
+        entity: 'order',
+        entityId: paidOrder.id,
+        action: 'pay',
+        actorId: getOpenId(req),
+        actorRole: req.userRole || '',
+        before: { status: order.status, payableAmount: Number(order.payable_amount) || 0 },
+        after: {
+          status: 'paid',
+          payableAmount: Number(paidOrder.payable_amount) || 0,
+          paymentMethod: 'wechat',
+          paidAt: currentTime,
+        },
+      });
       return { ok: true };
     })();
 
@@ -545,6 +589,7 @@ router.put('/:id', (req, res) => {
     if (remark !== undefined) { fields.push('remark = ?'); params.push(String(remark)); }
     if (fields.length === 0) return res.json(fail('没有需要修改的内容'));
 
+    const prevPayable = Number(order.payable_amount) || 0;
     params.push(now(), id);
     // 改价与支付流水同步必须同事务：中途失败会留下「订单已改价、流水仍旧金额」的对账裂缝
     db.transaction(() => {
@@ -552,6 +597,24 @@ router.put('/:id', (req, res) => {
         db.prepare('UPDATE payments SET amount = ? WHERE order_id = ?').run(syncPaymentAmount, id);
       }
       db.prepare(`UPDATE orders SET ${fields.join(', ')}, updated_at = ? WHERE id = ?`).run(...params);
+
+      // 改价直接改写应收金额并同步支付流水，无痕则事后无法追责；
+      // 仅在 payableAmount 确实变化时才留痕，改备注/签单人这类操作不产生审计噪音
+      if (syncPaymentAmount !== null && syncPaymentAmount !== prevPayable) {
+        recordAudit(db, {
+          entity: 'order',
+          entityId: id,
+          action: 'update_amount',
+          actorId: getOpenId(req),
+          actorRole: req.userRole || '',
+          before: { payableAmount: prevPayable, salesperson: order.salesperson, remark: order.remark },
+          after: {
+            payableAmount: syncPaymentAmount,
+            salesperson: salesperson !== undefined ? String(salesperson) : order.salesperson,
+            remark: remark !== undefined ? String(remark) : order.remark,
+          },
+        });
+      }
     })();
     res.json(success({ id }));
   } catch (err) {

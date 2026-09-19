@@ -77,7 +77,14 @@ service.interceptors.response.use(
           }
           return Promise.reject(new Error(response.data?.message || '登录已过期，请重新登录'))
         case 403:
-          ElMessage.error(response.data?.message || '没有权限访问')
+          // code 4031 = 账号仍是系统默认口令，被后端鉴权中间件硬拦截：
+          // 必须把用户引导到改密页，只弹一条 message 会让其在「处处没权限」里卡死
+          if (response.data?.code === 4031) {
+            ElMessage.warning(response.data?.message || '请先修改密码')
+            router.push('/profile')
+          } else {
+            ElMessage.error(response.data?.message || '没有权限访问')
+          }
           return Promise.reject(new Error(response.data?.message || '没有权限访问'))
         case 404:
           ElMessage.error(response.data?.message || '请求的资源不存在')

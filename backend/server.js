@@ -9,6 +9,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const { verifyToken } = require('./utils');
+const { isForcePasswordChange } = require('./utils/security');
 const { generateClassReminders, generateLowClassReminders, generateRenewalReminders } = require('./utils/reminders');
 const { expireOverdueCards } = require('./utils/card-lifecycle');
 const { startScheduledBackup } = require('./utils/backup');
@@ -121,6 +122,13 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 // === JWT 认证中间件（排除公开路由）===
 const PUBLIC_PATHS = ['/api/auth/login', '/api/auth/wx-login', '/api/auth/phone-login', '/api/health', '/api/trial/apply', '/api/wxpay/notify', '/api/terms'];
+// 命中「默认口令强制改密」时仍可访问的路径（小写，与下方 p 的口径一致）。
+// 端点名以 routes/auth.js 实际注册为准：POST /changePassword、GET /getProfile。
+// 本项目**不存在** /api/auth/logout 端点（退出登录是纯前端清 token），故不列入。
+const FORCE_PWD_ALLOWED_PATHS = [
+  '/api/auth/changepassword',
+  '/api/auth/getprofile',
+];
 app.use((req, res, next) => {
   // Express 路由默认大小写不敏感：'/API/schedules/pay' 仍会解析到
   // '/api/schedules/pay' 处理器。鉴权守卫必须用同样的口径，否则大写路径会
@@ -165,6 +173,17 @@ app.use((req, res, next) => {
       }
       req.openid = payload.openid;
       req.userRole = payload.role;
+      // 默认口令强制改密：除改密自身与必要的 profile 外一律拒绝。
+      // 放在这里是因为这是唯一不可绕过的收口——只在前端跳转会被直接调 API 绕过。
+      // mcp 由登录时判定一次后写入 JWT claim（bcrypt 开销大，不能每请求比对）。
+      if (payload.mcp === 1 && isForcePasswordChange() && ['admin', 'coach', 'sales'].includes(payload.role)) {
+        if (!FORCE_PWD_ALLOWED_PATHS.includes(p)) {
+          return res.status(403).json({
+            code: 4031, data: null,
+            message: '当前仍是系统默认口令，请先修改密码后再使用系统',
+          });
+        }
+      }
       return next();
     }
   }

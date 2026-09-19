@@ -8,7 +8,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, isCoachReq } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, now, isCoachReq, recordAudit } = require('../utils');
 const { requireStaffPerm } = require('../middleware/authz');
 
 // 请假规则默认值（可在 Web 管理端「系统设置 → 请假规则」中配置）
@@ -73,7 +73,7 @@ function applyLeaveDeduction(studentId, scheduleId, currentTime) {
       db.prepare('INSERT OR IGNORE INTO leave_deduction_logs (schedule_id, student_id, card_id, mode, deducted_at) VALUES (?, ?, ?, ?, ?)')
         .run(scheduleId, studentId, card.id, 'class', currentTime);
     }
-    return { deducted: true, mode: 'class', before, after, amount: before - after, cardName: card.card_type_name };
+    return { deducted: true, mode: 'class', cardId: card.id, before, after, amount: before - after, cardName: card.card_type_name };
   }
 
   if (rules.deductMode === 'days') {
@@ -92,7 +92,7 @@ function applyLeaveDeduction(studentId, scheduleId, currentTime) {
       db.prepare('INSERT OR IGNORE INTO leave_deduction_logs (schedule_id, student_id, card_id, mode, deducted_at) VALUES (?, ?, ?, ?, ?)')
         .run(scheduleId, studentId, card.id, 'days', currentTime);
     }
-    return { deducted: true, mode: 'days', before: card.expires_at, after: newExpires, amount: rules.deductAmount, cardName: card.card_type_name };
+    return { deducted: true, mode: 'days', cardId: card.id, before: card.expires_at, after: newExpires, amount: rules.deductAmount, cardName: card.card_type_name };
   }
 
   return { deducted: false, reason: 'unknown_mode' };
@@ -312,6 +312,20 @@ router.put('/:id/approve', (req, res) => {
           } else if (deduction.mode === 'days') {
             deductText = ` 按规则扣除有效期 ${deduction.amount} 天。`;
           }
+          // 审批即扣课时或改写有效期（可能置为 expired），等于动学员已付费资产，必须留痕可追责
+          recordAudit(db, {
+            entity: 'membership_card',
+            entityId: deduction.cardId,
+            action: 'leave_deduct',
+            actorId: getOpenId(req),
+            actorRole: req.userRole || '',
+            before: deduction.mode === 'class'
+              ? { remainingClasses: deduction.before }
+              : { expiresAt: deduction.before },
+            after: deduction.mode === 'class'
+              ? { remainingClasses: deduction.after }
+              : { expiresAt: deduction.after },
+          });
         }
 
         // 通知家长审批结果

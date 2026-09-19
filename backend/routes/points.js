@@ -9,7 +9,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, isAdminReq, canViewStudentData } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, isAdminReq, canViewStudentData, recordAudit } = require('../utils');
 
 /**
  * GET /api/points/balance — 积分余额
@@ -68,7 +68,8 @@ router.post('/add', (req, res) => {
           return { duplicated: true, balance: acc ? acc.balance : 0 };
         }
       }
-      const existAcc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(studentId);
+      const existAcc = db.prepare('SELECT id, balance FROM points WHERE student_id = ?').get(studentId);
+      const beforeBalance = existAcc ? existAcc.balance : 0;
       if (!existAcc) {
         db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
           .run(generateId('PTS'), studentId, student.name, amount, amount, currentTime);
@@ -79,6 +80,16 @@ router.post('/add', (req, res) => {
       const points = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
       db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .run(generateId('PLG'), studentId, 'earn', amount, points.balance, reason, referenceId, currentTime);
+      // 积分可兑换属有价资产，管理员手工发放必须留痕，事后可查到是谁加了多少
+      recordAudit(db, {
+        entity: 'points',
+        entityId: studentId,
+        action: 'add',
+        actorId: getOpenId(req),
+        actorRole: req.userRole || '',
+        before: { points: beforeBalance },
+        after: { points: points.balance, delta: amount },
+      });
       return { balance: points.balance, added: amount };
     })();
 
@@ -117,6 +128,16 @@ router.post('/consume', (req, res) => {
       // 记录流水
       db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
         .run(generateId('PLG'), studentId, 'consume', amount, updated.balance, reason, referenceId, currentTime);
+      // 积分可兑换属有价资产，管理员手工扣减必须留痕，事后可查到是谁扣了多少
+      recordAudit(db, {
+        entity: 'points',
+        entityId: studentId,
+        action: 'consume',
+        actorId: getOpenId(req),
+        actorRole: req.userRole || '',
+        before: { points: current.balance },
+        after: { points: updated.balance, delta: -amount },
+      });
       return updated.balance;
     })();
 

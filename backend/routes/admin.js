@@ -9,6 +9,8 @@ const db = require('../db');
 const { success, fail, safeFail, generateId, getOpenId, getActor, recordAudit, formatDate, now, hashPassword, resolvePerms, hasPerm, getReqUser, attendanceRate, isAdminReq } = require('../utils');
 // 订单明细解析：导出 / 退卡 / 财务报表共用同一实现（此前各自复制，口径已分叉）
 const { parseItems, itemQuantity, itemLineTotal } = require('../utils/items');
+// 员工默认口令的唯一定义处（登录/改密/强制拦截共用，避免多处硬编码分叉）
+const { getStaffDefaultPassword } = require('../utils/security');
 
 // E3：把 date(paid_at/1000,'unixepoch','localtime') 这类表达式谓词改写为 paid_at 的毫秒区间比较。
 // 函数包裹的列用不上索引 → 看板每次调用对 orders 全表扫描 13 次；016 迁移建的 idx_orders_paid_at
@@ -913,7 +915,7 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
         INSERT INTO users (id, openid, phone, nickname, avatar, role, password, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, '', ?, ?, 'active', ?, ?)
       `).run(generateId('user_'), `phone_${targetPhone}`, targetPhone, name || existing.name, role,
-        hashPassword(STAFF_DEFAULT_PASSWORD), now(), now());
+        hashPassword(getStaffDefaultPassword()), now(), now());
     }
 
     // 重置登录密码为初始密码（STAFF_DEFAULT_PASSWORD 可配，默认 123456）
@@ -922,7 +924,7 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
       if (targetPhone) {
         // bump token_version：重置后该账号旧 Token 全部失效
         db.prepare("UPDATE users SET password = ?, token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE phone = ?")
-          .run(hashPassword(STAFF_DEFAULT_PASSWORD), now(), targetPhone);
+          .run(hashPassword(getStaffDefaultPassword()), now(), targetPhone);
       }
     }
     // 教师更新可能同步改登录账号角色/权限/密码/启用状态，属权限变更，必须留痕
@@ -1372,7 +1374,7 @@ module.exports = router;
 // 员工初始/重置密码：可通过 STAFF_DEFAULT_PASSWORD 环境变量改为机构自定义初始密码。
 // 硬编码 123456 意味着任何拿到 MIT 源码的人都可尝试「已知手机号 + 123456」接管员工账号；
 // 正式部署务必设置自定义值，并在创建员工后通过私密渠道告知本人尽快修改。
-const STAFF_DEFAULT_PASSWORD = process.env.STAFF_DEFAULT_PASSWORD || '123456';
+// 常量本身已收敛至 utils/security.js，登录 / 改密 / 强制拦截共用同一份定义。
 
 function syncCoachAccount(phone, name) {
   if (!phone) return;
@@ -1385,7 +1387,7 @@ function syncCoachAccount(phone, name) {
     db.prepare(`
       INSERT INTO users (id, openid, phone, nickname, avatar, role, password, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, '', 'coach', ?, 'active', ?, ?)
-    `).run(generateId('user_'), `coach_${phone}`, phone, name || '教练', hashPassword(STAFF_DEFAULT_PASSWORD), now(), now());
+    `).run(generateId('user_'), `coach_${phone}`, phone, name || '教练', hashPassword(getStaffDefaultPassword()), now(), now());
   }
 }
 

@@ -8,7 +8,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { success, fail, safeFail, getOpenId, now } = require('../utils');
+const { success, fail, safeFail, getOpenId, now, recordAudit } = require('../utils');
 const { isWechatPayEnabled, createPrepayOrder, verifyNotify } = require('../utils/wechat-pay');
 const { parseItems } = require('../utils/items');
 const ordersRoutes = require('./orders');
@@ -119,6 +119,22 @@ router.post('/notify', (req, res) => {
           // 收款→开通：真实支付成功后必须授予会员卡 / 发放购买积分，
           // 否则家长付款后看不到卡、无法签到扣课（与模拟支付 / 建单即付路径保持一致）。
           if (ordersRoutes.grantOrderBenefits) ordersRoutes.grantOrderBenefits(order, t);
+
+          // 本路由是支付渠道回调（来源：微信支付 notify），无登录用户，操作者记为 system；
+          // 真实收款是资金流入的关键节点，必须留痕，事后可核对回调金额与订单金额是否一致
+          recordAudit(db, {
+            entity: 'order',
+            entityId: order.id,
+            action: 'pay',
+            actorId: '',
+            actorRole: 'system',
+            before: { status: order.status, payableAmount: Number(order.payable_amount) || 0 },
+            after: {
+              orderNo: order.order_no,
+              payableAmount: Number(order.payable_amount) || 0,
+              transactionId: transactionId || '',
+            },
+          });
         })();
         console.log(`[WxPay] 订单 ${outTradeNo} 支付成功`);
       }

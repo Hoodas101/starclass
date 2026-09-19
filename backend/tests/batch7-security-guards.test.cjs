@@ -339,6 +339,67 @@ async function main() {
       rOk.status === 200 && rOk.data && rOk.data.code === 0, `status=${rOk.status} body=${JSON.stringify(rOk.data)}`);
   }
 
+  // ════════════════════════════════════════════════════════════
+  // S12 — 默认口令强制改密（登录判定一次 → JWT claim mcp → 中间件收口）
+  // ════════════════════════════════════════════════════════════
+  // 本段必须显式打开 FORCE_PASSWORD_CHANGE：run-all.cjs 为保住其余 15 个套件
+  // （夹具账号就是默认口令）统一把它置为 '0'，而 isForcePasswordChange() 是
+  // **每请求读取**环境变量，故这里在自己的进程内临时置 '1' 即可覆盖该强制行为。
+  console.log('\x1b[1m[S12] 默认口令强制改密闭环\x1b[0m');
+  {
+    const prevForce = process.env.FORCE_PASSWORD_CHANGE;
+    process.env.FORCE_PASSWORD_CHANGE = '1';
+    try {
+      // 夹具管理员：phone 13800000001 / 默认口令 123456（见 db/seed.js）
+      const login = await call('POST', '/api/auth/login', {
+        body: { phone: '13800000001', password: '123456', role: 'admin' },
+      });
+      const mustChange = !!(login.data && login.data.data && login.data.data.mustChangePassword === true);
+      const mcpToken = (login.data && login.data.data && login.data.data.token) || '';
+      rec('S12 默认口令登录 → mustChangePassword=true 且下发 token',
+        login.status === 200 && login.data.code === 0 && mustChange && !!mcpToken,
+        `status=${login.status} body=${JSON.stringify(login.data)}`);
+
+      // 普通受保护接口：应被 4031 拦下（走的是业务路由之外，前端跳转无法绕过）
+      const blocked = await call('GET', '/api/schedules/today', { token: mcpToken });
+      rec('S12 持默认口令 token 访问普通受保护接口 → 403 且 code=4031',
+        blocked.status === 403 && blocked.data && blocked.data.code === 4031,
+        `status=${blocked.status} body=${JSON.stringify(blocked.data)}`);
+
+      // 改密所需的白名单端点必须仍可达，否则用户无法自救（死锁）
+      const prof = await call('GET', '/api/auth/getProfile', { token: mcpToken });
+      rec('S12 /api/auth/getProfile 不被 4031 拦截（白名单生效）',
+        prof.status === 200 && prof.data && prof.data.code === 0,
+        `status=${prof.status} body=${JSON.stringify(prof.data)}`);
+
+      // 闭环：新密码不得仍是默认口令，否则用户会原地打转
+      const same = await call('POST', '/api/auth/changePassword', {
+        token: mcpToken, body: { oldPassword: '123456', newPassword: '123456' },
+      });
+      rec('S12 新密码仍为默认口令 → 被拒（闭环）',
+        same.status === 200 && same.data && same.data.code !== 0,
+        `status=${same.status} body=${JSON.stringify(same.data)}`);
+
+      // 正常改密后，新 token 不再带 mcp，立即恢复正常访问
+      const chg = await call('POST', '/api/auth/changePassword', {
+        token: mcpToken, body: { oldPassword: '123456', newPassword: 'B7NewPass2026' },
+      });
+      const newToken = (chg.data && chg.data.data && chg.data.data.token) || '';
+      rec('S12 改密成功并签发新 token',
+        chg.status === 200 && chg.data.code === 0 && !!newToken,
+        `status=${chg.status} body=${JSON.stringify(chg.data)}`);
+
+      const after = await call('GET', '/api/schedules/today', { token: newToken });
+      rec('S12 改密后新 token 访问同一接口 → 恢复正常（不再 4031）',
+        after.status === 200 && after.data && after.data.code === 0,
+        `status=${after.status} body=${JSON.stringify(after.data)}`);
+    } finally {
+      // 还原环境变量，避免影响本文件后续/其他断言的口径
+      if (prevForce === undefined) delete process.env.FORCE_PASSWORD_CHANGE;
+      else process.env.FORCE_PASSWORD_CHANGE = prevForce;
+    }
+  }
+
   db.close();
   console.log(`\n\x1b[1m结果汇总：PASS ${passed}  FAIL ${failed}\x1b[0m`);
   process.exit(failed > 0 ? 1 : 0);

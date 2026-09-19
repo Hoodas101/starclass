@@ -13,6 +13,11 @@ try {
   userInfo.value = {}
 }
 
+  // 是否仍在使用系统默认口令（由登录响应 mustChangePassword 下发）。
+  // 为 true 时后端鉴权中间件会硬拦截全部业务接口（403 且 code 4031），
+  // 前端据此在改密页常驻提示，并避免把用户送进满屏报错的首页。
+  const mustChangePassword = ref(localStorage.getItem('edu_must_change_password') === '1')
+
   // 计算属性
   const isLoggedIn = computed(() => !!token.value)
   const userName = computed(() => userInfo.value.name || '管理员')
@@ -50,6 +55,11 @@ try {
       localStorage.setItem('edu_token', data.token || data.openid)
       localStorage.setItem('edu_user_info', JSON.stringify(userInfo.value))
 
+      // 后端在登录响应下发该标记：为 true 表示仍是系统默认口令，
+      // 除改密 / 取个人资料 / 登出外的接口都会被 4031 拦截，需引导用户先去改密
+      mustChangePassword.value = data.mustChangePassword === true
+      localStorage.setItem('edu_must_change_password', mustChangePassword.value ? '1' : '0')
+
       return data
     } catch (error) {
       throw error
@@ -64,6 +74,9 @@ try {
     localStorage.removeItem('edu_user_info')
     // 机构称呼方案缓存一并清除：共享电脑下一位登录者不应看到上一机构的术语
     localStorage.removeItem('edu_settings')
+    // 强制改密标记同样清除：避免下一位登录者（可能已是自设密码）被误提示
+    mustChangePassword.value = false
+    localStorage.removeItem('edu_must_change_password')
   }
 
   // 获取用户信息
@@ -107,6 +120,12 @@ try {
     localStorage.setItem('edu_token', newToken)
   }
 
+  // 改密成功后调用：解除「仍是默认口令」标记，改密页的警示条随之消失
+  const clearMustChangePassword = () => {
+    mustChangePassword.value = false
+    localStorage.setItem('edu_must_change_password', '0')
+  }
+
   return {
     token,
     userInfo,
@@ -114,10 +133,12 @@ try {
     userName,
     userAvatar,
     userRole,
+    mustChangePassword,
     login,
     logout,
     getUserInfo,
     updateUserInfo,
-    setToken
+    setToken,
+    clearMustChangePassword
   }
 })

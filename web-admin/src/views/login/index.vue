@@ -146,6 +146,13 @@ const handleLogin = async () => {
         userStore.logout()
         return
       }
+      // 仍是系统默认口令：除改密等少数接口外全部被后端硬拦截（403 且 code 4031），
+      // 必须直接落到改密页，否则用户进首页满屏报错，观感是「系统坏了」
+      if (data.mustChangePassword === true) {
+        ElMessage.warning('当前仍是系统默认口令，请先修改密码')
+        router.push('/profile')
+        return
+      }
       ElMessage.success('登录成功')
       // 401 掉线重登后回原页面；否则管理员/销售进看板，教练进排期。
       // 排除回跳登录页自身（旧书签 /login?redirect=/login），否则 push 被路由去重吞掉、停在登录页像登录失败

@@ -2,6 +2,16 @@
   <div class="profile-page">
     <PageHeader title="个人设置" />
     <div class="page-shell page-shell--narrow">
+      <!-- 强制改密提示：仅当登录响应标记 mustChangePassword 为真时出现（此时后端会对业务接口返回 4031） -->
+      <el-alert
+        v-if="userStore.mustChangePassword"
+        type="warning"
+        show-icon
+        :closable="false"
+        title="当前使用的是系统默认口令，修改后才能正常使用系统"
+        style="margin-bottom: var(--t-spacing-lg)"
+      />
+
       <!-- 账号信息 -->
       <div class="profile-section">
         <h3 class="section-title">账号信息</h3>
@@ -69,6 +79,7 @@ import { ref, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { changePassword } from '@/api/modules'
 import { useUserStore } from '@/store/user'
+import { useSettingsStore } from '@/store/settings'
 import PageHeader from '@/components/PageHeader.vue'
 
 const userStore = useUserStore()
@@ -116,6 +127,8 @@ const submitPassword = async () => {
       // 后端改密同时 bump token_version 并签发新 Token：必须立即替换本地 Token，
       // 否则旧 Token 在下一次请求就会被 401 拒绝并强制登出（本页曾经的缺陷）。
       userStore.setToken(data?.token)
+      // 改密成功：解除「仍是默认口令」标记，顶部警示条随之消失
+      userStore.clearMustChangePassword()
       ElMessage.success('密码修改成功')
       passwordForm.oldPassword = ''
       passwordForm.newPassword = ''
