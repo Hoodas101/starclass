@@ -513,7 +513,7 @@
       </el-form>
       <template #footer>
         <el-button @click="fuDialogOpen = false">取消</el-button>
-        <el-button type="primary" @click="saveFu">创建任务</el-button>
+        <el-button type="primary" :loading="savingFu" @click="saveFu">创建任务</el-button>
       </template>
     </el-dialog>
   </div>
@@ -865,6 +865,7 @@ const handleGenerate = async () => {
 }
 
 const fuDialogOpen = ref(false)
+const savingFu = ref(false)   // 提交防重复：创建跟进任务时置灰
 const fuStudentOptions = ref([])
 const fuLeadOptions = ref([])
 const fuForm = reactive({ targetType: 'student', targetId: '', targetName: '', phone: '', taskType: 'other', owner: '', reason: '', dueAt: null })
@@ -895,6 +896,7 @@ const onFuTargetChange = (id) => {
 const saveFu = async () => {
   if (!fuForm.targetId) { ElMessage.warning('请选择跟进对象'); return }
   if (!fuForm.reason) { ElMessage.warning('请填写跟进原因'); return }
+  savingFu.value = true
   try {
     await createFollowUp({
       targetType: fuForm.targetType,
@@ -911,6 +913,8 @@ const saveFu = async () => {
     loadFollowUps()
   } catch (e) {
     // 拦截器已提示业务/网络错误
+  } finally {
+    savingFu.value = false
   }
 }
 

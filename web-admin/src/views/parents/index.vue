@@ -123,7 +123,7 @@
       <template #footer>
         <div class="dialog-footer">
           <el-button @click="addSupVisible = false">取消</el-button>
-          <el-button type="danger" @click="submitAddSuppression">确认勿扰</el-button>
+          <el-button type="danger" :loading="submittingSuppression" @click="submitAddSuppression">确认勿扰</el-button>
         </div>
       </template>
     </el-dialog>
@@ -217,7 +217,9 @@ const openAddSuppression = (row) => {
   addSupVisible.value = true
 }
 
+const submittingSuppression = ref(false)
 const submitAddSuppression = async () => {
+  submittingSuppression.value = true
   try {
     await addSuppression({
       phone: supTarget.value?.parent_phone,
@@ -229,6 +231,8 @@ const submitAddSuppression = async () => {
     addSupVisible.value = false
   } catch (e) {
     // 拦截器已提示业务/网络错误
+  } finally {
+    submittingSuppression.value = false
   }
 }
 

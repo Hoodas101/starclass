@@ -143,7 +143,7 @@
       </el-form>
       <template #footer>
         <el-button @click="cardDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitCard">保存</el-button>
+        <el-button type="primary" :loading="submittingCard" @click="submitCard">保存</el-button>
       </template>
     </el-dialog>
 
@@ -173,7 +173,7 @@
       </el-form>
       <template #footer>
         <el-button @click="goodsDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitGoods">保存</el-button>
+        <el-button type="primary" :loading="submittingGoods" @click="submitGoods">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -192,6 +192,9 @@ defineProps({ embedded: { type: Boolean, default: false } })
 
 const activeMode = ref('membership')
 const loading = ref(false)
+// 提交防重复：保存按钮的进行中状态（双击会重复创建）
+const submittingCard = ref(false)
+const submittingGoods = ref(false)
 const allProducts = ref([])
 const cardTypes = computed(() => allProducts.value.filter((p) => p.product_type !== 'goods'))
 const goods = computed(() => allProducts.value.filter((p) => p.product_type === 'goods'))
@@ -240,6 +243,7 @@ const submitCard = async () => {
   const valid = await cardFormRef.value.validate().catch(() => false)
   if (!valid) return
   const payload = { ...cardForm, productType: 'membership' }
+  submittingCard.value = true
   try {
     if (editingCardId.value) {
       await updateCardType(editingCardId.value, payload)
@@ -250,7 +254,9 @@ const submitCard = async () => {
     }
     cardDialogVisible.value = false
     load()
-  } catch (e) { /* 拦截器已提示 */ }
+  } catch (e) { /* 拦截器已提示 */ } finally {
+    submittingCard.value = false
+  }
 }
 // ---- 实物商品 ----
 const goodsDialogVisible = ref(false)
@@ -278,6 +284,7 @@ const submitGoods = async () => {
   const valid = await goodsFormRef.value.validate().catch(() => false)
   if (!valid) return
   const payload = { ...goodsForm, productType: 'goods' }
+  submittingGoods.value = true
   try {
     if (editingGoodsId.value) {
       await updateCardType(editingGoodsId.value, payload)
@@ -288,7 +295,9 @@ const submitGoods = async () => {
     }
     goodsDialogVisible.value = false
     load()
-  } catch (e) { /* 拦截器已提示 */ }
+  } catch (e) { /* 拦截器已提示 */ } finally {
+    submittingGoods.value = false
+  }
 }
 onMounted(load)
 </script>

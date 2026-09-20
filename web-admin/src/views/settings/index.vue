@@ -58,7 +58,7 @@
               </div>
             </el-form-item>
             <el-form-item>
-              <el-button type="primary" @click="saveOrg">保存设置</el-button>
+              <el-button type="primary" :loading="savingOrg" @click="saveOrg">保存设置</el-button>
             </el-form-item>
           </el-form>
         </div>
@@ -96,7 +96,7 @@
             </div>
           </div>
 
-          <el-button type="primary" @click="savePoints">保存规则</el-button>
+          <el-button type="primary" :loading="savingPoints" @click="savePoints">保存规则</el-button>
         </div>
 
         <!-- 推送规则 -->
@@ -146,7 +146,7 @@
           </div>
 
           <div class="rule-actions">
-            <el-button type="primary" @click="saveNotification">保存规则</el-button>
+            <el-button type="primary" :loading="savingNotification" @click="saveNotification">保存规则</el-button>
             <el-button :icon="Bell" :loading="renewalSending" @click="sendRenewalNow">立即发送续费提醒</el-button>
           </div>
           <p class="section-hint">「立即发送续费提醒」将按上方「续期提醒」的提前天数，向到期家长发送站内通知（同一档位只发一次）。</p>
@@ -190,7 +190,7 @@
             </el-form-item>
 
             <el-form-item>
-              <el-button type="primary" @click="saveRefund">保存规则</el-button>
+              <el-button type="primary" :loading="savingRefund" @click="saveRefund">保存规则</el-button>
             </el-form-item>
           </el-form>
         </div>
@@ -1077,6 +1077,11 @@ const conceptOptions = CONCEPTS
 const termSchemeSel = ref('edu')
 const termOverridesLocal = reactive({})
 const termSaving = ref(false)
+// 提交防重复：各保存按钮的进行中状态（双击 / 网络慢重复点击会重复提交）
+const savingOrg = ref(false)
+const savingPoints = ref(false)
+const savingNotification = ref(false)
+const savingRefund = ref(false)
 
 const presetValue = (key) => {
   const s = SCHEMES[termSchemeSel.value]
@@ -1257,6 +1262,7 @@ const saveOrg = async () => {
     const valid = await orgFormRef.value.validate().catch(() => false)
     if (!valid) return
   }
+  savingOrg.value = true
   try {
     const { servicePhone, ...orgInfo } = orgForm
     await saveSettings({
@@ -1266,6 +1272,8 @@ const saveOrg = async () => {
     ElMessage.success('机构信息保存成功')
   } catch (e) {
     // 拦截器已提示
+  } finally {
+    savingOrg.value = false
   }
 }
 
@@ -1280,11 +1288,14 @@ const DEFAULT_POINTS_RULES = [
 const pointsRules = ref(DEFAULT_POINTS_RULES.map((r) => ({ ...r })))
 
 const savePoints = async () => {
+  savingPoints.value = true
   try {
     await saveSettings({ points_rules: pointsRules.value })
     ElMessage.success('积分规则保存成功')
   } catch (e) {
     // 拦截器已提示
+  } finally {
+    savingPoints.value = false
   }
 }
 
@@ -1329,11 +1340,14 @@ const DEFAULT_NOTIFICATION_RULES = [
 const notificationRules = ref(DEFAULT_NOTIFICATION_RULES.map((r) => ({ ...r })))
 
 const saveNotification = async () => {
+  savingNotification.value = true
   try {
     await saveSettings({ notification_rules: notificationRules.value })
     ElMessage.success('推送规则保存成功')
   } catch (e) {
     // 拦截器已提示
+  } finally {
+    savingNotification.value = false
   }
 }
 
@@ -1363,11 +1377,14 @@ const refundForm = reactive({
 })
 
 const saveRefund = async () => {
+  savingRefund.value = true
   try {
     await saveSettings({ refund_rules: { ...refundForm } })
     ElMessage.success('退费规则保存成功')
   } catch (e) {
     // 拦截器已提示
+  } finally {
+    savingRefund.value = false
   }
 }
 

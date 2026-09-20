@@ -41,7 +41,7 @@
             @drop="onDrop(idx)"
             @dragend="dragIndex = null"
           >
-            <el-icon class="cs-grip" :size="15"><Rank /></el-icon>
+            <el-icon class="cs-grip" :size="16"><Rank /></el-icon>
             <span class="cs-label">{{ labelOf(key) }}</span>
             <div class="cs-ops">
               <el-button text aria-label="上移此列" :disabled="idx === 0" class="cs-icon-btn" @click="move(idx, -1)">

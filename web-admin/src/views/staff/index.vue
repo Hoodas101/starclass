@@ -196,7 +196,7 @@
       <template #footer>
         <div class="dialog-footer">
           <el-button @click="addDialogVisible = false">取消</el-button>
-          <el-button type="primary" @click="submitAdd">确认添加</el-button>
+          <el-button type="primary" :loading="submitting" @click="submitAdd">确认添加</el-button>
         </div>
       </template>
     </el-dialog>
