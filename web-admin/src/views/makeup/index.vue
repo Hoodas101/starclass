@@ -43,7 +43,7 @@
         </template>
       </div>
       <div class="toolbar-right">
-        <el-button type="primary" @click="refreshActive">刷新</el-button>
+        <el-button @click="refreshActive">刷新</el-button>
       </div>
     </div>
 

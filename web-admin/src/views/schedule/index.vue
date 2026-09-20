@@ -36,7 +36,7 @@
         <el-button text @click="nextPeriod">
           <el-icon><ArrowRight /></el-icon>
         </el-button>
-        <el-button text type="primary" @click="goToday">今天</el-button>
+        <el-button text @click="goToday">今天</el-button>
         <div class="range-control">
           <el-select v-model="rangeStart" size="small" style="width: 88px" @change="applyRange">
             <el-option v-for="h in rangeOptions" :key="h" :label="`${h}:00`" :value="h" :disabled="h >= rangeEnd" />
@@ -121,7 +121,7 @@
         <el-button text @click="nextPeriod">
           <el-icon><ArrowRight /></el-icon>
         </el-button>
-        <el-button text type="primary" @click="goToday">今天</el-button>
+        <el-button text @click="goToday">今天</el-button>
         <span v-if="loading" class="loading-hint">加载中…</span>
       </div>
 
