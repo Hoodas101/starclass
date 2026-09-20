@@ -865,6 +865,24 @@ html, body {
   to { opacity: 1; transform: translateY(0); }
 }
 
+// ============================================
+// 全局 reduced-motion 兜底（DESIGN.md §6.3）
+// 现有 3 处降级（.fade-* / .table-container / .v4-stagger-in / .v4-btn / .v4-card）
+// 只覆盖局部的 transition/animation。Element Plus 弹窗/抽屉/popper 等
+// 内部组件默认不响应系统「减少动效」偏好，本兜底把项目内**所有**动效降到
+// 0.01ms（视觉上等价于无动画），保留状态切换的最终结果，不丢失信息。
+// ============================================
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 .page-header,
 .table-container,
 .metric-row,
