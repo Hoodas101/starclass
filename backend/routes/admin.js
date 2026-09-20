@@ -301,6 +301,35 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const totalPointsRow = db.prepare('SELECT COALESCE(SUM(total_earned), 0) as total FROM points').get();
     const totalPoints = totalPointsRow?.total || 0;
 
+    // 连续缺勤学员（对标班主任工作台的「关注雷达」：把需要关注的学员聚合到一屏）
+    //
+    // 口径（**默认值，未经业务确认**，机构可调）：
+    //   · 窗口：最近 30 天
+    //   · 阈值：该窗口内 ≥3 次考勤且**全部缺席**
+    //   · 请假（leave）不计入缺席 —— 它是机构已批准的正常状态，不是异常
+    //   · 排除已退费/已归档学员（与全站 ACTIVE_STUDENT_SQL 口径一致）
+    //
+    // 刻意用「窗口内全部缺席」而非严格「连续 N 次」：小机构学员考勤次数少，
+    // 严格连续在数据稀疏时几乎不会触发，等于白做。待真实数据积累后可再收紧。
+    const attFrom = formatDate(now() - 30 * 86400000);
+    let attentionStudents = [];
+    try {
+      attentionStudents = db.prepare(`
+        SELECT s.id, s.name, COUNT(*) AS total,
+               SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) AS absent
+        FROM attendances a
+        JOIN students s ON s.id = a.student_id
+        WHERE a.date >= ? AND a.date <= ? AND ${ACTIVE_STUDENT_SQL}
+        GROUP BY s.id, s.name
+        HAVING total >= 3 AND absent = total
+        ORDER BY absent DESC, s.name
+        LIMIT 5
+      `).all(attFrom, today);
+    } catch (e) {
+      // 表结构异常时不让整个看板 500 —— 该区块降级为空
+      console.error('[dashboard attentionStudents]', e && e.message);
+    }
+
     res.json(success({
       overview: {
         totalStudents,
@@ -337,6 +366,7 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
       },
       alerts: {
         expiringCards,
+        attentionStudents,
       },
     }));
   } catch (err) {

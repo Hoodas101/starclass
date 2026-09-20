@@ -318,6 +318,8 @@ const expireText = (ts) => {
 
 const buildStats = (data) => {
   const { overview, today, revenue, alerts } = data
+  // 连续缺勤学员（后端 alerts.attentionStudents，默认口径见 backend/routes/admin.js）
+  attentionStudents.value = (alerts && alerts.attentionStudents) || []
   const deltaNote = (label, v) => (v != null ? `${label} ${v > 0 ? '+' : ''}${v}%` : '')
   const fmt = (v) => formatMoney(v)
   // 卡片即入口：点统计卡跳到对应页面（对标班主任工作台的 stat-go）
@@ -706,6 +708,8 @@ const loadRecentActivities = async () => {
 // 待处理事项（来自 /api/membership/expiring）
 // ============================================
 const pendingItems = ref([])
+// 连续缺勤学员（由 loadDashboard 从 alerts 存入，供 loadPendingItems 消费）
+const attentionStudents = ref([])
 
 const loadPendingItems = async () => {
   const items = []
@@ -741,6 +745,17 @@ const loadPendingItems = async () => {
   } catch (e) {
     /* 忽略 */
   }
+  // 连续缺勤学员：数据来自 loadDashboard 的 alerts.attentionStudents
+  // （后端聚合，默认口径：最近 30 天 ≥3 次考勤且全部缺席、请假不算、
+  //   排除已退费/已归档；口径可在 backend/routes/admin.js 调整）
+  items.push(...(attentionStudents.value || []).map((s) => ({
+    id: 'att-' + s.id,
+    kind: 'attention',
+    type: 'refund',        // 复用红色警示样式——连续缺勤是负面信号
+    icon: Warning,
+    title: '连续缺勤',
+    desc: `${s.name}：最近 30 天 ${s.absent} 次考勤全部缺席`
+  })))
   // 跟进任务（借鉴 trycompai/crm 的 AgentTask 队列）
   try {
     const fu = await getFollowUpsToday()
@@ -799,9 +814,10 @@ const loadDashboard = async () => {
 let resizeHandler = null
 
 onMounted(() => {
-  loadDashboard()
+  // loadPendingItems 依赖 loadDashboard 写入的 attentionStudents（连续缺勤），
+  // 必须等它完成——并行调用时待处理事项会漏掉「连续缺勤」这一类
+  loadDashboard().then(() => loadPendingItems())
   loadRecentActivities()
-  loadPendingItems()
   loadCharts()
 
   resizeHandler = () => {
