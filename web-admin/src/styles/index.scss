@@ -125,6 +125,11 @@ html[data-theme='dark'] {
   --t-bg-alt: #15151A;
   --t-bg-elev: #17171C;
   --t-surface: #17171C;
+  // 暗色浮层背景：此前本块**漏了** --t-bg-overlay，导致暗色下弹窗/抽屉/消息框
+  // 仍继承亮色的 #FFFFFF，而文字是 --t-text-1 (#F5F5F7 浅灰白)
+  // → 白底浅字，弹窗内容完全看不清（用户反馈「太透明」的根因）。
+  // 与 --t-surface 一致，保证浮层与卡片同色、文字对比度正常。
+  --t-bg-overlay: #17171C;
   --t-surface-hover: #1F1F26;
   --t-surface-strong: #26262E;
   --t-line: #2A2A33;
