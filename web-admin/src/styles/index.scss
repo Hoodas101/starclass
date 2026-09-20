@@ -316,11 +316,19 @@ html, body {
 
   --el-table-border-color: transparent;
   --el-table-header-bg-color: var(--t-bg-alt);
-  --el-table-row-hover-bg-color: var(--t-hover-bg);
+  // 行 hover 加强：原 --t-hover-bg (4% 黑) 太弱，扫读时看不出"当前行"。
+  // 改为主色淡底（8%），并配合下方左侧 3px 主色条——
+  // 工作台表格需要明确的当前行指示（Linear / Stripe 一类都是这个做法）。
+  --el-table-row-hover-bg-color: var(--t-accent-bg);
   --el-table-bg-color: transparent;
   --el-table-tr-bg-color: transparent;
   --el-table-header-text-color: var(--t-text-2);
   --el-table-text-color: var(--t-text-1);
+
+  // 左侧 3px 主色条：给 hover 行一个清晰的"游标"锚点
+  tbody tr:hover > td.el-table__cell:first-child {
+    box-shadow: inset 3px 0 0 var(--t-accent);
+  }
 
   th.el-table__cell {
     text-align: left;
