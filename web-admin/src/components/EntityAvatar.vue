@@ -40,9 +40,9 @@ const initials = computed(() => {
   transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 
   &.size-xs { width: 22px; height: 22px; border-radius: 8px; font-size: var(--t-fs-2xs); }
-  &.size-sm { width: 28px; height: 28px; border-radius: 9px; font-size: var(--t-fs-xs); }
-  &.size-default { width: 36px; height: 36px; border-radius: 11px; font-size: var(--t-fs-base); }
-  &.size-lg { width: 44px; height: 44px; border-radius: 13px; font-size: var(--t-fs-lg); }
+  &.size-sm { width: 28px; height: 28px; border-radius: 50%; font-size: var(--t-fs-xs); }
+  &.size-default { width: 36px; height: 36px; border-radius: 50%; font-size: var(--t-fs-base); }
+  &.size-lg { width: 44px; height: 44px; border-radius: 50%; font-size: var(--t-fs-lg); }
   &.size-xl { width: 56px; height: 56px; border-radius: 8px; font-size: var(--t-fs-xl); }
 
   &.tone-accent { background: color-mix(in srgb, var(--t-accent) 14%, transparent); color: var(--t-accent-strong, var(--t-accent)); }

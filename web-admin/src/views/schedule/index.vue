@@ -1340,7 +1340,7 @@ onBeforeUnmount(() => {})
   font-size: var(--t-fs-2xs);
   color: var(--t-accent-text);
   background: var(--t-accent-bg);
-  border-radius: 999px;
+  border-radius: 9999px;
   padding: 0 6px;
   font-weight: 600;
 }

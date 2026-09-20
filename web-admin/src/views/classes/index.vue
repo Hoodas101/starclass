@@ -438,7 +438,7 @@ onMounted(loadCourses)
     font-weight: 600;
     background: rgba(0, 0, 0, 0.78);
     padding: 4px 12px;
-    border-radius: 999px;
+    border-radius: 9999px;
     backdrop-filter: blur(4px);
   }
 
