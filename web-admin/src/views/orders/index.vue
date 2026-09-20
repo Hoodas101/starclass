@@ -35,19 +35,19 @@
     <div class="order-stats">
       <div class="order-stat-card">
         <span class="order-stat-label">今日收入</span>
-        <span class="order-stat-value">¥{{ todayAmount.toLocaleString() }}</span>
+        <span class="order-stat-value v4-num-display is-md">¥{{ todayAmount.toLocaleString() }}</span>
       </div>
       <div class="order-stat-card">
         <span class="order-stat-label">本月营收</span>
-        <span class="order-stat-value">¥{{ monthAmount.toLocaleString() }}</span>
+        <span class="order-stat-value v4-num-display is-md">¥{{ monthAmount.toLocaleString() }}</span>
       </div>
       <div class="order-stat-card">
         <span class="order-stat-label">本年营收</span>
-        <span class="order-stat-value">¥{{ yearAmount.toLocaleString() }}</span>
+        <span class="order-stat-value v4-num-display is-md">¥{{ yearAmount.toLocaleString() }}</span>
       </div>
       <div class="order-stat-card">
         <span class="order-stat-label">销售单数</span>
-        <span class="order-stat-value">{{ totalOrders }}</span>
+        <span class="order-stat-value v4-num-display is-md">{{ totalOrders }}</span>
       </div>
     </div>
 
@@ -1003,10 +1003,12 @@ const loadStaffOptions = async () => {
   }
 
   .order-stat-value {
-    font-size: var(--t-fs-3xl);
+    font-size: var(--v4-fs-5xl);
     font-weight: 700;
     color: var(--t-text-1);
     font-variant-numeric: tabular-nums;
+    line-height: 1;
+    letter-spacing: -0.025em;
 
     &.warning {
       color: var(--t-danger-text);

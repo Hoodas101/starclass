@@ -72,19 +72,19 @@
     <!-- 汇总卡片 -->
     <div class="stat-cards">
       <div class="stat-card">
-        <div class="stat-value text-success">{{ summary.attendedSessions }}</div>
+        <div class="stat-value text-success v4-num-display is-md">{{ summary.attendedSessions }}</div>
         <div class="stat-label">出勤次数</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value">{{ summary.totalSessions }}</div>
+        <div class="stat-value v4-num-display is-md">{{ summary.totalSessions }}</div>
         <div class="stat-label">应到次数</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value text-accent">{{ summary.attendedHours }}<span class="stat-unit">课时</span></div>
+        <div class="stat-value text-accent v4-num-display is-md">{{ summary.attendedHours }}<span class="stat-unit">课时</span></div>
         <div class="stat-label">已上课时</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value text-accent">{{ summary.attendanceRate }}<span class="stat-unit">%</span></div>
+        <div class="stat-value text-accent v4-num-display is-md">{{ summary.attendanceRate }}<span class="stat-unit">%</span></div>
         <div class="stat-label">出勤率</div>
       </div>
     </div>
@@ -451,11 +451,12 @@ onBeforeUnmount(() => {
   box-shadow: var(--t-card-shadow);
 }
 .stat-value {
-  font-size: var(--t-fs-3xl);
+  font-size: var(--v4-fs-5xl);
   font-weight: 700;
   color: var(--t-text-1);
-  line-height: 1.1;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.025em;
 }
 .stat-unit {
   font-size: var(--t-fs-sm);
