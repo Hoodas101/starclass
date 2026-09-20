@@ -29,22 +29,22 @@
     <div class="metric-row">
       <div class="metric-card">
         <div class="stat-label">总收入</div>
-        <div class="stat-value">¥{{ fmt(summary.revenue?.gross || 0) }}</div>
+        <div class="stat-value v4-num-display is-md">¥{{ fmt(summary.revenue?.gross || 0) }}</div>
         <div class="stat-sub">{{ summary.orders?.paid || 0 }} 笔订单</div>
       </div>
       <div class="metric-card">
         <div class="stat-label">退款</div>
-        <div class="stat-value danger">¥{{ fmt(summary.revenue?.refunded || 0) }}</div>
+        <div class="stat-value danger v4-num-display is-md">¥{{ fmt(summary.revenue?.refunded || 0) }}</div>
         <div class="stat-sub">{{ summary.orders?.refunded || 0 }} 笔退款</div>
       </div>
       <div class="metric-card">
         <div class="stat-label">净收入</div>
-        <div class="stat-value success">¥{{ fmt(summary.revenue?.net || 0) }}</div>
+        <div class="stat-value success v4-num-display is-md">¥{{ fmt(summary.revenue?.net || 0) }}</div>
         <div class="stat-sub">扣除退款后</div>
       </div>
       <div class="metric-card">
         <div class="stat-label">教师支出</div>
-        <div class="stat-value warning">¥{{ fmt(summary.expense?.coachPay || 0) }}</div>
+        <div class="stat-value warning v4-num-display is-md">¥{{ fmt(summary.expense?.coachPay || 0) }}</div>
         <div class="stat-sub">利润 ¥{{ fmt(summary.profit || 0) }}</div>
       </div>
     </div>
@@ -269,10 +269,12 @@ onMounted(() => loadAll())
   margin-bottom: 8px;
 }
 .stat-value {
-  font-size: var(--t-fs-2xl);
+  font-size: var(--v4-fs-5xl);
   font-weight: 700;
   color: var(--t-text-1);
   font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: -0.025em;
 }
 .stat-value.danger { color: var(--t-danger-text); }
 .stat-value.success { color: var(--t-success-text); }

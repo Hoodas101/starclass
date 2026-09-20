@@ -242,11 +242,11 @@
         <div v-for="p in selfPeriods" :key="p.key" class="self-card">
           <span class="self-label">{{ p.label }}</span>
           <div class="self-nums">
-            <span class="self-num">{{ p.classes }}</span>
+            <span class="self-num v4-num-display is-md">{{ p.classes }}</span>
             <span class="self-num-label">上课节数</span>
           </div>
           <div class="self-nums people">
-            <span class="self-num">{{ p.students }}</span>
+            <span class="self-num v4-num-display is-md">{{ p.students }}</span>
             <span class="self-num-label">上课人次</span>
           </div>
         </div>
@@ -257,7 +257,7 @@
           <span class="self-pay-rule">{{ selfPay.summary }}</span>
         </div>
         <div class="self-pay-nums">
-          <span class="self-pay-amount">¥{{ selfPay.totals.amount.toLocaleString() }}</span>
+          <span class="self-pay-amount v4-num-display is-md">¥{{ selfPay.totals.amount.toLocaleString() }}</span>
           <span class="self-pay-detail">{{ selfPay.totals.classes }} 节 · {{ selfPay.totals.students }} 人次（按实际签到人数计算）</span>
         </div>
       </div>
@@ -744,7 +744,7 @@ onMounted(() => {
 .self-card { background: var(--t-surface); border: 1px solid var(--t-line); border-radius: var(--t-radius-xl); padding: 24px; }
 .self-label { font-size: var(--t-fs-sm); font-weight: 600; color: var(--t-accent-text); }
 .self-nums { display: flex; align-items: baseline; gap: 8px; margin-top: var(--t-spacing-md); }
-.self-num { font-size: var(--t-fs-3xl); font-weight: 700; color: var(--t-text-1); font-variant-numeric: tabular-nums; }
+.self-num { font-size: var(--v4-fs-5xl); font-weight: 700; color: var(--t-text-1); font-variant-numeric: tabular-nums; line-height: 1; letter-spacing: -0.025em; }
 .self-nums.people .self-num { color: var(--t-accent-strong); }
 .self-num-label { font-size: var(--t-fs-xs); color: var(--t-text-3); }
 .self-pay-card {
@@ -758,7 +758,7 @@ onMounted(() => {
 .self-pay-title { font-size: var(--t-fs-base); font-weight: 700; color: var(--t-text-1); }
 .self-pay-rule { font-size: var(--t-fs-sm); color: var(--t-accent-text); }
 .self-pay-nums { display: flex; align-items: baseline; gap: var(--t-spacing-md); margin-top: var(--t-spacing-sm); flex-wrap: wrap; }
-.self-pay-amount { font-size: var(--t-fs-3xl); font-weight: 700; color: var(--t-accent-strong); font-variant-numeric: tabular-nums; }
+.self-pay-amount { font-size: var(--v4-fs-5xl); font-weight: 700; color: var(--t-accent-strong); font-variant-numeric: tabular-nums; line-height: 1; letter-spacing: -0.025em; }
 .self-pay-detail { font-size: var(--t-fs-xs); color: var(--t-text-2); }
 .self-tip { margin-top: var(--t-spacing-md); font-size: var(--t-fs-xs); color: var(--t-text-3); background: var(--t-surface); border: 1px solid var(--t-line); border-radius: var(--t-radius-xl); padding: var(--t-spacing-sm) var(--t-spacing-md); }
 </style>
