@@ -81,7 +81,7 @@
               <div class="day-grid">
                 <div v-for="hour in timeSlots" :key="hour" class="hour-cell"></div>
               </div>
-              <div
+              <div role="button" tabindex="0"
                 v-for="course in dayCourses(day.date)"
                 :key="course.id"
                 class="course-block"
@@ -90,7 +90,7 @@
                 draggable="true"
                 @dragstart="onDragStart($event, course)"
                 @dragend="onDragEnd"
-                @click="openEditDialog(course)"
+                @click="openEditDialog(course)" @keydown.enter="openEditDialog(course)" @keydown.space.prevent="openEditDialog(course)"
               >
                 <span class="course-name" :style="{ color: courseTextColor(course.color) }">
                   {{ course.course_name }}
@@ -130,12 +130,12 @@
           <div v-for="w in monthWeekdays" :key="w" class="month-weekday">{{ w }}</div>
         </div>
         <div v-for="(week, wi) in monthCells" :key="wi" class="month-week">
-          <div
+          <div role="button" tabindex="0"
             v-for="cell in week"
             :key="cell.date"
             class="month-cell"
             :class="{ 'out-month': !cell.inMonth, today: cell.isToday }"
-            @click="openDayFromMonth(cell)"
+            @click="openDayFromMonth(cell)" @keydown.enter="openDayFromMonth(cell)" @keydown.space.prevent="openDayFromMonth(cell)"
           >
             <div class="month-cell-head">
               <span class="month-date">{{ cell.dateNum }}</span>

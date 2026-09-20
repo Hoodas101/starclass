@@ -178,7 +178,7 @@
               <span class="stat-label">应发薪资</span>
             </div>
           </div>
-          <div class="drawer-rule-card" @click="openRuleDialog(detailTarget)">
+          <div role="button" tabindex="0" class="drawer-rule-card" @click="openRuleDialog(detailTarget)" @keydown.enter="openRuleDialog(detailTarget)" @keydown.space.prevent="openRuleDialog(detailTarget)">
             <div class="rule-card-left">
               <span class="rule-card-label">薪资规则</span>
               <span class="rule-card-value">{{ detailData.summary }}</span>

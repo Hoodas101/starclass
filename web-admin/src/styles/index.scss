@@ -1322,3 +1322,45 @@ html, body {
   .v4-btn { transition: none; }
   .v4-card { transition: none; }
 }
+
+// ============================================
+// 可访问性：键盘可操作元素（role="button"）
+// 全站 24 处 div/span 绑 @click 的导航项 / 卡片 / 可编辑属性值，
+// 已加 role="button" + tabindex="0" + Enter/Space 键盘事件。
+// 此处补全局指针与焦点可见性（焦点环复用上方 :focus-visible 兜底 token）。
+// ============================================
+[role='button'] {
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid var(--t-accent-line);
+    outline-offset: 2px;
+    border-radius: var(--t-radius-sm);
+  }
+}
+
+// ============================================
+// 响应式最小保障（不横向滚动、不崩版）
+// 本项目是桌面工作台（主屏 ≥1440px），不做移动端完整适配，
+// 仅保证窄屏 / 分屏下不出现横向滚动条、内容不被裁切。
+// 768px 以下的既有处理见 MainLayout.vue。
+// ============================================
+@media (max-width: 1280px) {
+  // 收紧内容区左右留白，把宽度还给内容
+  .content { padding-left: 24px !important; padding-right: 24px !important; }
+}
+
+@media (max-width: 1024px) {
+  .content { padding-left: 16px !important; padding-right: 16px !important; }
+
+  // 多列网格降列，避免每列被压得过窄
+  .stat-cards,
+  .overview-strip { grid-template-columns: repeat(2, 1fr) !important; }
+
+  .charts-row,
+  .lists-row { grid-template-columns: 1fr !important; }
+
+  // 宽内容允许容器内横向滚动，不撑破页面
+  .table-container,
+  .week-view { max-width: 100%; overflow-x: auto; }
+}

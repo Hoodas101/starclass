@@ -121,12 +121,12 @@
           <el-icon :size="40" color="var(--t-text-faint)"><Bell /></el-icon>
           <p>暂无通知</p>
         </div>
-        <div
+        <div role="button" tabindex="0"
           v-for="n in notices"
           :key="n.id"
           class="notice-item"
           :class="{ unread: !n.isRead }"
-          @click="readNotice(n)"
+          @click="readNotice(n)" @keydown.enter="readNotice(n)" @keydown.space.prevent="readNotice(n)"
         >
           <span class="notice-item-dot" :class="'p-' + (n.priority || 'normal')"></span>
           <div class="notice-item-main">
@@ -160,11 +160,11 @@
           <template v-if="!quickQuery">
             <div class="quick-group">
               <div class="quick-group-title">页面导航</div>
-              <div
+              <div role="button" tabindex="0"
                 v-for="r in quickMenus"
                 :key="r.path"
                 class="quick-item"
-                @click="quickGo('/' + r.path)"
+                @click="quickGo('/' + r.path)" @keydown.enter="quickGo('/' + r.path)" @keydown.space.prevent="quickGo('/' + r.path)"
               >
                 <span class="quick-item-title">{{ resolveTitle(r.meta.title) }}</span>
                 <span class="quick-item-hint">/{{ r.path }}</span>
@@ -174,11 +174,11 @@
           <template v-else>
             <div v-if="quickMenusFiltered.length" class="quick-group">
               <div class="quick-group-title">页面</div>
-              <div
+              <div role="button" tabindex="0"
                 v-for="r in quickMenusFiltered"
                 :key="r.path"
                 class="quick-item"
-                @click="quickGo('/' + r.path)"
+                @click="quickGo('/' + r.path)" @keydown.enter="quickGo('/' + r.path)" @keydown.space.prevent="quickGo('/' + r.path)"
               >
                 <span class="quick-item-title">{{ resolveTitle(r.meta.title) }}</span>
                 <span class="quick-item-hint">页面</span>
@@ -186,11 +186,11 @@
             </div>
             <div v-if="quickStudents.length" class="quick-group">
               <div class="quick-group-title">成员</div>
-              <div
+              <div role="button" tabindex="0"
                 v-for="s in quickStudents"
                 :key="s.id"
                 class="quick-item"
-                @click="quickGo('/students?keyword=' + encodeURIComponent(s.name))"
+                @click="quickGo('/students?keyword=' + encodeURIComponent(s.name))" @keydown.enter="quickGo('/students?keyword=' + encodeURIComponent(s.name))" @keydown.space.prevent="quickGo('/students?keyword=' + encodeURIComponent(s.name))"
               >
                 <span class="quick-item-title">{{ s.name }}</span>
                 <span class="quick-item-hint">{{ s.parent_phone || '成员' }}</span>
@@ -198,11 +198,11 @@
             </div>
             <div v-if="quickLeads.length" class="quick-group">
               <div class="quick-group-title">线索</div>
-              <div
+              <div role="button" tabindex="0"
                 v-for="l in quickLeads"
                 :key="l.id"
                 class="quick-item"
-                @click="quickGo('/growth')"
+                @click="quickGo('/growth')" @keydown.enter="quickGo('/growth')" @keydown.space.prevent="quickGo('/growth')"
               >
                 <span class="quick-item-title">{{ l.name }}</span>
                 <span class="quick-item-hint">{{ l.phone || '线索' }}</span>

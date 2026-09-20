@@ -197,7 +197,7 @@
                   <template v-if="editingField === 'name'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('name')" @blur="saveEdit('name')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" @click="startEdit('name', selectedStudent.name)">{{ selectedStudent.name || '-' }}</span>
+                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('name', selectedStudent.name)" @keydown.enter="startEdit('name', selectedStudent.name)" @keydown.space.prevent="startEdit('name', selectedStudent.name)">{{ selectedStudent.name || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">性别</span>
@@ -207,14 +207,14 @@
                       <el-option label="女" value="女" />
                     </el-select>
                   </template>
-                  <span v-else class="prop-value prop-editable" @click="startEdit('gender', selectedStudent.gender)">{{ selectedStudent.gender || '-' }}</span>
+                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('gender', selectedStudent.gender)" @keydown.enter="startEdit('gender', selectedStudent.gender)" @keydown.space.prevent="startEdit('gender', selectedStudent.gender)">{{ selectedStudent.gender || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">出生日期</span>
                   <template v-if="editingField === 'birthday'">
                     <el-date-picker v-model="editValue" type="date" size="small" value-format="YYYY-MM-DD" class="prop-input" @change="saveEdit('birthday')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" @click="startEdit('birthday', selectedStudent.birthday)">{{ selectedStudent.birthday || '-' }}</span>
+                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('birthday', selectedStudent.birthday)" @keydown.enter="startEdit('birthday', selectedStudent.birthday)" @keydown.space.prevent="startEdit('birthday', selectedStudent.birthday)">{{ selectedStudent.birthday || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">年龄</span>
@@ -225,35 +225,35 @@
                   <template v-if="editingField === 'level'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('level')" @blur="saveEdit('level')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" @click="startEdit('level', selectedStudent.level)">{{ selectedStudent.level || '未设置' }}</span>
+                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('level', selectedStudent.level)" @keydown.enter="startEdit('level', selectedStudent.level)" @keydown.space.prevent="startEdit('level', selectedStudent.level)">{{ selectedStudent.level || '未设置' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">{{ $t('guardian') }}姓名</span>
                   <template v-if="editingField === 'parentName'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('parentName')" @blur="saveEdit('parentName')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" @click="startEdit('parentName', selectedStudent.parent_name)">{{ selectedStudent.parent_name || '-' }}</span>
+                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('parentName', selectedStudent.parent_name)" @keydown.enter="startEdit('parentName', selectedStudent.parent_name)" @keydown.space.prevent="startEdit('parentName', selectedStudent.parent_name)">{{ selectedStudent.parent_name || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">手机号</span>
                   <template v-if="editingField === 'parent_phone'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('parent_phone')" @blur="saveEdit('parent_phone')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" @click="startEdit('parent_phone', selectedStudent.parent_phone)">{{ selectedStudent.parent_phone || '-' }}</span>
+                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('parent_phone', selectedStudent.parent_phone)" @keydown.enter="startEdit('parent_phone', selectedStudent.parent_phone)" @keydown.space.prevent="startEdit('parent_phone', selectedStudent.parent_phone)">{{ selectedStudent.parent_phone || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">就读学校</span>
                   <template v-if="editingField === 'school'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('school')" @blur="saveEdit('school')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" @click="startEdit('school', selectedStudent.school)">{{ selectedStudent.school || '-' }}</span>
+                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('school', selectedStudent.school)" @keydown.enter="startEdit('school', selectedStudent.school)" @keydown.space.prevent="startEdit('school', selectedStudent.school)">{{ selectedStudent.school || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">年级</span>
                   <template v-if="editingField === 'grade'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('grade')" @blur="saveEdit('grade')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" @click="startEdit('grade', selectedStudent.grade)">{{ selectedStudent.grade || '-' }}</span>
+                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('grade', selectedStudent.grade)" @keydown.enter="startEdit('grade', selectedStudent.grade)" @keydown.space.prevent="startEdit('grade', selectedStudent.grade)">{{ selectedStudent.grade || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">加入时间</span>
@@ -280,7 +280,7 @@
                   <template v-if="editingField === 'remark'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('remark')" @blur="saveEdit('remark')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" @click="startEdit('remark', selectedStudent.remark)">{{ selectedStudent.remark || '点击添加备注' }}</span>
+                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('remark', selectedStudent.remark)" @keydown.enter="startEdit('remark', selectedStudent.remark)" @keydown.space.prevent="startEdit('remark', selectedStudent.remark)">{{ selectedStudent.remark || '点击添加备注' }}</span>
                 </div>
               </div>
             </div>
@@ -472,7 +472,7 @@
           <el-input v-model="addForm.phone" :placeholder="`${$t('guardian')}手机号（用于登录）`" maxlength="11" />
         </el-form-item>
 
-        <div class="more-toggle" @click="showMoreFields = !showMoreFields">
+        <div role="button" tabindex="0" class="more-toggle" @click="showMoreFields = !showMoreFields" @keydown.enter="showMoreFields = !showMoreFields" @keydown.space.prevent="showMoreFields = !showMoreFields">
           <el-icon :size="13" class="more-arrow" :class="{ open: showMoreFields }">
             <CaretBottom />
           </el-icon>

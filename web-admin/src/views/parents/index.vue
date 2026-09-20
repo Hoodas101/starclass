@@ -94,11 +94,11 @@
     <!-- 选择通知家长弹窗 -->
     <el-dialog v-model="pickVisible" title="选择通知家长" class="dlg-sm">
       <div class="pick-list">
-        <div
+        <div role="button" tabindex="0"
           v-for="pa in sendPickRow?.parents || []"
           :key="pa.parent_phone"
           class="pick-item"
-          @click="pickSend(pa)"
+          @click="pickSend(pa)" @keydown.enter="pickSend(pa)" @keydown.space.prevent="pickSend(pa)"
         >
           <span class="pl-name">{{ pa.parent_name }}</span>
           <span v-if="pa.relation" class="pl-rel">{{ pa.relation }}</span>

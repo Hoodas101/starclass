@@ -45,12 +45,12 @@
           <div class="field-block" :style="{ '--i': 1 }">
             <div class="field-label">登录身份</div>
             <div class="role-group">
-              <div
+              <div role="button" tabindex="0"
                 v-for="r in roles"
                 :key="r.value"
                 class="role-chip"
                 :class="{ active: loginForm.role === r.value }"
-                @click="loginForm.role = r.value"
+                @click="loginForm.role = r.value" @keydown.enter="loginForm.role = r.value" @keydown.space.prevent="loginForm.role = r.value"
               >
                 <el-icon :size="18"><component :is="r.icon" /></el-icon>
                 <span>{{ $roleLabel(r.value) }}</span>

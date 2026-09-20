@@ -6,12 +6,12 @@
     <div class="settings-layout">
       <!-- 左侧导航 -->
       <div class="settings-nav">
-        <div
+        <div role="button" tabindex="0"
           v-for="tab in visibleTabs"
           :key="tab.key"
           class="nav-item"
           :class="{ active: activeTab === tab.key }"
-          @click="activeTab = tab.key"
+          @click="activeTab = tab.key" @keydown.enter="activeTab = tab.key" @keydown.space.prevent="activeTab = tab.key"
         >
           <el-icon :size="18">
             <component :is="tab.icon" />

@@ -25,11 +25,11 @@
     <!-- 项目卡片网格 -->
     <div v-loading="loading" class="class-grid">
       <ListErrorState v-if="!loading && error" :error="error" @retry="loadCourses" />
-      <div
+      <div role="button" tabindex="0"
         v-for="cls in filteredCourses"
         :key="cls.id"
         class="class-card"
-        @click="openDetail(cls)"
+        @click="openDetail(cls)" @keydown.enter="openDetail(cls)" @keydown.space.prevent="openDetail(cls)"
       >
         <div class="class-card-banner" :style="{ background: cls.color || classFallback() }">
           <span class="class-card-category">{{ cls.category || '常规训练' }}</span>

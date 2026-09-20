@@ -109,7 +109,7 @@
               <span class="pipeline-col-count">{{ col.items.length }}</span>
             </div>
             <div class="pipeline-col-body">
-              <div v-for="row in col.items" :key="row.id" class="pipeline-card" @click="openLeadDialog(row)">
+              <div role="button" tabindex="0" v-for="row in col.items" :key="row.id" class="pipeline-card" @click="openLeadDialog(row)" @keydown.enter="openLeadDialog(row)" @keydown.space.prevent="openLeadDialog(row)">
                 <div class="pipeline-card-top">
                   <div class="pipeline-card-name-wrap">
                     <EntityAvatar :name="row.name" size="xs" />

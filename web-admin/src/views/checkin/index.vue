@@ -29,12 +29,12 @@
       </div>
       <ListErrorState v-if="!loading && error" :error="error" @retry="loadTodayCourses" />
       <div class="course-cards">
-        <div
+        <div role="button" tabindex="0"
           v-for="course in todayCourses"
           :key="course.id"
           class="course-card"
           :class="{ active: selectedCourse?.id === course.id }"
-          @click="selectCourse(course)"
+          @click="selectCourse(course)" @keydown.enter="selectCourse(course)" @keydown.space.prevent="selectCourse(course)"
         >
           <div class="course-card-header">
             <span class="course-card-name">{{ course.name }}</span>
