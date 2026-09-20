@@ -240,11 +240,17 @@ import { CanvasRenderer } from 'echarts/renderers'
 echarts.use([LineChart, BarChart, PieChart, GridComponent, TooltipComponent, LegendComponent, TitleComponent, CanvasRenderer])
 import dayjs from 'dayjs'
 import { useRouter } from 'vue-router'
-import { UserFilled, CaretTop, CaretBottom, Money, TrendCharts, DataLine, Coin, User, Checked, Calendar, Warning } from '@element-plus/icons-vue'
+import { UserFilled, CaretTop, CaretBottom, Money, TrendCharts, DataLine, Coin, User, Checked, Calendar, Warning, Refresh, Bell } from '@element-plus/icons-vue'
 
 // 统计卡右下角水印图标映射（stats 里的 icon 字段是字符串，需转成组件）
 const STAT_ICONS = { Money, TrendCharts, DataLine, Coin, User, Checked, Calendar, Warning }
-import { getDashboard, getCharts, getCheckinRecords, getExpiringCards, getFollowUpsToday, completeFollowUp } from '@/api/modules'
+
+// 待处理事项的图标映射。
+// 修复既有 bug：此前 icon 存的是**字符串**（'Refresh'/'Bell'），而
+// `<component :is="item.icon" />` 需要**组件引用**才能渲染——项目用 unplugin
+// 按需引入、无全局图标注册，所以字符串永远解析不出组件，图标一直不显示。
+const PENDING_ICONS = { Refresh, Bell, Calendar }
+import { getDashboard, getCharts, getCheckinRecords, getExpiringCards, getFollowUpsToday, completeFollowUp, getLeaves } from '@/api/modules'
 import { relativeTime } from '@/utils/format'
 import StatusDot from '@/components/StatusDot.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -712,13 +718,28 @@ const loadPendingItems = async () => {
         id: 'renewal-' + c.id,
         kind: 'expiring',
         type: 'renewal',
-        icon: 'Refresh',
+        icon: Refresh,
         title: '续期提醒',
         desc: `${c.student_name || c.student_name_real || '成员'} 的${t('membership')}${expireText(c.expires_at)}`
       })))
     } catch (e) {
       /* 忽略 */
     }
+  }
+  // 待审批请假：对标班主任工作台的「关注雷达」——把需要老师当下处理的事
+  // 聚合到一屏，而不是让用户逐个模块翻找
+  try {
+    const lv = await getLeaves({ status: 'pending' })
+    items.push(...(lv?.list || []).map((r) => ({
+      id: 'leave-' + r.id,
+      kind: 'leave',
+      type: 'leave',
+      icon: Calendar,
+      title: '请假待审批',
+      desc: `${r.student_name || '成员'}：${r.course_name || ''} ${r.date || ''}`.trim()
+    })))
+  } catch (e) {
+    /* 忽略 */
   }
   // 跟进任务（借鉴 trycompai/crm 的 AgentTask 队列）
   try {
@@ -728,7 +749,7 @@ const loadPendingItems = async () => {
       kind: 'followup',
       taskId: t.id,
       type: t.task_type,
-      icon: 'Bell',
+      icon: Bell,
       title: t.taskTypeText || '跟进任务',
       desc: `${t.target_name || ''}：${t.reason || ''}`
     })))
