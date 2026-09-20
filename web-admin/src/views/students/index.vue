@@ -1271,11 +1271,11 @@ onMounted(() => {
 }
 .overview-value {
   font-size: var(--t-fs-2xl);
-  font-weight: 700;
+  font-weight: 900;
   color: var(--t-text-1);
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.04em;
 }
 .overview-item.warn .overview-value {
   color: var(--t-warning-text);

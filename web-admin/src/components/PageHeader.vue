@@ -1,7 +1,11 @@
 <template>
   <div class="page-header">
     <div class="page-header-heading">
-      <h2 class="page-header-title">{{ title }}</h2>
+      <!-- title slot 优先：允许页面用 <i> 做双色标题（主词近黑 + 副词浅灰）
+           未传 slot 时回退到 title prop，对现有调用方完全向后兼容 -->
+      <h2 class="page-header-title">
+        <slot name="title">{{ title }}</slot>
+      </h2>
     </div>
     <div v-if="$slots.default" class="page-header-actions">
       <slot />
@@ -37,6 +41,13 @@ defineProps({
   margin: 0;
   letter-spacing: 0.01em;
   line-height: var(--t-leading-snug);
+
+  // 双色标题：<i> 作副词用浅灰，主词保持近黑
+  // 一句话分两层，比整句纯黑更透气（对标班主任工作台的 .gtit i）
+  :deep(i) {
+    font-style: normal;
+    color: var(--t-text-3);
+  }
 }
 
 .page-header-actions {

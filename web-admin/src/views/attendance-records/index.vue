@@ -452,11 +452,11 @@ onBeforeUnmount(() => {
 }
 .stat-value {
   font-size: var(--t-fs-3xl);
-  font-weight: 700;
+  font-weight: 900;
   color: var(--t-text-1);
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.04em;
 }
 .stat-unit {
   font-size: var(--t-fs-sm);

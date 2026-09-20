@@ -270,11 +270,11 @@ onMounted(() => loadAll())
 }
 .stat-value {
   font-size: var(--t-fs-2xl);
-  font-weight: 700;
+  font-weight: 900;
   color: var(--t-text-1);
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.04em;
 }
 .stat-value.danger { color: var(--t-danger-text); }
 .stat-value.success { color: var(--t-success-text); }

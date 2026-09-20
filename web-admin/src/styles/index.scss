@@ -400,6 +400,12 @@ html, body {
   color: var(--t-text-3);
   font-size: $fs-sm;
   line-height: 1.6;
+  // 虚线框空态（对标班主任工作台的 .r2empty）：
+  // 用「虚线边界」表达"这里本该有内容、只是暂时为空"，比纯文字更有引导性
+  padding: 16px 28px;
+  border: 1px dashed var(--t-line-strong);
+  border-radius: var(--t-radius-xl);
+  background: var(--t-bg-alt);
 
   &::before {
     content: '';
@@ -1249,8 +1255,12 @@ html, body {
 // 数字英雄卡（KPI / 统计大数字）
 .v4-num-display {
   font-family: var(--v4-font-display);
-  font-weight: 700;
-  letter-spacing: -0.025em;
+  // 数字排版力度（对标班主任工作台）：900 字重 + 强负字距
+  // 原 700 / -0.025em 偏保守，视觉冲击只有对方一半。
+  // 工作台用 46px/-2.5px（≈-0.054em），此处取 -0.04em 作中间值，
+  // 在 28px 时约 -1.1px、36px 时约 -1.4px，紧凑但不挤。
+  font-weight: 900;
+  letter-spacing: -0.04em;
   line-height: 1;
   color: var(--t-text-1);
   font-feature-settings: var(--v4-numeric);

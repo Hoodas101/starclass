@@ -1,7 +1,8 @@
 <template>
   <div class="page-shell">
     <!-- 顶部页头（使用统一 PageHeader 组件，主标题位置与全站一致） -->
-    <PageHeader title="数据看板">
+    <PageHeader>
+      <template #title>数据<i>看板</i></template>
       <el-radio-group v-model="dashboardScope" size="default" @change="onScopeChange">
         <el-radio-button value="all">全部</el-radio-button>
         <el-radio-button value="me">我的</el-radio-button>
@@ -11,10 +12,22 @@
     <!-- 统计卡片 -->
     <div v-if="widgets.statCards !== false" class="stat-cards">
       <div
-        v-for="stat in stats"
+        v-for="(stat, si) in stats"
         :key="stat.key"
         class="stat-card"
+        :class="{ 'is-clickable': stat.go }"
+        :role="stat.go ? 'button' : undefined"
+        :tabindex="stat.go ? 0 : undefined"
+        :title="stat.go ? '查看详情' : undefined"
+        @click="stat.go && router.push(stat.go)"
+        @keydown.enter="stat.go && router.push(stat.go)"
+        @keydown.space.prevent="stat.go && router.push(stat.go)"
       >
+        <!-- 右下角水印图标：低对比大图标，增加质感但不干扰内容
+             （对标班主任工作台的 .stat .ghost） -->
+        <el-icon class="stat-ghost"><component :is="STAT_ICONS[stat.icon]" /></el-icon>
+        <!-- 序号 01~08：给卡片清单感与秩序（对标 .stat .idx） -->
+        <span class="stat-idx">{{ String(si + 1).padStart(2, '0') }}</span>
         <div class="stat-header">
           <span class="stat-label">{{ stat.label }}</span>
         </div>
@@ -22,7 +35,10 @@
           <span class="stat-number v4-num-display is-md">{{ stat.value }}</span>
           <span class="stat-unit">{{ stat.unit }}</span>
         </div>
-        <div class="stat-trend" :class="stat.trend > 0 ? 'up' : 'down'">
+        <!-- 三态语义色：正=绿 / 负=红 / 无对比=中性灰
+             原为二元判断 `trend > 0 ? 'up' : 'down'`，trend 为 0 时
+             会落进 'down' 分支——「暂无对比」被染成红色，语义错误。 -->
+        <div class="stat-trend" :class="stat.tone">
           <template v-if="stat.note">
             <span>{{ stat.note }}</span>
           </template>
@@ -224,7 +240,10 @@ import { CanvasRenderer } from 'echarts/renderers'
 echarts.use([LineChart, BarChart, PieChart, GridComponent, TooltipComponent, LegendComponent, TitleComponent, CanvasRenderer])
 import dayjs from 'dayjs'
 import { useRouter } from 'vue-router'
-import { UserFilled, CaretTop, CaretBottom } from '@element-plus/icons-vue'
+import { UserFilled, CaretTop, CaretBottom, Money, TrendCharts, DataLine, Coin, User, Checked, Calendar, Warning } from '@element-plus/icons-vue'
+
+// 统计卡右下角水印图标映射（stats 里的 icon 字段是字符串，需转成组件）
+const STAT_ICONS = { Money, TrendCharts, DataLine, Coin, User, Checked, Calendar, Warning }
 import { getDashboard, getCharts, getCheckinRecords, getExpiringCards, getFollowUpsToday, completeFollowUp } from '@/api/modules'
 import { relativeTime } from '@/utils/format'
 import StatusDot from '@/components/StatusDot.vue'
@@ -295,6 +314,17 @@ const buildStats = (data) => {
   const { overview, today, revenue, alerts } = data
   const deltaNote = (label, v) => (v != null ? `${label} ${v > 0 ? '+' : ''}${v}%` : '')
   const fmt = (v) => formatMoney(v)
+  // 卡片即入口：点统计卡跳到对应页面（对标班主任工作台的 stat-go）
+  const STAT_GO = {
+    revenueToday: '/sales?tab=orders',
+    revenueWeek: '/sales?tab=orders',
+    revenueMonth: '/sales?tab=orders',
+    revenueYear: '/sales?tab=orders',
+    students: '/students',
+    attendance: '/operations?tab=checkin',
+    todayClasses: '/operations?tab=schedule',
+    renewal: '/students',
+  }
   stats.value = [
     {
       key: 'revenueToday',
@@ -368,7 +398,15 @@ const buildStats = (data) => {
       trend: 0,
       icon: 'Warning'
     }
-  ]
+  ].map((s) => ({
+    ...s,
+    // 三态语义色：正=绿 / 负=红 / 零或缺失=中性
+    // （此前模板用 `trend > 0 ? 'up' : 'down'` 二元判断，trend=0 时
+    //   会把「暂无对比」染成红色，与事实不符）
+    tone: s.trend > 0 ? 'up' : (s.trend < 0 ? 'down' : ''),
+    // 卡片即入口：有目标页的卡片可点击跳转
+    go: STAT_GO[s.key] || '',
+  }))
 }
 
 // ============================================
@@ -775,6 +813,42 @@ onUnmounted(() => {
   padding: 24px;
   position: relative;
   overflow: hidden;
+
+  // 可点击的卡片（有目标页）：给出指针与 hover 反馈，
+  // 让「信息」同时是「入口」——对标班主任工作台的 stat-go
+  &.is-clickable {
+    cursor: pointer;
+
+    &:hover {
+      border-color: var(--t-accent-line);
+    }
+  }
+}
+
+// 右下角水印图标：极浅色大图标，只做质感不抢内容
+// （.stat-card 已 overflow:hidden，超出部分自然裁切）
+.stat-ghost {
+  position: absolute;
+  right: -8px;
+  bottom: -10px;
+  width: 86px;
+  height: 86px;
+  color: var(--t-surface-hover);
+  pointer-events: none;
+  z-index: 0;
+}
+
+// 序号 01~08：右上角小字，给卡片清单感
+.stat-idx {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  font-size: var(--t-fs-2xs);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  color: var(--t-text-faint);
+  font-variant-numeric: tabular-nums;
+  z-index: 1;
 }
 
 .stat-header {
@@ -782,6 +856,9 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 8px;
+  // 内容层抬到水印之上（水印是 z-index:0 的定位元素，会盖住静态内容）
+  position: relative;
+  z-index: 1;
 }
 
 .stat-label {
@@ -804,13 +881,15 @@ onUnmounted(() => {
   align-items: baseline;
   gap: 4px;
   margin-bottom: 8px;
+  position: relative;
+  z-index: 1;
 }
 
 .stat-number {
   font-size: var(--t-fs-3xl);
-  font-weight: 700;
+  font-weight: 900;
   color: var(--t-text-1);
-  letter-spacing: -0.02em;
+  letter-spacing: -0.04em;
   font-variant-numeric: tabular-nums;
   max-width: 100%;
   overflow: hidden;
@@ -831,6 +910,10 @@ onUnmounted(() => {
   font-size: var(--t-fs-xs);
   font-weight: 500;
   margin-bottom: 8px;
+  position: relative;
+  z-index: 1;
+  // 默认中性（无对比数据时）——不再被误染成红色
+  color: var(--t-text-3);
 
   &.up {
     color: var(--t-success-text);

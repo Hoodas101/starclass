@@ -1004,11 +1004,11 @@ const loadStaffOptions = async () => {
 
   .order-stat-value {
     font-size: var(--t-fs-3xl);
-    font-weight: 700;
+    font-weight: 900;
     color: var(--t-text-1);
     font-variant-numeric: tabular-nums;
     line-height: 1.1;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.04em;
 
     &.warning {
       color: var(--t-danger-text);
