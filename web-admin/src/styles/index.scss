@@ -1160,18 +1160,6 @@ html, body {
   position: relative;
   text-align: left !important;
   overflow: hidden;
-
-  &::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 20px;
-    width: 32px;
-    height: 3px;
-    border-radius: 0 0 4px 4px;
-    background: var(--accent-color, var(--t-accent));
-    opacity: 0.65;
-  }
 }
 
 .overview-value,
