@@ -2,10 +2,6 @@
   <div class="login-page">
     <!-- 左侧品牌区（浅色品牌面，Apple 蓝唯一强调色，不随主题反转） -->
     <div class="login-brand">
-      <!-- 背景装饰：真实图标水印 + 柔光环，建立纵深而不喧宾夺主 -->
-      <el-icon class="brand-watermark" :size="380"><School /></el-icon>
-      <span class="brand-ring" aria-hidden="true"></span>
-
       <div class="brand-inner">
         <div class="brand-logo">
           <el-icon :size="26"><School /></el-icon>
@@ -15,7 +11,7 @@
 
         <div class="brand-meta">
           <span class="brand-meta-dot"></span>
-          <span>让每一堂课都被认真对待</span>
+          <span>机构内部管理系统</span>
         </div>
       </div>
     </div>
@@ -190,7 +186,8 @@ onMounted(() => {
 
 // ============ 左侧品牌区 ============
 .login-brand {
-  flex: 1.15;
+  // 品牌区收窄：视觉重心让给右侧表单（工作台登录聚焦操作，而非品牌展示）
+  flex: 0.85;
   min-width: 0;
   position: relative;
   display: flex;
@@ -200,42 +197,6 @@ onMounted(() => {
   color: var(--t-text-1);
   background: var(--t-bg);
   border-right: 1px solid var(--t-line);
-
-  // 顶部细品牌色条（Apple 蓝唯一强调色，纯色不渐变）
-  &::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 3px;
-    background: var(--t-accent);
-    opacity: 1;
-  }
-}
-
-// 大号图标水印：真实图标组件，低透明度，仅作纵深
-.brand-watermark {
-  position: absolute;
-  right: -56px;
-  bottom: -64px;
-  color: rgba(0, 0, 0, 0.03);
-  z-index: 0;
-  pointer-events: none;
-}
-
-// 柔光环装饰：单色强调，克制
-.brand-ring {
-  position: absolute;
-  top: 12%;
-  right: 14%;
-  width: 168px;
-  height: 168px;
-  border-radius: 50%;
-  border: 1px solid var(--t-accent-line);
-  background: transparent;
-  z-index: 0;
-  pointer-events: none;
 }
 
 .brand-inner {
@@ -244,8 +205,9 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  padding: 0 12%;
-  max-width: 620px;
+  // 品牌区收窄后改用固定内边距（百分比会在窄栏下挤压内容）
+  padding: 0 40px;
+  max-width: 560px;
   animation: brandIn 0.3s var(--t-ease-standard);
 }
 
@@ -312,7 +274,6 @@ onMounted(() => {
     height: 6px;
     border-radius: 50%;
     background: var(--t-accent);
-    box-shadow: 0 0 0 4px var(--t-accent-bg);
   }
 }
 
@@ -333,7 +294,8 @@ onMounted(() => {
   background: var(--t-surface);
   border: 1px solid var(--t-line);
   border-radius: var(--t-radius-card);
-  padding: 44px 40px 36px;
+  // 收紧留白：工作台尺度，不再有营销页的大 padding
+  padding: 32px 32px 28px;
   box-shadow: var(--t-elevation-2);
   animation: cardIn 0.3s var(--t-ease-standard) 40ms both;
 }
@@ -354,7 +316,7 @@ onMounted(() => {
 }
 
 .panel-title {
-  font-size: var(--t-fs-3xl);
+  font-size: var(--t-fs-2xl);
   font-weight: 700;
   color: var(--t-text-1);
   margin: 0 0 6px;
@@ -364,7 +326,7 @@ onMounted(() => {
 .panel-sub {
   font-size: var(--t-fs-base);
   color: var(--t-text-3);
-  margin: 0 0 32px;
+  margin: 0 0 24px;
 }
 
 .panel-footer {
@@ -467,23 +429,13 @@ onMounted(() => {
     transform: scale(0.97);
   }
 
-  // 选中态顶部强调色条，作为视觉锚点
+  // 选中态：靠背景 + 边框 + 文字色三重表达，不再加装饰性色条
+  // （DESIGN §8「不用装饰性小图标当 section indicator」）
   &.active {
     background: var(--t-accent-bg);
     border-color: var(--t-accent-line);
     color: var(--t-accent-strong);
-
-    &::after {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 24px;
-      height: 3px;
-      border-radius: 0 0 var(--t-radius-sm) var(--t-radius-sm);
-      background: var(--t-accent);
-    }
+    font-weight: 600;
 
     :deep(.el-icon) {
       color: var(--t-accent-strong);
