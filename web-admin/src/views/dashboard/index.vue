@@ -19,7 +19,7 @@
           <span class="stat-label">{{ stat.label }}</span>
         </div>
         <div class="stat-value">
-          <span class="stat-number v4-num-display">{{ stat.value }}</span>
+          <span class="stat-number v4-num-display is-md">{{ stat.value }}</span>
           <span class="stat-unit">{{ stat.unit }}</span>
         </div>
         <div class="stat-trend" :class="stat.trend > 0 ? 'up' : 'down'">
@@ -807,7 +807,6 @@ onUnmounted(() => {
 }
 
 .stat-number {
-  font-size: var(--t-fs-3xl);
   font-weight: 700;
   color: var(--t-text-1);
   letter-spacing: -0.02em;
