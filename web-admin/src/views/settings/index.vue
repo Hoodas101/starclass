@@ -457,7 +457,7 @@
         </div>
 
         <!-- 确认弹窗：下载完整数据库 -->
-        <el-dialog v-model="dbDownloadConfirmVisible" title="确认下载数据库备份" width="540px" destroy-on-close>
+        <el-dialog v-model="dbDownloadConfirmVisible" title="确认下载数据库备份" class="dlg-md" destroy-on-close>
           <div class="confirm-body">
             <p class="confirm-lead">即将下载<strong>完整数据库文件（.db）</strong>，可用于整库迁移或在其它电脑恢复使用。</p>
             <ul class="confirm-list">
@@ -477,7 +477,7 @@
         </el-dialog>
 
         <!-- 确认弹窗：导出数据 -->
-        <el-dialog v-model="exportConfirmVisible" :title="exportConfirmAll ? '确认导出全部数据' : '确认导出所选数据'" width="620px" destroy-on-close>
+        <el-dialog v-model="exportConfirmVisible" :title="exportConfirmAll ? '确认导出全部数据' : '确认导出所选数据'" class="dlg-lg" destroy-on-close>
           <div class="confirm-body">
             <p class="confirm-lead">即将导出以下 {{ exportConfirmModules.length }} 个模块的数据，请确认导出内容：</p>
             <ul class="confirm-list">
@@ -509,7 +509,7 @@
         </el-dialog>
 
         <!-- 确认弹窗：导入数据 -->
-        <el-dialog v-model="importConfirmVisible" title="确认导入数据" width="620px" destroy-on-close>
+        <el-dialog v-model="importConfirmVisible" title="确认导入数据" class="dlg-lg" destroy-on-close>
           <div class="confirm-body">
             <p class="confirm-file"><el-icon><Document /></el-icon> {{ importFileName }}</p>
             <p class="confirm-lead">即将以「{{ importReplace ? '覆盖' : '合并' }}」模式导入以下 {{ importModules.length }} 个模块：</p>
@@ -534,7 +534,7 @@
         </el-dialog>
 
         <!-- 确认弹窗：恢复数据库 -->
-        <el-dialog v-model="restoreConfirmVisible" title="确认恢复数据库" width="560px" destroy-on-close>
+        <el-dialog v-model="restoreConfirmVisible" title="确认恢复数据库" class="dlg-md" destroy-on-close>
           <div class="confirm-body">
             <p class="confirm-file"><el-icon><Document /></el-icon> {{ restoreFile && restoreFile.name }}</p>
             <p class="confirm-lead">即将使用该 .db 文件<strong>覆盖当前整库</strong>。系统会先<strong>自动备份当前数据库</strong>，若恢复出错可回滚。</p>

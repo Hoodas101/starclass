@@ -309,6 +309,11 @@ html, body {
   background: var(--t-surface);
   font-size: $fs-sm !important;
 
+  // S4 P0-1：所有 <el-table> 默认按 small 行高（40px），无需逐处写 size="small"。
+  // 与 .el-table__cell padding: 12px 0 配合，实际行高 ~40px 与 small 一致。
+  --el-table-row-height: 40px;
+  --el-table-header-row-height: 40px;
+
   --el-table-border-color: transparent;
   --el-table-header-bg-color: var(--t-bg-alt);
   --el-table-row-hover-bg-color: var(--t-hover-bg);
