@@ -29,11 +29,11 @@
     <!-- 时间网格视图（日 / 周）—— 支持拖拽改期 -->
     <div v-if="viewMode === 'week' || viewMode === 'day'" class="week-view" :style="{ '--hour-h': HOUR_H + 'px' }">
       <div class="week-nav">
-        <el-button text @click="prevPeriod">
+        <el-button text aria-label="上一周期" @click="prevPeriod">
           <el-icon><ArrowLeft /></el-icon>
         </el-button>
         <span class="week-range">{{ navLabel }}</span>
-        <el-button text @click="nextPeriod">
+        <el-button text aria-label="下一周期" @click="nextPeriod">
           <el-icon><ArrowRight /></el-icon>
         </el-button>
         <el-button text @click="goToday">今天</el-button>
@@ -114,11 +114,11 @@
     <!-- 月视图 —— 点击某天跳转到日视图 -->
     <div v-else-if="viewMode === 'month'" class="month-view">
       <div class="week-nav">
-        <el-button text @click="prevPeriod">
+        <el-button text aria-label="上一周期" @click="prevPeriod">
           <el-icon><ArrowLeft /></el-icon>
         </el-button>
         <span class="week-range">{{ navLabel }}</span>
-        <el-button text @click="nextPeriod">
+        <el-button text aria-label="下一周期" @click="nextPeriod">
           <el-icon><ArrowRight /></el-icon>
         </el-button>
         <el-button text @click="goToday">今天</el-button>

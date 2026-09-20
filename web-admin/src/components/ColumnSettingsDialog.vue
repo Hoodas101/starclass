@@ -44,13 +44,13 @@
             <el-icon class="cs-grip" :size="15"><Rank /></el-icon>
             <span class="cs-label">{{ labelOf(key) }}</span>
             <div class="cs-ops">
-              <el-button text :disabled="idx === 0" class="cs-icon-btn" @click="move(idx, -1)">
+              <el-button text aria-label="上移此列" :disabled="idx === 0" class="cs-icon-btn" @click="move(idx, -1)">
                 <el-icon><ArrowUp /></el-icon>
               </el-button>
-              <el-button text :disabled="idx === orderedKeys.length - 1" class="cs-icon-btn" @click="move(idx, 1)">
+              <el-button text aria-label="下移此列" :disabled="idx === orderedKeys.length - 1" class="cs-icon-btn" @click="move(idx, 1)">
                 <el-icon><ArrowDown /></el-icon>
               </el-button>
-              <el-button text class="cs-icon-btn cs-eye" @click="hide(idx)">
+              <el-button text aria-label="隐藏此列" class="cs-icon-btn cs-eye" @click="hide(idx)">
                 <el-icon><View /></el-icon>
               </el-button>
             </div>
@@ -68,12 +68,13 @@
         <div class="cs-list">
           <div v-for="key in hiddenKeys" :key="key" class="column-item cs-row cs-row-hidden">
             <span class="cs-label">{{ labelOf(key) }}</span>
-            <el-button text class="cs-icon-btn" @click="show(key)">
+            <el-button text aria-label="显示此列" class="cs-icon-btn" @click="show(key)">
               <el-icon><Hide /></el-icon>
             </el-button>
             <el-button
               v-if="isCustom(key)"
               text
+              aria-label="删除此自定义字段"
               class="cs-icon-btn cs-del"
               @click="removeCustom(key)"
             >

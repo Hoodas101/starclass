@@ -28,8 +28,10 @@
 
           <!-- 通知 -->
           <el-badge :value="unreadCount" :hidden="unreadCount === 0" class="header-icon">
-            <el-button text>
-              <el-icon :size="20" @click="openNotices"><Bell /></el-icon>
+            <!-- aria-label 供屏幕阅读器识别；@click 从 el-icon 上移到 el-button
+                 （原先点击区只有 20px 图标大小，不符合 44px 触控目标） -->
+            <el-button text aria-label="通知" @click="openNotices">
+              <el-icon :size="20"><Bell /></el-icon>
             </el-button>
           </el-badge>
 
@@ -82,7 +84,13 @@
 
       <!-- 底部折叠按钮 -->
       <div class="sidebar-footer">
-        <el-button text @click="toggleCollapse" class="collapse-btn">
+        <el-button
+          text
+          :aria-label="isCollapsed ? '展开侧栏' : '折叠侧栏'"
+          :title="isCollapsed ? '展开侧栏' : '折叠侧栏'"
+          @click="toggleCollapse"
+          class="collapse-btn"
+        >
           <el-icon :size="18">
             <Fold v-if="!isCollapsed" />
             <Expand v-else />
