@@ -16,12 +16,22 @@
         />
       </div>
       <div class="toolbar-right">
-        <button class="btn-config" type="button" @click="colDialogRef?.open()">
-          <el-icon><Setting /></el-icon>
-          <span>字段设置</span>
-        </button>
-        <el-button :icon="Download" @click="exportDialogRef?.open()">导出</el-button>
-        <el-button :icon="Upload" @click="openImport">导入</el-button>
+        <el-dropdown trigger="click">
+          <el-button :icon="ArrowDown" circle plain />
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item @click="colDialogRef?.open()">
+                <el-icon><Setting /></el-icon>字段设置
+              </el-dropdown-item>
+              <el-dropdown-item @click="exportDialogRef?.open()">
+                <el-icon><Download /></el-icon>导出
+              </el-dropdown-item>
+              <el-dropdown-item @click="openImport">
+                <el-icon><Upload /></el-icon>导入
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-button :type="selectMode ? 'primary' : 'default'" :icon="Finished" @click="toggleSelectMode">
           {{ selectMode ? '退出多选' : '多选' }}
         </el-button>
@@ -535,7 +545,7 @@ const props = defineProps({
 })
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Plus, Search, UserFilled, School, CreditCard, Download, Upload, Finished, CaretBottom, Setting } from '@element-plus/icons-vue'
+import { Plus, Search, UserFilled, School, CreditCard, Download, Upload, Finished, CaretBottom, Setting, ArrowDown } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { getStudents, getStudentDetail, addStudent, updateStudent, deleteStudent, pauseCard, resumeCard, getCardTypes, getSettings, saveSettings, getDashboard, getStudentTimeline, importStudents, getComments, addComment } from '@/api/modules'
 import ColumnSettingsDialog from '@/components/ColumnSettingsDialog.vue'
