@@ -17,7 +17,7 @@
       </div>
       <div class="toolbar-right">
         <el-button :icon="Download" @click="exportDialogRef?.open()">导出数据</el-button>
-        <el-button type="primary" :icon="Plus" @click="openLeadDialog()">新增线索</el-button>
+        <el-button type="primary" :icon="Plus" @click="openLeadDialog()">新建线索</el-button>
       </div>
     </div>
 
@@ -39,7 +39,7 @@
         <span class="metric-value">{{ funnel.monthOrder?.count || 0 }} 单 · ¥{{ Number(funnel.monthOrder?.amount || 0).toLocaleString() }}</span>
       </div>
       <div class="metric-card">
-        <span class="metric-label">本月新增线索</span>
+        <span class="metric-label">本月新建线索</span>
         <span class="metric-value">{{ funnel.monthLeads || 0 }}</span>
       </div>
       <div class="metric-card warn">
@@ -387,7 +387,7 @@
       </template>
 
     <!-- 线索编辑弹窗 -->
-    <el-dialog v-model="leadDialogOpen" :title="leadForm.id ? '编辑线索' : '新增线索'" class="dlg-md">
+    <el-dialog v-model="leadDialogOpen" :title="leadForm.id ? '编辑线索' : '新建线索'" class="dlg-md">
       <el-form ref="leadFormRef" :model="leadForm" :rules="leadRules" label-position="top">
         <div class="form-grid">
           <el-form-item label="姓名" prop="name">
@@ -513,7 +513,7 @@
       </el-form>
       <template #footer>
         <el-button @click="fuDialogOpen = false">取消</el-button>
-        <el-button type="primary" :loading="savingFu" @click="saveFu">创建任务</el-button>
+        <el-button type="primary" :loading="savingFu" @click="saveFu">新建任务</el-button>
       </template>
     </el-dialog>
   </div>

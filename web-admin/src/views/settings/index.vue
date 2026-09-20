@@ -70,7 +70,7 @@
               <h3 class="section-title">积分规则配置</h3>
               <p class="section-desc">设置成员获取与消耗积分的规则，可自定义新增；签到与购买奖励由系统自动发放</p>
             </div>
-            <el-button :icon="Plus" @click="addPointsRule">新增规则</el-button>
+            <el-button :icon="Plus" @click="addPointsRule">添加规则</el-button>
           </div>
 
           <div class="rule-list">

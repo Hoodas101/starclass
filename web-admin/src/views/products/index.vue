@@ -11,7 +11,7 @@
       </div>
       <div class="toolbar-right">
         <el-button v-if="activeMode === 'membership'" type="primary" :icon="Plus" @click="openCardDialog()">新增{{ $t('membership') }}</el-button>
-        <el-button v-else type="primary" :icon="Plus" @click="openGoodsDialog()">新增商品</el-button>
+        <el-button v-else type="primary" :icon="Plus" @click="openGoodsDialog()">新建商品</el-button>
       </div>
     </div>
 
@@ -148,7 +148,7 @@
     </el-dialog>
 
     <!-- 实物商品编辑弹窗 -->
-    <el-dialog v-model="goodsDialogVisible" :title="editingGoodsId ? '编辑商品' : '新增商品'" class="dlg-md" destroy-on-close>
+    <el-dialog v-model="goodsDialogVisible" :title="editingGoodsId ? '编辑商品' : '新建商品'" class="dlg-md" destroy-on-close>
       <el-form ref="goodsFormRef" :model="goodsForm" :rules="goodsRules" label-width="auto" label-position="left">
         <el-form-item label="商品名称" prop="name">
           <el-input v-model="goodsForm.name" placeholder="如：训练球服 / 定制球衣 / 篮球鞋" />
