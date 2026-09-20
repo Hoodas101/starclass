@@ -451,12 +451,12 @@ onBeforeUnmount(() => {
   box-shadow: var(--t-card-shadow);
 }
 .stat-value {
-  font-size: var(--v4-fs-5xl);
+  font-size: var(--t-fs-3xl);
   font-weight: 700;
   color: var(--t-text-1);
-  line-height: 1;
+  line-height: 1.1;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.025em;
+  letter-spacing: -0.02em;
 }
 .stat-unit {
   font-size: var(--t-fs-sm);

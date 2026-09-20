@@ -1270,12 +1270,12 @@ onMounted(() => {
   border-color: var(--t-line-strong);
 }
 .overview-value {
-  font-size: var(--v4-fs-5xl);
+  font-size: var(--t-fs-2xl);
   font-weight: 700;
   color: var(--t-text-1);
   font-variant-numeric: tabular-nums;
-  line-height: 1;
-  letter-spacing: -0.025em;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
 }
 .overview-item.warn .overview-value {
   color: var(--t-warning-text);

@@ -807,6 +807,7 @@ onUnmounted(() => {
 }
 
 .stat-number {
+  font-size: var(--t-fs-3xl);
   font-weight: 700;
   color: var(--t-text-1);
   letter-spacing: -0.02em;
