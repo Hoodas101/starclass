@@ -34,15 +34,15 @@
     <!-- 数据概览 -->
     <div class="overview-strip">
       <div class="overview-item">
-        <span class="overview-value">{{ stats.totalStudents }}</span>
+        <span class="overview-value v4-num-display is-md">{{ stats.totalStudents }}</span>
         <span class="overview-label">在册成员</span>
       </div>
       <div class="overview-item">
-        <span class="overview-value">{{ stats.totalCards }}</span>
+        <span class="overview-value v4-num-display is-md">{{ stats.totalCards }}</span>
         <span class="overview-label">{{ $t('membership') }}数</span>
       </div>
       <div class="overview-item warn">
-        <span class="overview-value">{{ stats.expiringCards }}</span>
+        <span class="overview-value v4-num-display is-md">{{ stats.expiringCards }}</span>
         <span class="overview-label">7 天内到期</span>
       </div>
     </div>
@@ -1260,11 +1260,12 @@ onMounted(() => {
   border-color: var(--t-line-strong);
 }
 .overview-value {
-  font-size: var(--t-fs-2xl);
+  font-size: var(--v4-fs-5xl);
   font-weight: 700;
   color: var(--t-text-1);
   font-variant-numeric: tabular-nums;
-  line-height: 1.1;
+  line-height: 1;
+  letter-spacing: -0.025em;
 }
 .overview-item.warn .overview-value {
   color: var(--t-warning-text);
