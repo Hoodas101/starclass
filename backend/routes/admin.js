@@ -438,6 +438,16 @@ router.get('/attention', dashboardGuard, (req, res) => {
       LIMIT 10
     `).all();
 
+    // 3.5) 请假待审批：需要老师当下处理的申请
+    //      （原在主区「待处理事项」里，现收编进雷达作唯一入口）
+    const leaves = db.prepare(`
+      SELECT lr.id, lr.student_name, lr.course_name, lr.date, lr.start_time
+      FROM leave_requests lr
+      WHERE lr.status = 'pending'
+      ORDER BY lr.date ASC, lr.start_time ASC
+      LIMIT 10
+    `).all();
+
     // 4) 待跟进：今日到期或已逾期（与 followups.js /today 同口径）
     //    无跟进权限时静默跳过，不让整块雷达 403
     let followups = [];
@@ -458,11 +468,13 @@ router.get('/attention', dashboardGuard, (req, res) => {
       followups,
       arrears,
       absences,
+      leaves,
       counts: {
         expiring: expiring.length,
         followups: followups.length,
         arrears: arrears.length,
         absences: absences.length,
+        leaves: leaves.length,
       },
     }));
   } catch (err) {

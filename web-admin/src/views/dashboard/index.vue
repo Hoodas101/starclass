@@ -1,17 +1,14 @@
 <template>
   <div class="page-shell">
     <!-- 顶部页头（使用统一 PageHeader 组件，主标题位置与全站一致） -->
-    <PageHeader>
-      <template #title>数据<i>看板</i></template>
+    <!-- 标题用 prop 单色（此前用 <i> 做双色标题，导致"数据看板"四字颜色不一致）
+         全站统一单色，视觉更干净 -->
+    <PageHeader title="数据看板">
       <el-radio-group v-model="dashboardScope" size="default" @change="onScopeChange">
         <el-radio-button value="all">全部</el-radio-button>
         <el-radio-button value="me">我的</el-radio-button>
       </el-radio-group>
     </PageHeader>
-
-    <!-- 两栏布局：主内容 + 关注雷达侧栏（≥1100px 显示侧栏） -->
-    <div class="dash-grid">
-      <div class="dash-main">
 
     <!-- 统计卡片 -->
     <div v-if="widgets.statCards !== false" class="stat-cards">
@@ -228,76 +225,86 @@
       </div>
     </div>
 
-      </div><!-- /.dash-main -->
+    <!-- 关注雷达：到期 / 欠费 / 连续缺勤 / 请假待审批 / 待跟进
+         放在主内容区、与列表卡片同宽（此前放在右侧栏只有 300px，与整体不协调） -->
+    <div class="radar-card">
+      <div class="radar-head">
+        <h3>关注雷达</h3>
+        <span class="radar-total">{{ radarTotal }}</span>
+      </div>
 
-      <!-- 关注雷达：到期 / 欠费 / 连续缺勤 / 待跟进（≥1100px 显示） -->
-      <aside class="dash-rail">
-        <div class="radar-card">
-          <div class="radar-head">
-            <h3>关注雷达</h3>
-            <span class="radar-total">{{ radarTotal }}</span>
-          </div>
-
-          <div v-if="attention.expiring.length" class="radar-sec">
-            <div class="radar-sec-title">到期预警 <em>{{ attention.expiring.length }}</em></div>
-            <div
-              v-for="c in attention.expiring" :key="'exp-' + c.id"
-              class="radar-item" role="button" tabindex="0"
-              @click="router.push('/students')"
-              @keydown.enter="router.push('/students')"
-              @keydown.space.prevent="router.push('/students')"
-            >
-              <span class="radar-name">{{ c.student_name }}</span>
-              <span class="radar-desc">{{ c.card_type_name }} · {{ daysLeftText(c.expires_at) }}</span>
-            </div>
-          </div>
-
-          <div v-if="attention.arrears.length" class="radar-sec">
-            <div class="radar-sec-title">待收欠费 <em>{{ attention.arrears.length }}</em></div>
-            <div
-              v-for="o in attention.arrears" :key="'arr-' + o.id"
-              class="radar-item" role="button" tabindex="0"
-              @click="router.push('/sales?tab=orders')"
-              @keydown.enter="router.push('/sales?tab=orders')"
-              @keydown.space.prevent="router.push('/sales?tab=orders')"
-            >
-              <span class="radar-name">{{ o.student_name || '未指定' }}</span>
-              <span class="radar-desc">¥{{ Number(o.payable_amount || 0).toLocaleString() }} · {{ o.order_no }}</span>
-            </div>
-          </div>
-
-          <div v-if="attention.absences.length" class="radar-sec">
-            <div class="radar-sec-title">连续缺勤 <em>{{ attention.absences.length }}</em></div>
-            <div
-              v-for="a in attention.absences" :key="'abs-' + a.id"
-              class="radar-item" role="button" tabindex="0"
-              @click="router.push('/students')"
-              @keydown.enter="router.push('/students')"
-              @keydown.space.prevent="router.push('/students')"
-            >
-              <span class="radar-name">{{ a.name }}</span>
-              <span class="radar-desc">最近 {{ a.absent_count }} 次全部缺席</span>
-            </div>
-          </div>
-
-          <div v-if="attention.followups.length" class="radar-sec">
-            <div class="radar-sec-title">待跟进 <em>{{ attention.followups.length }}</em></div>
-            <div
-              v-for="f in attention.followups" :key="'fu-' + f.id"
-              class="radar-item" role="button" tabindex="0"
-              @click="router.push('/growth')"
-              @keydown.enter="router.push('/growth')"
-              @keydown.space.prevent="router.push('/growth')"
-            >
-              <span class="radar-name">{{ f.target_name || '未指定' }}</span>
-              <span class="radar-desc">{{ f.reason || f.task_type }}</span>
-            </div>
-          </div>
-
-          <div v-if="radarTotal === 0" class="radar-empty">暂无需要关注的事项</div>
+      <div v-if="attention.expiring.length" class="radar-sec">
+        <div class="radar-sec-title">到期预警 <em>{{ attention.expiring.length }}</em></div>
+        <div
+          v-for="c in attention.expiring" :key="'exp-' + c.id"
+          class="radar-item" role="button" tabindex="0"
+          @click="router.push('/students')"
+          @keydown.enter="router.push('/students')"
+          @keydown.space.prevent="router.push('/students')"
+        >
+          <span class="radar-name">{{ c.student_name }}</span>
+          <span class="radar-desc">{{ c.card_type_name }} · {{ daysLeftText(c.expires_at) }}</span>
         </div>
-      </aside>
-    </div><!-- /.dash-grid -->
+      </div>
+
+      <div v-if="attention.arrears.length" class="radar-sec">
+        <div class="radar-sec-title">待收欠费 <em>{{ attention.arrears.length }}</em></div>
+        <div
+          v-for="o in attention.arrears" :key="'arr-' + o.id"
+          class="radar-item" role="button" tabindex="0"
+          @click="router.push('/sales?tab=orders')"
+          @keydown.enter="router.push('/sales?tab=orders')"
+          @keydown.space.prevent="router.push('/sales?tab=orders')"
+        >
+          <span class="radar-name">{{ o.student_name || '未指定' }}</span>
+          <span class="radar-desc">¥{{ Number(o.payable_amount || 0).toLocaleString() }} · {{ o.order_no }}</span>
+        </div>
+      </div>
+
+      <div v-if="attention.absences.length" class="radar-sec">
+        <div class="radar-sec-title">连续缺勤 <em>{{ attention.absences.length }}</em></div>
+        <div
+          v-for="a in attention.absences" :key="'abs-' + a.id"
+          class="radar-item" role="button" tabindex="0"
+          @click="router.push('/students')"
+          @keydown.enter="router.push('/students')"
+          @keydown.space.prevent="router.push('/students')"
+        >
+          <span class="radar-name">{{ a.name }}</span>
+          <span class="radar-desc">最近 {{ a.absent_count }} 次全部缺席</span>
+        </div>
+      </div>
+
+      <div v-if="attention.leaves.length" class="radar-sec">
+        <div class="radar-sec-title">请假待审批 <em>{{ attention.leaves.length }}</em></div>
+        <div
+          v-for="l in attention.leaves" :key="'lv-' + l.id"
+          class="radar-item" role="button" tabindex="0"
+          @click="router.push('/operations?tab=leave')"
+          @keydown.enter="router.push('/operations?tab=leave')"
+          @keydown.space.prevent="router.push('/operations?tab=leave')"
+        >
+          <span class="radar-name">{{ l.student_name || '成员' }}</span>
+          <span class="radar-desc">{{ l.course_name || '' }} {{ l.date || '' }} {{ l.start_time || '' }}</span>
+        </div>
+      </div>
+
+      <div v-if="attention.followups.length" class="radar-sec">
+        <div class="radar-sec-title">待跟进 <em>{{ attention.followups.length }}</em></div>
+        <div
+          v-for="f in attention.followups" :key="'fu-' + f.id"
+          class="radar-item" role="button" tabindex="0"
+          @click="router.push('/growth')"
+          @keydown.enter="router.push('/growth')"
+          @keydown.space.prevent="router.push('/growth')"
+        >
+          <span class="radar-name">{{ f.target_name || '未指定' }}</span>
+          <span class="radar-desc">{{ f.reason || f.task_type }}</span>
+        </div>
+      </div>
+
+      <div v-if="radarTotal === 0" class="radar-empty">暂无需要关注的事项</div>
+        </div>
   </div>
 </template>
 
@@ -790,11 +797,12 @@ const attentionStudents = ref([])
 // 关注雷达（侧栏）—— 数据来自 /api/admin/attention 一次取全
 // 四类：到期（7 天内）/ 欠费（待付款）/ 连续缺勤（7 次）/ 待跟进
 // ============================================
-const attention = ref({ expiring: [], followups: [], arrears: [], absences: [] })
+const attention = ref({ expiring: [], followups: [], arrears: [], absences: [], leaves: [] })
 const radarTotal = computed(() =>
   attention.value.expiring.length
   + attention.value.arrears.length
   + attention.value.absences.length
+  + attention.value.leaves.length
   + attention.value.followups.length
 )
 
@@ -814,10 +822,11 @@ const loadAttention = async () => {
       followups: (res && res.followups) || [],
       arrears: (res && res.arrears) || [],
       absences: (res && res.absences) || [],
+      leaves: (res && res.leaves) || [],
     }
   } catch (e) {
     // 无权限 / 网络异常：雷达整体降级为空，不影响看板其它区块
-    attention.value = { expiring: [], followups: [], arrears: [], absences: [] }
+    attention.value = { expiring: [], followups: [], arrears: [], absences: [], leaves: [] }
   }
 }
 
@@ -955,44 +964,25 @@ onUnmounted(() => {
 }
 
 // ============================================
-// 两栏布局：主内容 + 关注雷达侧栏
-// 窄屏隐藏侧栏（主内容已含全部信息，不丢功能）
-// ============================================
-.dash-grid {
-  display: block;
-}
-
-@media (min-width: 1100px) {
-  .dash-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 300px;
-    gap: var(--t-spacing-lg);
-    align-items: start;
-  }
-
-  .dash-rail {
-    position: sticky;
-    top: 72px;
-  }
-}
-
-@media (max-width: 1099px) {
-  .dash-rail {
-    display: none;
-  }
-}
-
-// ============================================
-// 关注雷达
+// 关注雷达（主内容区卡片，与 .list-card 同款，视觉上与其他列表卡片一致）
 // ============================================
 .radar-card {
   background: var(--t-surface);
   border: 1px solid var(--t-line);
   border-radius: var(--t-radius-card);
   padding: var(--t-spacing-lg);
+  // 与上方 lists-row 分隔 + 底部留白（主内容区最后一个卡片）
+  margin-top: var(--t-spacing-lg);
+  margin-bottom: var(--t-spacing-lg);
+  // 五类横向分列 → 卡片不会过高，与列表卡片的高度节奏协调
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--t-spacing-lg);
 }
 
 .radar-head {
+  // 标题横跨整行（卡片是 grid 分列，标题不属于任何一列）
+  grid-column: 1 / -1;
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -1065,6 +1055,8 @@ onUnmounted(() => {
 }
 
 .radar-empty {
+  // 空态横跨整行（此时没有任何 radar-sec 子列）
+  grid-column: 1 / -1;
   padding: var(--t-spacing-md);
   text-align: center;
   font-size: var(--t-fs-xs);
