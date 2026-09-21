@@ -9,6 +9,10 @@
       </el-radio-group>
     </PageHeader>
 
+    <!-- 两栏布局：主内容 + 关注雷达侧栏（≥1100px 显示侧栏） -->
+    <div class="dash-grid">
+      <div class="dash-main">
+
     <!-- 统计卡片 -->
     <div v-if="widgets.statCards !== false" class="stat-cards">
       <div
@@ -223,6 +227,77 @@
         <div v-else class="empty-hint">本月暂无购买记录</div>
       </div>
     </div>
+
+      </div><!-- /.dash-main -->
+
+      <!-- 关注雷达：到期 / 欠费 / 连续缺勤 / 待跟进（≥1100px 显示） -->
+      <aside class="dash-rail">
+        <div class="radar-card">
+          <div class="radar-head">
+            <h3>关注雷达</h3>
+            <span class="radar-total">{{ radarTotal }}</span>
+          </div>
+
+          <div v-if="attention.expiring.length" class="radar-sec">
+            <div class="radar-sec-title">到期预警 <em>{{ attention.expiring.length }}</em></div>
+            <div
+              v-for="c in attention.expiring" :key="'exp-' + c.id"
+              class="radar-item" role="button" tabindex="0"
+              @click="router.push('/students')"
+              @keydown.enter="router.push('/students')"
+              @keydown.space.prevent="router.push('/students')"
+            >
+              <span class="radar-name">{{ c.student_name }}</span>
+              <span class="radar-desc">{{ c.card_type_name }} · {{ daysLeftText(c.expires_at) }}</span>
+            </div>
+          </div>
+
+          <div v-if="attention.arrears.length" class="radar-sec">
+            <div class="radar-sec-title">待收欠费 <em>{{ attention.arrears.length }}</em></div>
+            <div
+              v-for="o in attention.arrears" :key="'arr-' + o.id"
+              class="radar-item" role="button" tabindex="0"
+              @click="router.push('/sales?tab=orders')"
+              @keydown.enter="router.push('/sales?tab=orders')"
+              @keydown.space.prevent="router.push('/sales?tab=orders')"
+            >
+              <span class="radar-name">{{ o.student_name || '未指定' }}</span>
+              <span class="radar-desc">¥{{ Number(o.payable_amount || 0).toLocaleString() }} · {{ o.order_no }}</span>
+            </div>
+          </div>
+
+          <div v-if="attention.absences.length" class="radar-sec">
+            <div class="radar-sec-title">连续缺勤 <em>{{ attention.absences.length }}</em></div>
+            <div
+              v-for="a in attention.absences" :key="'abs-' + a.id"
+              class="radar-item" role="button" tabindex="0"
+              @click="router.push('/students')"
+              @keydown.enter="router.push('/students')"
+              @keydown.space.prevent="router.push('/students')"
+            >
+              <span class="radar-name">{{ a.name }}</span>
+              <span class="radar-desc">最近 {{ a.absent_count }} 次全部缺席</span>
+            </div>
+          </div>
+
+          <div v-if="attention.followups.length" class="radar-sec">
+            <div class="radar-sec-title">待跟进 <em>{{ attention.followups.length }}</em></div>
+            <div
+              v-for="f in attention.followups" :key="'fu-' + f.id"
+              class="radar-item" role="button" tabindex="0"
+              @click="router.push('/growth')"
+              @keydown.enter="router.push('/growth')"
+              @keydown.space.prevent="router.push('/growth')"
+            >
+              <span class="radar-name">{{ f.target_name || '未指定' }}</span>
+              <span class="radar-desc">{{ f.reason || f.task_type }}</span>
+            </div>
+          </div>
+
+          <div v-if="radarTotal === 0" class="radar-empty">暂无需要关注的事项</div>
+        </div>
+      </aside>
+    </div><!-- /.dash-grid -->
   </div>
 </template>
 
@@ -250,7 +325,7 @@ const STAT_ICONS = { Money, TrendCharts, DataLine, Coin, User, Checked, Calendar
 // `<component :is="item.icon" />` 需要**组件引用**才能渲染——项目用 unplugin
 // 按需引入、无全局图标注册，所以字符串永远解析不出组件，图标一直不显示。
 const PENDING_ICONS = { Refresh, Bell, Calendar }
-import { getDashboard, getCharts, getCheckinRecords, getExpiringCards, getFollowUpsToday, completeFollowUp, getLeaves } from '@/api/modules'
+import { getDashboard, getCharts, getCheckinRecords, getExpiringCards, getFollowUpsToday, completeFollowUp, getLeaves, getAttention } from '@/api/modules'
 import { relativeTime } from '@/utils/format'
 import StatusDot from '@/components/StatusDot.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -711,6 +786,41 @@ const pendingItems = ref([])
 // 连续缺勤学员（由 loadDashboard 从 alerts 存入，供 loadPendingItems 消费）
 const attentionStudents = ref([])
 
+// ============================================
+// 关注雷达（侧栏）—— 数据来自 /api/admin/attention 一次取全
+// 四类：到期（7 天内）/ 欠费（待付款）/ 连续缺勤（7 次）/ 待跟进
+// ============================================
+const attention = ref({ expiring: [], followups: [], arrears: [], absences: [] })
+const radarTotal = computed(() =>
+  attention.value.expiring.length
+  + attention.value.arrears.length
+  + attention.value.absences.length
+  + attention.value.followups.length
+)
+
+// 到期倒计时文案：今天 / 明天 / N 天后
+const daysLeftText = (expiresAt) => {
+  const d = Math.ceil((Number(expiresAt || 0) - Date.now()) / 86400000)
+  if (d <= 0) return '今天到期'
+  if (d === 1) return '明天到期'
+  return `${d} 天后到期`
+}
+
+const loadAttention = async () => {
+  try {
+    const res = await getAttention()
+    attention.value = {
+      expiring: (res && res.expiring) || [],
+      followups: (res && res.followups) || [],
+      arrears: (res && res.arrears) || [],
+      absences: (res && res.absences) || [],
+    }
+  } catch (e) {
+    // 无权限 / 网络异常：雷达整体降级为空，不影响看板其它区块
+    attention.value = { expiring: [], followups: [], arrears: [], absences: [] }
+  }
+}
+
 const loadPendingItems = async () => {
   const items = []
   // 续期提醒仅管理员/教练可见；销售无权访问该接口，跳过以免弹出权限错误提示
@@ -819,6 +929,7 @@ onMounted(() => {
   loadDashboard().then(() => loadPendingItems())
   loadRecentActivities()
   loadCharts()
+  loadAttention()
 
   resizeHandler = () => {
     ;[attendanceChart, revenueChart, productDonut].forEach((c) => c?.resize())
@@ -841,6 +952,126 @@ onUnmounted(() => {
   grid-template-columns: repeat(4, 1fr);
   gap: var(--t-spacing-lg);
   margin-bottom: var(--t-spacing-lg);
+}
+
+// ============================================
+// 两栏布局：主内容 + 关注雷达侧栏
+// 窄屏隐藏侧栏（主内容已含全部信息，不丢功能）
+// ============================================
+.dash-grid {
+  display: block;
+}
+
+@media (min-width: 1100px) {
+  .dash-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: var(--t-spacing-lg);
+    align-items: start;
+  }
+
+  .dash-rail {
+    position: sticky;
+    top: 72px;
+  }
+}
+
+@media (max-width: 1099px) {
+  .dash-rail {
+    display: none;
+  }
+}
+
+// ============================================
+// 关注雷达
+// ============================================
+.radar-card {
+  background: var(--t-surface);
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-radius-card);
+  padding: var(--t-spacing-lg);
+}
+
+.radar-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: var(--t-spacing-md);
+
+  h3 {
+    font-size: var(--t-fs-lg);
+    font-weight: 600;
+    margin: 0;
+  }
+}
+
+.radar-total {
+  font-size: var(--t-fs-2xl);
+  font-weight: 900;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--t-text-1);
+}
+
+.radar-sec {
+  margin-bottom: var(--t-spacing-md);
+
+  &:last-child {
+    margin-bottom: 0;
+  }
+}
+
+.radar-sec-title {
+  font-size: var(--t-fs-xs);
+  font-weight: 600;
+  color: var(--t-text-3);
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+
+  em {
+    font-style: normal;
+    color: var(--t-accent-text);
+    font-weight: 700;
+    margin-left: 4px;
+  }
+}
+
+.radar-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--t-line);
+  cursor: pointer;
+
+  &:last-child {
+    border-bottom: none;
+  }
+
+  &:hover .radar-name {
+    color: var(--t-accent-text);
+  }
+}
+
+.radar-name {
+  font-size: var(--t-fs-sm);
+  font-weight: 600;
+  color: var(--t-text-1);
+}
+
+.radar-desc {
+  font-size: var(--t-fs-2xs);
+  color: var(--t-text-3);
+}
+
+.radar-empty {
+  padding: var(--t-spacing-md);
+  text-align: center;
+  font-size: var(--t-fs-xs);
+  color: var(--t-text-3);
+  border: 1px dashed var(--t-line-strong);
+  border-radius: var(--t-radius-lg);
+  background: var(--t-bg-alt);
 }
 
 .stat-card {

@@ -375,6 +375,103 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
 });
 
 /**
+ * GET /api/admin/attention — 关注雷达聚合（dashboard 侧栏用）
+ *
+ * 四类聚合，一次请求取全（避免前端发 4 个请求拼装）：
+ *   · expiring  到期预警 —— 会员卡 7 天内到期
+ *   · followups 待跟进   —— 今日到期或已逾期的跟进任务
+ *   · arrears   欠费     —— status='pending' 的待付款订单
+ *   · absences  连续缺勤 —— 最近 7 次考勤**全部缺席**
+ *
+ * 口径（业务确认）：
+ *   到期提前 7 天；连续缺勤按 7 次；请假不计入缺席（机构已批准的正常状态）；
+ *   排除已退费/已归档学员（全站 ACTIVE_STUDENT_SQL 口径）。
+ *
+ * 权限：与 /dashboard 同一个 dashboardGuard。其中「待跟进」额外要求跟进权限
+ * （与 followups.js 的 canFollowUp 同判据）——无权限时该类别返回空数组，
+ * **不报 403**，否则有看板权限但无跟进权限的用户整块雷达都会挂掉。
+ */
+router.get('/attention', dashboardGuard, (req, res) => {
+  try {
+    const t = now();
+    const DAY = 86400000;
+    const u = getReqUser(req);
+
+    // 1) 到期预警：7 天内
+    const expiring = db.prepare(`
+      SELECT mc.id, mc.student_id, s.name AS student_name,
+             mc.card_type_name, mc.expires_at
+      FROM member_cards mc
+      JOIN students s ON s.id = mc.student_id
+      WHERE mc.status = 'active'
+        AND mc.expires_at > ? AND mc.expires_at <= ?
+        AND ${ACTIVE_STUDENT_SQL}
+      ORDER BY mc.expires_at ASC
+      LIMIT 10
+    `).all(t, t + 7 * DAY);
+
+    // 2) 欠费：待付款订单（未支付的应收）
+    const arrears = db.prepare(`
+      SELECT o.id, o.order_no, o.student_name, o.payable_amount, o.created_at
+      FROM orders o
+      WHERE o.status = 'pending'
+      ORDER BY o.created_at DESC
+      LIMIT 10
+    `).all();
+
+    // 3) 连续缺勤：最近 7 次考勤全部为 absent（请假不算缺席）
+    //    用窗口函数取每人最近 7 条，再要求其中 absent 数为 7。
+    const absences = db.prepare(`
+      WITH recent AS (
+        SELECT student_id, status,
+               ROW_NUMBER() OVER (PARTITION BY student_id ORDER BY date DESC) AS rn
+        FROM attendances
+        WHERE date IS NOT NULL AND date != ''
+      )
+      SELECT s.id, s.name, COUNT(*) AS absent_count
+      FROM recent r
+      JOIN students s ON s.id = r.student_id
+      WHERE r.rn <= 7 AND r.status = 'absent' AND ${ACTIVE_STUDENT_SQL}
+      GROUP BY s.id, s.name
+      HAVING COUNT(*) = 7
+      ORDER BY s.name
+      LIMIT 10
+    `).all();
+
+    // 4) 待跟进：今日到期或已逾期（与 followups.js /today 同口径）
+    //    无跟进权限时静默跳过，不让整块雷达 403
+    let followups = [];
+    const canFollow = req.userRole === 'admin'
+      || (u && (u.role === 'coach' || hasPerm(u, 'growth') || hasPerm(u, 'sales')));
+    if (canFollow) {
+      followups = db.prepare(`
+        SELECT id, target_name, task_type, reason, due_at, priority
+        FROM follow_ups
+        WHERE status = 'pending' AND due_at <= ?
+        ORDER BY priority ASC, due_at ASC
+        LIMIT 10
+      `).all(t + (DAY - 1));
+    }
+
+    res.json(success({
+      expiring,
+      followups,
+      arrears,
+      absences,
+      counts: {
+        expiring: expiring.length,
+        followups: followups.length,
+        arrears: arrears.length,
+        absences: absences.length,
+      },
+    }));
+  } catch (err) {
+    console.error('[admin attention]', err);
+    res.status(500).json(safeFail('获取关注雷达失败'));
+  }
+});
+
+/**
  * GET /api/admin/charts — 看板图表数据
  * 近7天到场率、报名活动分布、产品销量统计
  */
