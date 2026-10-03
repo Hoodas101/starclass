@@ -90,15 +90,17 @@ function seed() {
 
   // ========= 2. 成员表 =========
   console.log('[Seed] 创建成员...');
+  // 体育培训机构场景：兴趣标签/备注统一为体育类，避免演示数据里出现「钢琴/围棋/编程」等
+  // 与机构定位不符的内容（仅展示性字段，id/数量/结构均未改动）
   const students = [
     { id: 'stu_001', name: '张小明', gender: 'male', birthday: '2015-03-15', school: '阳光小学', grade: '三年级', hobby: '篮球', remark: '活泼好动', height: 132, weight: 30, bmi: 17.2 },
-    { id: 'stu_002', name: '李小红', gender: 'female', birthday: '2016-07-22', school: '阳光小学', grade: '二年级', hobby: '绘画', remark: '文静乖巧', height: 128, weight: 27, bmi: 16.5 },
+    { id: 'stu_002', name: '李小红', gender: 'female', birthday: '2016-07-22', school: '阳光小学', grade: '二年级', hobby: '跳绳', remark: '协调性好', height: 128, weight: 27, bmi: 16.5 },
     { id: 'stu_003', name: '王刚', gender: 'male', birthday: '2014-11-08', school: '育才小学', grade: '四年级', hobby: '足球', remark: '体育特长', height: 145, weight: 38, bmi: 18.1 },
-    { id: 'stu_004', name: '赵丽丽', gender: 'female', birthday: '2017-01-30', school: '育才小学', grade: '一年级', hobby: '舞蹈', remark: '舞蹈班', height: 118, weight: 22, bmi: 15.8 },
-    { id: 'stu_005', name: '刘华', gender: 'male', birthday: '2015-09-12', school: '实验小学', grade: '三年级', hobby: '编程', remark: '逻辑强', height: 135, weight: 32, bmi: 17.6 },
-    { id: 'stu_006', name: '陈美丽', gender: 'female', birthday: '2016-05-18', school: '实验小学', grade: '二年级', hobby: '钢琴', remark: '钢琴八级', height: 130, weight: 28, bmi: 16.6 },
-    { id: 'stu_007', name: '杨强', gender: 'male', birthday: '2014-08-25', school: '阳光小学', grade: '四年级', hobby: '围棋', remark: '围棋三段', height: 152, weight: 42, bmi: 18.2 },
-    { id: 'stu_008', name: '黄小芳', gender: 'female', birthday: '2015-12-03', school: '育才小学', grade: '三年级', hobby: '书法', remark: '书法比赛一等奖', height: 138, weight: 34, bmi: 17.8 },
+    { id: 'stu_004', name: '赵丽丽', gender: 'female', birthday: '2017-01-30', school: '育才小学', grade: '一年级', hobby: '体适能', remark: '刚接触体适能', height: 118, weight: 22, bmi: 15.8 },
+    { id: 'stu_005', name: '刘华', gender: 'male', birthday: '2015-09-12', school: '实验小学', grade: '三年级', hobby: '篮球', remark: '爆发力强', height: 135, weight: 32, bmi: 17.6 },
+    { id: 'stu_006', name: '陈美丽', gender: 'female', birthday: '2016-05-18', school: '实验小学', grade: '二年级', hobby: '体适能', remark: '柔韧性好', height: 130, weight: 28, bmi: 16.6 },
+    { id: 'stu_007', name: '杨强', gender: 'male', birthday: '2014-08-25', school: '阳光小学', grade: '四年级', hobby: '篮球', remark: '校队候选', height: 152, weight: 42, bmi: 18.2 },
+    { id: 'stu_008', name: '黄小芳', gender: 'female', birthday: '2015-12-03', school: '育才小学', grade: '三年级', hobby: '田径', remark: '耐力突出', height: 138, weight: 34, bmi: 17.8 },
   ];
 
   const insertStudent = db.prepare(`
@@ -136,8 +138,8 @@ function seed() {
   console.log('[Seed] 创建教师...');
   const teachers = [
     { id: 'teacher_001', user_id: 'user_teacher_001', name: '王教练', phone: '13800000011', gender: 'male', specialty: '篮球', bio: '国家一级篮球运动员，教龄8年', hire_date: '2020-09-01' },
-    { id: 'teacher_002', user_id: 'user_teacher_002', name: '李教练', phone: '13800000012', gender: 'female', specialty: '美术', bio: '中央美术学院毕业，教龄5年', hire_date: '2021-03-15' },
-    { id: 'teacher_003', user_id: 'user_teacher_003', name: '张教练', phone: '13800000013', gender: 'male', specialty: '编程', bio: '清华大学计算机系，教龄3年', hire_date: '2022-09-01' },
+    { id: 'teacher_002', user_id: 'user_teacher_002', name: '李教练', phone: '13800000012', gender: 'female', specialty: '体适能', bio: '体育教育专业毕业，专注儿童体适能，教龄5年', hire_date: '2021-03-15' },
+    { id: 'teacher_003', user_id: 'user_teacher_003', name: '张教练', phone: '13800000013', gender: 'male', specialty: '篮球', bio: '青少年篮球教练员，教龄3年', hire_date: '2022-09-01' },
   ];
 
   const insertTeacher = db.prepare(`
@@ -150,8 +152,8 @@ function seed() {
   console.log('[Seed] 创建场地...');
   const classrooms = [
     { id: 'room_001', name: '篮球馆', capacity: 20, area: 200, equipment: '篮球架、球鞋储物柜', location: '一楼东侧', color: '#FF6B6B' },
-    { id: 'room_002', name: '美术室', capacity: 15, area: 80, equipment: '画架、投影仪', location: '二楼西侧', color: '#4ECDC4' },
-    { id: 'room_003', name: '编程场地', capacity: 12, area: 60, equipment: '电脑12台、投影仪', location: '三楼北侧', color: '#45B7D1' },
+    { id: 'room_002', name: '体适能训练室', capacity: 15, area: 80, equipment: '软垫、敏捷梯、平衡垫', location: '二楼西侧', color: '#4ECDC4' },
+    { id: 'room_003', name: '体能测试室', capacity: 12, area: 60, equipment: '纵跳仪、坐位体前屈测试仪', location: '三楼北侧', color: '#45B7D1' },
   ];
 
   const insertClassroom = db.prepare(`
@@ -164,8 +166,8 @@ function seed() {
   console.log('[Seed] 创建活动...');
   const courses = [
     { id: 'course_001', name: '篮球训练基础班', category: '体育', description: '适合6-12岁儿童，学习篮球基本技能', duration: 90, consume_classes: 1, color: '#FF6B6B', min_age: 6, max_age: 12, max_students: 20, price_per_class: 150 },
-    { id: 'course_002', name: '美术活动班', category: '艺术', description: '培养儿童想象力和创造力', duration: 90, consume_classes: 1, color: '#4ECDC4', min_age: 5, max_age: 10, max_students: 15, price_per_class: 120 },
-    { id: 'course_003', name: '少儿编程入门', category: '科技', description: 'Scratch编程入门，培养逻辑思维', duration: 90, consume_classes: 1, color: '#45B7D1', min_age: 7, max_age: 14, max_students: 12, price_per_class: 180 },
+    { id: 'course_002', name: '少儿体适能班', category: '体育', description: '提升协调性、柔韧性与核心力量，打好运动基础', duration: 90, consume_classes: 1, color: '#4ECDC4', min_age: 5, max_age: 10, max_students: 15, price_per_class: 120 },
+    { id: 'course_003', name: '篮球提高班', category: '体育', description: '进阶运球、投篮与战术配合，衔接校队训练', duration: 90, consume_classes: 1, color: '#45B7D1', min_age: 7, max_age: 14, max_students: 12, price_per_class: 180 },
   ];
 
   const insertCourse = db.prepare(`
@@ -227,24 +229,24 @@ function seed() {
         max_students: 20, enrolled_count: 0, status: 'scheduled',
       });
     }
-    // 周二四：美术课 16:00-17:30
+    // 周二四：体适能课 16:00-17:30
     if (dayOfWeek === 2 || dayOfWeek === 4) {
       schedules.push({
         id: `sch_${dateStr}_art`,
-        course_id: 'course_002', course_name: '美术活动班',
+        course_id: 'course_002', course_name: '少儿体适能班',
         teacher_id: 'teacher_002', teacher_name: '李教练',
-        classroom_id: 'room_002', classroom_name: '美术室',
+        classroom_id: 'room_002', classroom_name: '体适能训练室',
         date: dateStr, start_time: '16:00', end_time: '17:30',
         max_students: 15, enrolled_count: 0, status: 'scheduled',
       });
     }
-    // 周六：编程课 09:00-10:30
+    // 周六：篮球提高班 09:00-10:30
     if (dayOfWeek === 6) {
       schedules.push({
         id: `sch_${dateStr}_code`,
-        course_id: 'course_003', course_name: '少儿编程入门',
+        course_id: 'course_003', course_name: '篮球提高班',
         teacher_id: 'teacher_003', teacher_name: '张教练',
-        classroom_id: 'room_003', classroom_name: '编程场地',
+        classroom_id: 'room_003', classroom_name: '体能测试室',
         date: dateStr, start_time: '09:00', end_time: '10:30',
         max_students: 12, enrolled_count: 0, status: 'scheduled',
       });
@@ -273,10 +275,10 @@ function seed() {
   console.log('[Seed] 创建登记记录...');
   const enrollments = [
     { id: 'enr_001', student_id: 'stu_001', student_name: '张小明', course_id: 'course_001', course_name: '篮球训练基础班', schedule_id: null, member_card_id: 'mc_001', enroll_type: 'course' },
-    { id: 'enr_002', student_id: 'stu_002', student_name: '李小红', course_id: 'course_002', course_name: '美术活动班', schedule_id: null, member_card_id: 'mc_002', enroll_type: 'course' },
+    { id: 'enr_002', student_id: 'stu_002', student_name: '李小红', course_id: 'course_002', course_name: '少儿体适能班', schedule_id: null, member_card_id: 'mc_002', enroll_type: 'course' },
     { id: 'enr_003', student_id: 'stu_003', student_name: '王刚', course_id: 'course_001', course_name: '篮球训练基础班', schedule_id: null, member_card_id: 'mc_003', enroll_type: 'course' },
-    { id: 'enr_004', student_id: 'stu_004', student_name: '赵丽丽', course_id: 'course_002', course_name: '美术活动班', schedule_id: null, member_card_id: 'mc_004', enroll_type: 'course' },
-    { id: 'enr_005', student_id: 'stu_005', student_name: '刘华', course_id: 'course_003', course_name: '少儿编程入门', schedule_id: null, member_card_id: 'mc_005', enroll_type: 'course' },
+    { id: 'enr_004', student_id: 'stu_004', student_name: '赵丽丽', course_id: 'course_002', course_name: '少儿体适能班', schedule_id: null, member_card_id: 'mc_004', enroll_type: 'course' },
+    { id: 'enr_005', student_id: 'stu_005', student_name: '刘华', course_id: 'course_003', course_name: '篮球提高班', schedule_id: null, member_card_id: 'mc_005', enroll_type: 'course' },
   ];
 
   const insertEnrollment = db.prepare(`
@@ -353,16 +355,20 @@ function seed() {
     { id: 'plog_005', student_id: 'stu_003', type: 'earn', amount: 150, balance: 150, reason: '充值', reference_id: '', description: '购买季卡获得积分' },
     { id: 'plog_006', student_id: 'stu_003', type: 'consume', amount: 30, balance: 120, reason: '兑换', reference_id: '', description: '兑换文具' },
     { id: 'plog_007', student_id: 'stu_005', type: 'earn', amount: 200, balance: 200, reason: '充值', reference_id: '', description: '购买年卡获得积分' },
-    { id: 'plog_008', student_id: 'stu_005', type: 'consume', amount: 50, balance: 150, reason: '兑换', reference_id: '', description: '兑换编程书籍' },
+    { id: 'plog_008', student_id: 'stu_005', type: 'consume', amount: 50, balance: 150, reason: '兑换', reference_id: '', description: '兑换篮球护具' },
     { id: 'plog_009', student_id: 'stu_007', type: 'earn', amount: 90, balance: 90, reason: '充值', reference_id: '', description: '购买季卡获得积分' },
     { id: 'plog_010', student_id: 'stu_007', type: 'consume', amount: 10, balance: 80, reason: '兑换', reference_id: '', description: '兑换贴纸' },
   ];
 
   const insertPointLog = db.prepare(`
-    INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, description, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, description, created_at, expire_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  pointLogs.forEach(pl => insertPointLog.run(pl.id, pl.student_id, pl.type, pl.amount, pl.balance, pl.reason, pl.reference_id, pl.description, NOW));
+  const POINT_EXPIRY_MS = 730 * 24 * 3600 * 1000;
+  pointLogs.forEach(pl => insertPointLog.run(
+    pl.id, pl.student_id, pl.type, pl.amount, pl.balance, pl.reason, pl.reference_id, pl.description, NOW,
+    pl.type === 'earn' ? NOW + POINT_EXPIRY_MS : null
+  ));
 
   // ========= 13. 订单 + 支付 =========
   console.log('[Seed] 创建订单和支付...');
@@ -397,8 +403,8 @@ function seed() {
   const notifications = [
     { id: 'msg_001', user_id: 'wx_parent_001', student_id: 'stu_001', title: '签到成功', content: '张小明今日篮球课签到成功，获得10积分', channel: 'inapp', status: 'sent', sent_at: NOW - 3600000 },
     { id: 'msg_002', user_id: 'wx_parent_001', student_id: 'stu_001', title: '训练时长提醒', content: '您的季卡剩余18训练时长，请及时安排训练', channel: 'inapp', status: 'sent', sent_at: NOW - 86400000 },
-    { id: 'msg_003', user_id: 'wx_parent_002', student_id: 'stu_002', title: '签到成功', content: '李小红今日美术课签到成功，获得10积分', channel: 'inapp', status: 'sent', sent_at: NOW - 7200000 },
-    { id: 'msg_004', user_id: 'wx_parent_005', student_id: 'stu_005', title: '活动即将开始', content: '编程课明天上午9点开始，请准时到达', channel: 'inapp', status: 'read', sent_at: NOW - 172800000 },
+    { id: 'msg_003', user_id: 'wx_parent_002', student_id: 'stu_002', title: '签到成功', content: '李小红今日体适能课签到成功，获得10积分', channel: 'inapp', status: 'sent', sent_at: NOW - 7200000 },
+    { id: 'msg_004', user_id: 'wx_parent_005', student_id: 'stu_005', title: '活动即将开始', content: '篮球课明天上午9点开始，请准时到达', channel: 'inapp', status: 'read', sent_at: NOW - 172800000 },
     { id: 'msg_005', user_id: 'wx_parent_003', student_id: 'stu_003', title: '会员卡即将到期', content: '您的季卡将在7天后到期，请及时续期', channel: 'inapp', status: 'sent', sent_at: NOW - 259200000 },
   ];
 

@@ -31,6 +31,7 @@
               <span class="product-name">{{ row.name }}</span>
               <el-tag v-if="row.billing_mode === 'count'" size="small" effect="light" type="warning" style="margin-left: 6px">按次</el-tag>
               <el-tag v-else size="small" effect="light" type="info" style="margin-left: 6px">时效</el-tag>
+              <el-tag v-if="row.transferable" size="small" effect="plain" type="success" style="margin-left: 6px">可转让</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="权益" min-width="160">
@@ -39,6 +40,12 @@
                 {{ row.total_classes }} 次<template v-if="row.valid_days"> · {{ row.valid_days }} 天</template>
               </template>
               <template v-else>{{ row.valid_days }} 天不限次</template>
+            </template>
+          </el-table-column>
+          <el-table-column label="到店限次" min-width="130">
+            <template #default="{ row }">
+              <span v-if="row.billing_mode === 'time'">{{ visitLimitText(row) }}</span>
+              <span v-else class="text-faint">按次扣课</span>
             </template>
           </el-table-column>
           <el-table-column label="赠积分" min-width="90">
@@ -126,6 +133,29 @@
           <el-input-number v-model="cardForm.validDays" :min="0" :max="3650" />
           <span class="unit-text">{{ cardForm.billingMode === 'time' ? '天（期间不限次数）' : '天内有效（0 表示不限）' }}</span>
         </el-form-item>
+        <!-- 到店次数上限：仅时效制（不限次）卡种需要，次数卡本就按次扣课 -->
+        <el-form-item v-if="cardForm.billingMode === 'time'" label="到店次数上限">
+          <div class="limit-range">
+            <el-input-number
+              v-model="cardForm.visitLimitPerWeek"
+              :min="0"
+              :max="99"
+              :controls="false"
+              :value-on-clear="0"
+              class="limit-input"
+            />
+            <span class="unit-text">次 / 周</span>
+            <el-input-number
+              v-model="cardForm.visitLimitPerMonth"
+              :min="0"
+              :max="999"
+              :controls="false"
+              :value-on-clear="0"
+              class="limit-input"
+            />
+            <span class="unit-text">次 / 月（0 表示不限）</span>
+          </div>
+        </el-form-item>
         <el-form-item label="赠送积分" prop="pointsReward">
           <el-input-number v-model="cardForm.pointsReward" :min="0" :max="10000" />
           <span class="unit-text">分（销售登记收款时自动发放）</span>
@@ -136,6 +166,10 @@
         </el-form-item>
         <el-form-item label="适用项目">
           <el-input v-model="cardForm.courseScope" placeholder="留空表示全部项目" />
+        </el-form-item>
+        <el-form-item label="可转让">
+          <el-switch v-model="cardForm.transferable" :active-value="1" :inactive-value="0" />
+          <span class="unit-text">转让需在学员档案的会员卡上操作</span>
         </el-form-item>
         <el-form-item v-if="editingCardId" label="上架状态">
           <el-switch v-model="cardForm.isActive" :active-value="1" :inactive-value="0" active-text="在售" inactive-text="停用" />
@@ -219,7 +253,31 @@ const load = async () => {
 const cardDialogVisible = ref(false)
 const cardFormRef = ref(null)
 const editingCardId = ref('')
-const cardForm = reactive({ name: '', billingMode: 'time', validDays: 30, totalClasses: 8, pointsReward: 0, price: 0, courseScope: '', isActive: 1 })
+const cardForm = reactive({
+  name: '',
+  billingMode: 'time',
+  validDays: 30,
+  totalClasses: 8,
+  pointsReward: 0,
+  price: 0,
+  courseScope: '',
+  isActive: 1,
+  // 到店次数上限（0 = 不限），仅时效制卡种使用
+  visitLimitPerWeek: 0,
+  visitLimitPerMonth: 0,
+  transferable: 0,
+})
+
+// 到店限次展示：未设上限显示「不限次」
+const visitLimitText = (row) => {
+  const w = Number(row.visit_limit_per_week) || 0
+  const m = Number(row.visit_limit_per_month) || 0
+  const parts = []
+  if (w > 0) parts.push(`每周 ${w} 次`)
+  if (m > 0) parts.push(`每月 ${m} 次`)
+  return parts.length ? parts.join(' · ') : '不限次'
+}
+
 const cardRules = {
   name: [{ required: true, message: '请输入产品名称', trigger: 'blur' }],
   price: [{ required: true, message: '请输入价格', trigger: 'change' }],
@@ -235,6 +293,9 @@ const openCardDialog = (row) => {
     price: row?.price || 0,
     courseScope: row?.course_scope || '',
     isActive: row ? (row.is_active !== 0 ? 1 : 0) : 1,
+    visitLimitPerWeek: Number(row?.visit_limit_per_week) || 0,
+    visitLimitPerMonth: Number(row?.visit_limit_per_month) || 0,
+    transferable: row?.transferable ? 1 : 0,
   })
   cardDialogVisible.value = true
 }
@@ -243,6 +304,11 @@ const submitCard = async () => {
   const valid = await cardFormRef.value.validate().catch(() => false)
   if (!valid) return
   const payload = { ...cardForm, productType: 'membership' }
+  // 次数制卡按次扣课，不需要到店限次；避免用户先设了时效制上限再切到次数制后残留
+  if (payload.billingMode !== 'time') {
+    payload.visitLimitPerWeek = 0
+    payload.visitLimitPerMonth = 0
+  }
   submittingCard.value = true
   try {
     if (editingCardId.value) {
@@ -342,6 +408,16 @@ onMounted(load)
   margin-left: 8px;
   font-size: var(--t-fs-xs);
   color: var(--t-text-3);
+}
+
+.limit-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.limit-input {
+  width: 90px;
 }
 
 :deep(.el-dialog__footer) {

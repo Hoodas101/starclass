@@ -70,8 +70,10 @@
           v-model:current-page="currentPage"
           v-model:page-size="pageSize"
           :total="totalStaff"
-          layout="total, prev, pager, next"
+          :page-sizes="[10, 20, 50]"
+          layout="total, sizes, prev, pager, next, jumper"
           background
+          @size-change="onSizeChange"
         />
       </div>
     </div>
@@ -196,7 +198,7 @@
       <template #footer>
         <div class="dialog-footer">
           <el-button @click="addDialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="submitting" @click="submitAdd">确认添加</el-button>
+          <el-button type="primary" :loading="submitting" @click="submitAdd">{{ editingId ? '保存修改' : '确认添加' }}</el-button>
         </div>
       </template>
     </el-dialog>
@@ -206,7 +208,7 @@
     <ExportDialog
       ref="exportDialogRef"
       title="导出员工数据"
-      description="选择时间范围后确认导出；留空导出全部员工。"
+      description="员工列表为当前全员快照，不支持按时间筛选；确认后将导出全部员工。"
       @confirm="doExport"
     />
 </template>
@@ -285,6 +287,10 @@ const loadStaff = async () => {
 }
 
 const doExport = (range) => {
+  // 员工列表没有时间维度，时间范围不参与过滤：用户选了范围时如实告知，避免以为导出被截断
+  if (range && range.length === 2) {
+    ElMessage.warning('员工列表为当前全员快照，不支持按时间筛选，已导出全部')
+  }
   const list = staffList.value
   if (!list.length) {
     ElMessage.warning('暂无可导出的员工数据')
@@ -316,6 +322,8 @@ const pagedStaff = computed(() =>
   filteredStaff.value.slice((currentPage.value - 1) * pageSize.value, currentPage.value * pageSize.value)
 )
 watch(searchKeyword, () => { currentPage.value = 1 })
+// 每页条数变化后回到第 1 页，避免停留在越界页码出现空列表
+const onSizeChange = () => { currentPage.value = 1 }
 
 const addForm = reactive({
   name: '',

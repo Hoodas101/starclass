@@ -180,6 +180,61 @@ function checkConflict({ teacherId, classroomId, date, startTime, endTime, exclu
   return { conflict: false };
 }
 
+/**
+ * 排期日期 / 时间的合法性校验（新建、改期、周期排课三个入口共用）。
+ *
+ * 背景：此前 `date` 传 "not-a-date"、`endTime` 早于 `startTime` 都能直接入库。
+ * 脏排期破坏冲突检测（按字符串比较时间区间）与课消统计（按 date 聚合），
+ * 且没有任何入口能自愈。此处只做「明显非法即拒绝」，不引入业务日历规则。
+ *
+ * @param {{date?:*, startTime?:*, endTime?:*}} p 待校验字段；undefined/null/'' 表示「本字段不校验」
+ * @returns {string|null} 不合法时返回**具体字段**的错误文案；合法返回 null
+ */
+function validateScheduleTime({ date, startTime, endTime }) {
+  const has = (v) => v !== undefined && v !== null && v !== '';
+  if (has(date)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) return '日期格式应为 YYYY-MM-DD';
+    // 真实存在的日期校验：2026-02-30 能通过上面的正则，但 new Date(2026,1,30)
+    // 会被 JS 自动进位成 3 月 2 日。故按年月日构造后回读比对，不一致即不存在。
+    const [y, m, d] = String(date).split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) {
+      return '日期不存在，请检查（例如 2 月没有 30 日）';
+    }
+  }
+  const timeRe = /^\d{2}:\d{2}$/;
+  if (has(startTime) && !timeRe.test(String(startTime))) return '开始时间格式应为 HH:mm';
+  if (has(endTime) && !timeRe.test(String(endTime))) return '结束时间格式应为 HH:mm';
+  // HH:mm 两位补零，字符串比较与时间先后一致；相等也拒绝（零时长排期无意义且会干扰区间重叠判定）
+  if (has(startTime) && has(endTime) && String(startTime) >= String(endTime)) {
+    return '结束时间必须晚于开始时间';
+  }
+  return null;
+}
+
+/**
+ * 课程是否处于「已下架 / 已归档」状态。
+ *   · 记录不存在 → 返回 false（沿用既有行为，不在此处收紧：历史/自定义 courseId、
+ *     以及排期表 course_id 外键指向已删课程等情况不应被误伤）；
+ *   · course_temp 是系统内置的「临时活动」占位课程（is_active=0），承载自定义活动名，
+ *     编辑此类排期时前端会原样回传 courseId='course_temp'，必须豁免。
+ * 仅用于新建/修改入口的校验，不改任何列表查询的 JOIN（历史排期渲染不受影响）。
+ */
+function isCourseUnavailable(course) {
+  if (!course) return false;
+  if (course.id === 'course_temp') return false;
+  return Number(course.is_active) !== 1 || Number(course.archived) !== 0;
+}
+
+/**
+ * 教练是否已停用 / 离职。记录不存在 → 返回 false（沿用既有行为：部分调用方传入的是
+ * 教练 openid 而非 teachers.id，收紧「不存在」会误伤既有排期创建路径）。
+ * 仅用于新建/修改入口的校验，不动历史排期渲染。
+ */
+function isTeacherInactive(teacher) {
+  return !!(teacher && teacher.status !== 'active');
+}
+
 // 自定义名称的临时活动：挂靠到内置「临时活动」课程（is_active=0，不在可选列表展示）
 function ensureTempCourse() {
   const exists = db.prepare('SELECT id FROM courses WHERE id = ?').get('course_temp');
@@ -204,24 +259,27 @@ function ensureTempCourse() {
     if ((!courseId && !courseName) || !date || !startTime || !endTime) {
       return res.json(fail('活动名称、日期、开始时间、结束时间为必填'));
     }
+    // 日期 / 时间合法性（格式 + 真实存在 + 先后顺序），非法直接拒绝，不写库
+    const timeErr = validateScheduleTime({ date, startTime, endTime });
+    if (timeErr) return res.json(fail(timeErr));
 
     // 冲突检测（教师 / 场地 / 学员）。
     // confirmOverride 仅**管理员**可用：本接口对教练也开放（isCoachReq），
     // 若不校验角色，教练只要显式传该字段即可绕过全部冲突检测。
     const overrideAllowed = isAdminReq(req) && confirmOverride === true;
-    const conflict = checkConflict({
-      teacherId,
-      classroomId,
-      date,
-      startTime,
-      endTime,
-      studentIds: resolveStudentIds({ studentIds: student_ids, classId, groupCourseId }),
-    });
-    if (conflict.conflict && !overrideAllowed) return res.json(fail(conflict.message));
 
-    // 获取关联名称（支持自定义活动名称 / 手填教练）
-    const course = courseId ? db.prepare('SELECT name FROM courses WHERE id = ?').get(courseId) : null;
-    const teacher = teacherId ? db.prepare('SELECT name, alias FROM teachers WHERE id = ?').get(teacherId) : null;
+    // 获取关联名称（支持自定义活动名称 / 手填教练）。
+    // 只影响**新建/改期时的校验**，不动任何列表查询的 JOIN —— 历史排期仍照原样渲染。
+    // 课程：已下架 / 已归档课程不得再被排期（前端下拉虽已过滤，REST 直调可绕过）。
+    const course = courseId
+      ? db.prepare('SELECT id, name, is_active, COALESCE(archived, 0) AS archived FROM courses WHERE id = ?').get(courseId)
+      : null;
+    if (isCourseUnavailable(course)) return res.json(fail('该课程已下架，请另选'));
+    // 教师：已停用 / 离职教练不得再被排课（否则照常计薪）。同样只校验新建侧。
+    const teacher = teacherId
+      ? db.prepare('SELECT id, name, alias, status FROM teachers WHERE id = ?').get(teacherId)
+      : null;
+    if (isTeacherInactive(teacher)) return res.json(fail('该教练已停用，请另选'));
     const classroom = classroomId ? db.prepare('SELECT name FROM classrooms WHERE id = ?').get(classroomId) : null;
     const finalName = (courseName && String(courseName).trim()) || course?.name || '';
     const finalTeacher = (teacherName && String(teacherName).trim()) || teacher?.alias || teacher?.name || '';
@@ -229,15 +287,25 @@ function ensureTempCourse() {
     const effectiveCourseId = courseId || ensureTempCourse();
 
     const id = generateId('sch_');
-    db.prepare(`
-      INSERT INTO schedules (id, course_id, course_name, teacher_id, teacher_name, classroom_id, classroom_name,
-        date, start_time, end_time, max_students, status, remark, group_course_id, group_name, class_id,
-        class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, effectiveCourseId, finalName, teacherId || '', finalTeacher, classroomId || '', classroom?.name || '',
-      date, startTime, endTime, maxStudents || 0, remark || '', groupCourseId || '', groupName || '', classId || '',
-      (class_name && String(class_name).trim()) || '', parseInt(duration_minutes, 10) || 0, (allow_self_booking === 0 || allow_self_booking === false || allow_self_booking === '0' || allow_self_booking === 'false') ? 0 : 1, (student_ids && String(student_ids)) || '',
-      parseInt(class_count, 10) || 1, parseInt(price_per_class, 10) || 0, now(), now());
+    const conflictStudentIds = resolveStudentIds({ studentIds: student_ids, classId, groupCourseId });
+    // 冲突检测与写入必须落在**同一个 immediate 事务**内：此前 checkConflict 在事务外预检、
+    // INSERT 也在事务外，两个教练各自预检通过后先后提交即可插入冲突排期
+    //（schedules 表除主键外无 UNIQUE 兜底）。检测在事务内重做一次，不依赖事务外结果。
+    const txResult = db.transaction(() => {
+      const conflict = checkConflict({ teacherId, classroomId, date, startTime, endTime, studentIds: conflictStudentIds });
+      if (conflict.conflict && !overrideAllowed) return { err: conflict.message };
+      db.prepare(`
+        INSERT INTO schedules (id, course_id, course_name, teacher_id, teacher_name, classroom_id, classroom_name,
+          date, start_time, end_time, max_students, status, remark, group_course_id, group_name, class_id,
+          class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, effectiveCourseId, finalName, teacherId || '', finalTeacher, classroomId || '', classroom?.name || '',
+        date, startTime, endTime, maxStudents || 0, remark || '', groupCourseId || '', groupName || '', classId || '',
+        (class_name && String(class_name).trim()) || '', parseInt(duration_minutes, 10) || 0, (allow_self_booking === 0 || allow_self_booking === false || allow_self_booking === '0' || allow_self_booking === 'false') ? 0 : 1, (student_ids && String(student_ids)) || '',
+        parseInt(class_count, 10) || 1, parseInt(price_per_class, 10) || 0, now(), now());
+      return { ok: true };
+    }).immediate();
+    if (txResult.err) return res.json(fail(txResult.err));
 
     res.json(success({ id }));
   } catch (err) {
@@ -266,6 +334,12 @@ router.post('/recursive', (req, res) => {
     if (repeatType === 'custom' && (!intervalDays || intervalDays < 1)) {
       return res.json(fail('重复间隔天数必须大于 0'));
     }
+    // 日期 / 时间合法性：周期排课逐日生成排期，起点不合法会批量污染课表，必须先拦住。
+    // 结束日期单独校验（错误文案加「结束」前缀以便定位是哪个字段）。
+    const startErr = validateScheduleTime({ date: startDate, startTime, endTime });
+    if (startErr) return res.json(fail(startErr));
+    const endErr = validateScheduleTime({ date: endDate });
+    if (endErr) return res.json(fail(`结束${endErr}`));
     // 周期跨度上限 180 天：误填年份（如 2027）会一次生成上千条排期，难删且污染课表
     {
       const spanDays = (new Date(endDate) - new Date(startDate)) / 86400000;
@@ -273,66 +347,78 @@ router.post('/recursive', (req, res) => {
       if (spanDays > 180) return res.json(fail('周期排期最长 180 天，请分批创建'));
     }
 
-    // 支持自定义活动名称 / 手填教练
-    const course = courseId ? db.prepare('SELECT name FROM courses WHERE id = ?').get(courseId) : null;
-    const teacher = teacherId ? db.prepare('SELECT name, alias FROM teachers WHERE id = ?').get(teacherId) : null;
+    // 支持自定义活动名称 / 手填教练。
+    // 与 POST / 同口径：课程须在售、教练须在岗。只校验新建侧，不动列表查询的 JOIN。
+    const course = courseId
+      ? db.prepare('SELECT id, name, is_active, COALESCE(archived, 0) AS archived FROM courses WHERE id = ?').get(courseId)
+      : null;
+    if (isCourseUnavailable(course)) return res.json(fail('该课程已下架，请另选'));
+    const teacher = teacherId
+      ? db.prepare('SELECT id, name, alias, status FROM teachers WHERE id = ?').get(teacherId)
+      : null;
+    if (isTeacherInactive(teacher)) return res.json(fail('该教练已停用，请另选'));
     const classroom = classroomId ? db.prepare('SELECT name FROM classrooms WHERE id = ?').get(classroomId) : null;
     const finalName = (courseName && String(courseName).trim()) || course?.name || '';
     const finalTeacher = (teacherName && String(teacherName).trim()) || teacher?.alias || teacher?.name || '';
     if (!finalName) return res.json(fail('活动名称不能为空'));
     const effectiveCourseId = courseId || ensureTempCourse();
 
-    // 创建规则
     const ruleId = generateId('rule_');
-    db.prepare(`
-      INSERT INTO schedule_rules (id, course_id, teacher_id, classroom_id, week_day, start_time, end_time, start_date, end_date, max_students, repeat_type, interval_days, group_course_id, group_name, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(ruleId, effectiveCourseId, teacherId, classroomId, 0, startTime, endTime, startDate, endDate, maxStudents || 0, repeatType, intervalDays, groupCourseId || '', groupName || '', now());
-
-    // 生成排期记录
     const createdSchedules = [];
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-    // 本次周期性排期涉及的学员集合（与单次创建同源），循环内复用，避免逐日重复查询
-    const recurStudentIds = resolveStudentIds({ studentIds: student_ids, classId, groupCourseId });
-
-    let intervalCounter = 0;
-    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-      const dayOfWeek = d.getDay();
-      let shouldCreate = false;
-      if (repeatType === 'daily') {
-        shouldCreate = true;
-      } else if (repeatType === 'weekly') {
-        shouldCreate = weekDays.includes(dayOfWeek);
-      } else if (repeatType === 'custom') {
-        shouldCreate = intervalCounter === 0;
-        intervalCounter = intervalCounter === 0 ? intervalDays - 1 : intervalCounter - 1;
-      }
-      if (!shouldCreate) continue;
-
-      const dateStr = formatDate(d.getTime());
-      const conflict = checkConflict({
-        teacherId,
-        classroomId,
-        date: dateStr,
-        startTime,
-        endTime,
-        studentIds: recurStudentIds,
-      });
-      if (conflict.conflict && confirmOverride !== true) continue;
-
-      const id = generateId('sch_');
+    // 规则 INSERT 与逐日排期 INSERT 必须同一事务：此前整个循环无事务，中途抛错会留下
+    //「规则已建、排期只建一半」的中间态，且无法从数据判断哪些已生成。
+    // 冲突检测在事务内逐日重做，不依赖事务外预检。
+    db.transaction(() => {
+      // 创建规则
       db.prepare(`
-        INSERT INTO schedules (id, course_id, course_name, teacher_id, teacher_name, classroom_id, classroom_name,
-          date, start_time, end_time, max_students, status, is_recursive, rule_id, group_course_id, group_name, class_id,
-          class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, effectiveCourseId, finalName, teacherId || '', finalTeacher, classroomId || '', classroom?.name || '',
-        dateStr, startTime, endTime, maxStudents || 0, ruleId, groupCourseId || '', groupName || '', classId || '',
-        (class_name && String(class_name).trim()) || '', parseInt(duration_minutes, 10) || 0, (allow_self_booking === 0 || allow_self_booking === false || allow_self_booking === '0' || allow_self_booking === 'false') ? 0 : 1, (student_ids && String(student_ids)) || '',
-        parseInt(class_count, 10) || 1, parseInt(price_per_class, 10) || 0, now(), now());
-      createdSchedules.push(id);
-    }
+        INSERT INTO schedule_rules (id, course_id, teacher_id, classroom_id, week_day, start_time, end_time, start_date, end_date, max_students, repeat_type, interval_days, group_course_id, group_name, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(ruleId, effectiveCourseId, teacherId, classroomId, 0, startTime, endTime, startDate, endDate, maxStudents || 0, repeatType, intervalDays, groupCourseId || '', groupName || '', now());
+
+      // 生成排期记录
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+      // 本次周期性排期涉及的学员集合（与单次创建同源），循环内复用，避免逐日重复查询
+      const recurStudentIds = resolveStudentIds({ studentIds: student_ids, classId, groupCourseId });
+
+      let intervalCounter = 0;
+      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        const dayOfWeek = d.getDay();
+        let shouldCreate = false;
+        if (repeatType === 'daily') {
+          shouldCreate = true;
+        } else if (repeatType === 'weekly') {
+          shouldCreate = weekDays.includes(dayOfWeek);
+        } else if (repeatType === 'custom') {
+          shouldCreate = intervalCounter === 0;
+          intervalCounter = intervalCounter === 0 ? intervalDays - 1 : intervalCounter - 1;
+        }
+        if (!shouldCreate) continue;
+
+        const dateStr = formatDate(d.getTime());
+        const conflict = checkConflict({
+          teacherId,
+          classroomId,
+          date: dateStr,
+          startTime,
+          endTime,
+          studentIds: recurStudentIds,
+        });
+        if (conflict.conflict && confirmOverride !== true) continue;
+
+        const id = generateId('sch_');
+        db.prepare(`
+          INSERT INTO schedules (id, course_id, course_name, teacher_id, teacher_name, classroom_id, classroom_name,
+            date, start_time, end_time, max_students, status, is_recursive, rule_id, group_course_id, group_name, class_id,
+            class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(id, effectiveCourseId, finalName, teacherId || '', finalTeacher, classroomId || '', classroom?.name || '',
+          dateStr, startTime, endTime, maxStudents || 0, ruleId, groupCourseId || '', groupName || '', classId || '',
+          (class_name && String(class_name).trim()) || '', parseInt(duration_minutes, 10) || 0, (allow_self_booking === 0 || allow_self_booking === false || allow_self_booking === '0' || allow_self_booking === 'false') ? 0 : 1, (student_ids && String(student_ids)) || '',
+          parseInt(class_count, 10) || 1, parseInt(price_per_class, 10) || 0, now(), now());
+        createdSchedules.push(id);
+      }
+    }).immediate();
 
     res.json(success({ ruleId, count: createdSchedules.length, scheduleIds: createdSchedules }));
   } catch (err) {
@@ -434,15 +520,198 @@ router.get('/', (req, res) => {
     }
 
     const total = db.prepare(`SELECT COUNT(*) as count FROM schedules ${where}`).get(...params).count;
+    // 场地名双读：优先取 schedules.classroom_name 冗余列（排期创建时写入的快照），
+    // 为空时才回退 classrooms 表实时取名。这样场地改名/停用后，历史排期仍能显示
+    // 当初的名字；而 19 行冗余列为空的老数据也能通过回退拿到场地名（若场地仍在）。
     const list = db.prepare(`
       SELECT s.*,
-        (SELECT COUNT(*) FROM attendances a WHERE a.schedule_id = s.id AND a.status IN ('present','late')) AS checked_in_count
+        (SELECT COUNT(*) FROM attendances a WHERE a.schedule_id = s.id AND a.status IN ('present','late')) AS checked_in_count,
+        COALESCE(NULLIF(s.classroom_name, ''), (SELECT name FROM classrooms WHERE id = s.classroom_id), '') AS classroom_name
       FROM schedules s ${where} ORDER BY date ASC, start_time ASC LIMIT ? OFFSET ?
     `).all(...params, pageSize, offset);
 
     res.json(success({ list, total, page, pageSize }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
+  }
+});
+
+/**
+ * GET /api/schedules/rules — 周期排课规则列表
+ * Query: { courseId? } 联表带出 course_name / teacher_name / classroom_name 便于前端展示。
+ *
+ * 背景：schedule_rules 此前全后端只有 INSERT，没有任何 UPDATE/DELETE —— 机构调整固定
+ * 课时只能删规则重录，已报名学员的 enrollments 全部作废。本组端点补上「可改、可停用」。
+ *
+ * 路由顺序：/rules 必须注册在 /:id 之前，否则 GET /api/schedules/rules 会被
+ * GET /:id 当作 id='rules' 吞掉（返回「活动不存在」）。
+ */
+router.get('/rules', (req, res) => {
+  try {
+    if (!isStaffReq(req)) return res.status(403).json(safeFail('无排期查看权限'));
+    const { courseId } = req.query;
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (courseId) { where += ' AND r.course_id = ?'; params.push(courseId); }
+    const list = db.prepare(`
+      SELECT r.*,
+        (SELECT name FROM courses WHERE id = r.course_id) AS course_name,
+        (SELECT name FROM teachers WHERE id = r.teacher_id) AS teacher_name,
+        (SELECT name FROM classrooms WHERE id = r.classroom_id) AS classroom_name
+      FROM schedule_rules r ${where}
+      ORDER BY r.created_at DESC
+    `).all(...params);
+    res.json(success({ list, total: list.length }));
+  } catch (err) {
+    console.error('[schedule rules list]', err);
+    res.status(500).json(safeFail('获取周期规则失败'));
+  }
+});
+
+/**
+ * PUT /api/schedules/rules/:id — 修改周期规则（仅管理员）
+ *
+ * 有意**不自动重排**已生成的排期：重排会牵动已报名学员的考勤/课时/报名，属高风险。
+ * 规则变更只对「此后新建的排期」生效，响应中明确告知调用方。
+ */
+router.put('/rules/:id', (req, res) => {
+  try {
+    if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可修改周期规则'));
+    const rule = db.prepare('SELECT * FROM schedule_rules WHERE id = ?').get(req.params.id);
+    if (!rule) return res.json(fail('周期规则不存在'));
+    const { week_day, start_time, end_time, start_date, end_date, max_students, teacher_id, classroom_id, is_active } = req.body || {};
+
+    // 日期 / 时间合法性（只校验显式传入的字段）
+    const timeErr = validateScheduleTime({ date: start_date, startTime: start_time, endTime: end_time });
+    if (timeErr) return res.json(fail(timeErr));
+    const endErr = validateScheduleTime({ date: end_date });
+    if (endErr) return res.json(fail(`结束${endErr}`));
+    // 先后顺序用「生效值」判定
+    const effStart = start_time !== undefined ? start_time : rule.start_time;
+    const effEnd = end_time !== undefined ? end_time : rule.end_time;
+    if (effStart && effEnd && String(effStart) >= String(effEnd)) return res.json(fail('结束时间必须晚于开始时间'));
+    const effStartDate = start_date !== undefined ? start_date : rule.start_date;
+    const effEndDate = end_date !== undefined ? end_date : rule.end_date;
+    if (effStartDate && effEndDate && String(effStartDate) > String(effEndDate)) return res.json(fail('结束日期不能早于开始日期'));
+    if (week_day !== undefined && ![0, 1, 2, 3, 4, 5, 6].includes(Number(week_day))) return res.json(fail('星期取值应为 0-6（0 为周日）'));
+    // 教练须在岗（与排期创建侧同口径）；传空串表示清除，不校验。
+    // 仅在「把教练改成另一个」时校验，未变更则放行（与 PUT /:id 同理由）。
+    if (teacher_id && teacher_id !== rule.teacher_id) {
+      const t = db.prepare('SELECT id, status FROM teachers WHERE id = ?').get(teacher_id);
+      if (isTeacherInactive(t)) return res.json(fail('该教练已停用，请另选'));
+    }
+
+    const p = (v) => (v === undefined ? null : v);
+    // schedule_rules 无 updated_at 列，故不写该字段
+    db.prepare(`
+      UPDATE schedule_rules SET
+        week_day = COALESCE(?, week_day),
+        start_time = COALESCE(?, start_time),
+        end_time = COALESCE(?, end_time),
+        start_date = COALESCE(?, start_date),
+        end_date = COALESCE(?, end_date),
+        max_students = COALESCE(?, max_students),
+        teacher_id = COALESCE(?, teacher_id),
+        classroom_id = COALESCE(?, classroom_id),
+        is_active = COALESCE(?, is_active)
+      WHERE id = ?
+    `).run(p(week_day), p(start_time), p(end_time), p(start_date), p(end_date),
+      max_students !== undefined ? (parseInt(max_students, 10) || 0) : null,
+      p(teacher_id), p(classroom_id), p(is_active), req.params.id);
+
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'schedule_rule',
+      entityId: req.params.id,
+      action: 'update',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: {
+        week_day: rule.week_day, start_time: rule.start_time, end_time: rule.end_time,
+        start_date: rule.start_date, end_date: rule.end_date, max_students: rule.max_students,
+        teacher_id: rule.teacher_id, classroom_id: rule.classroom_id, is_active: rule.is_active,
+      },
+      after: {
+        week_day: week_day !== undefined ? week_day : rule.week_day,
+        start_time: start_time !== undefined ? start_time : rule.start_time,
+        end_time: end_time !== undefined ? end_time : rule.end_time,
+        start_date: start_date !== undefined ? start_date : rule.start_date,
+        end_date: end_date !== undefined ? end_date : rule.end_date,
+        teacher_id: teacher_id !== undefined ? teacher_id : rule.teacher_id,
+        classroom_id: classroom_id !== undefined ? classroom_id : rule.classroom_id,
+        is_active: is_active !== undefined ? is_active : rule.is_active,
+      },
+    });
+
+    res.json(success({
+      id: req.params.id,
+      note: '已生成的排期不受影响，如需生效请新建规则或逐条改期',
+    }));
+  } catch (err) {
+    console.error('[schedule rule update]', err);
+    res.status(500).json(safeFail('修改周期规则失败'));
+  }
+});
+
+/**
+ * DELETE /api/schedules/rules/:id?cascade=1 — 停用周期规则（仅管理员）
+ *   · 未传 cascade：只把 is_active 置 0，并返回受影响的未来排期数量，供前端二次确认。
+ *   · cascade=1   ：置 0 之外，级联取消其**未来且尚未发生**的排期。
+ *
+ * 「未来且尚未发生」= date >= 今天 且无任何考勤记录。带考勤的排期说明课已上过
+ * （或已签到），回滚会抹掉真实的课时/积分/收入结转，故排除在外，避免误伤。
+ * 级联取消复用 revertScheduleAttendances（与 DELETE /:id 同一回滚原语），并整体置于事务内。
+ */
+router.delete('/rules/:id', (req, res) => {
+  try {
+    if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可停用周期规则'));
+    const rule = db.prepare('SELECT * FROM schedule_rules WHERE id = ?').get(req.params.id);
+    if (!rule) return res.json(fail('周期规则不存在'));
+    const cascade = String(req.query.cascade || '') === '1';
+    const today = formatDate(now());
+    const future = db.prepare(`
+      SELECT sc.id FROM schedules sc
+      WHERE sc.rule_id = ? AND sc.status != 'cancelled' AND sc.date >= ?
+        AND NOT EXISTS (SELECT 1 FROM attendances a WHERE a.schedule_id = sc.id)
+    `).all(req.params.id, today);
+
+    const actor = getActor(req);
+    const t = now();
+    let cancelled = 0;
+    if (cascade) {
+      db.transaction(() => {
+        db.prepare('UPDATE schedule_rules SET is_active = 0 WHERE id = ?').run(req.params.id);
+        const cancelStmt = db.prepare("UPDATE schedules SET status = 'cancelled', updated_at = ? WHERE id = ?");
+        const cancelEnroll = db.prepare("UPDATE enrollments SET status = 'cancelled', updated_at = ? WHERE schedule_id = ? AND status = 'active'");
+        const zeroCount = db.prepare('UPDATE schedules SET enrolled_count = 0 WHERE id = ?');
+        for (const s of future) {
+          // 回滚（课时 / 积分 / 收入结转）排在状态更新之前，与 DELETE /:id 同款；
+          // revertScheduleAttendances 自身不开事务，可安全置于本事务内。
+          revertScheduleAttendances({ scheduleId: s.id, actorId: actor.id, actorRole: actor.role, reason: '周期规则停用，级联取消未来排期' });
+          cancelStmt.run(t, s.id);
+          cancelEnroll.run(t, s.id);
+          zeroCount.run(s.id);
+          cancelled++;
+        }
+      }).immediate();
+    } else {
+      db.prepare('UPDATE schedule_rules SET is_active = 0 WHERE id = ?').run(req.params.id);
+    }
+
+    recordAudit(db, {
+      entity: 'schedule_rule',
+      entityId: req.params.id,
+      action: cascade ? 'deactivate_cascade' : 'deactivate',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { is_active: rule.is_active, course_id: rule.course_id },
+      after: { is_active: 0, cascade, affected: future.length, cancelled },
+    });
+
+    res.json(success({ id: req.params.id, is_active: 0, cascade, affected: future.length, cancelled }));
+  } catch (err) {
+    console.error('[schedule rule delete]', err);
+    res.status(500).json(safeFail('停用周期规则失败'));
   }
 });
 
@@ -500,7 +769,8 @@ router.get('/my', (req, res) => {
     if (!openid) return res.json(fail('未登录'));
 
     const schedules = db.prepare(`
-      SELECT s.*, e.student_id, e.student_name, e.created_by
+      SELECT s.*, e.student_id, e.student_name, e.created_by,
+        COALESCE(NULLIF(s.classroom_name, ''), (SELECT name FROM classrooms WHERE id = s.classroom_id), '') AS classroom_name
       FROM schedules s
       JOIN enrollments e ON e.schedule_id = s.id
       WHERE e.student_id IN (
@@ -649,47 +919,86 @@ function coachStats(teacherId, monthOverride) {
   const yearStart = `${y}-01-01`;
   const yearEnd = `${y}-12-31`;
 
+  // 与 utils/payroll.js 的计薪节数口径**同源**（该文件 lessonRows 的判定）：
+  //   · 计薪基数 = 实际授课：排了课却没有任何考勤记录，说明该课并未实际发生
+  //     （停课/改期/临时取消但未改状态），不计节数；「有考勤但学员全缺席」仍计
+  //     （教师确实到场）。故用 EXISTS 而非 attended > 0。
+  //   · 未来日期不产生应付：统一截断到今天（payroll 的 effectiveEnd 同款语义）。
+  // 此前 coachStats 只判 status != 'cancelled' 且不截断未来，导致同屏两处「节数」
+  // 互相矛盾（实测 2026-10 王教练 payroll=1 / coachstats=5）。此处对齐后两处同源。
+  // 说明：口径若需长期一致，理想做法是抽成 utils/payroll.js 导出的共享函数；
+  // 但该文件由另一位工程师维护，本次不跨文件改动，仅在此注释标注同源关系。
+  // 「已排课节数」与「计薪课次」是**两个不同的口径**，必须同时给出且分别命名：
+  // 只给一个数字时，前端把它同时当「排了多少」和「该发多少钱」用，于是同一屏出现
+  // 两个都叫「节」却不等的数字（实测 2026-10 王教练 1 vs 5），管理员无从解释。
+  //   · scheduledClasses = 排了且未取消的课（含未来、含尚未签到的）——回答「排了多少」
+  //   · classes          = 实际授课、参与计薪的课（有考勤、且不超过今天）——回答「该发多少」
+  // 后者与 utils/payroll.js 同源（PAYABLE_SCHEDULE_SQL / lessonRows 判据）。
+  const clampEnd = (end) => (end > today ? today : end);
   const calc = (start, end) => {
-    const classes = db.prepare(
-      "SELECT COUNT(*) c FROM schedules WHERE teacher_id = ? AND status != 'cancelled' AND date >= ? AND date <= ?"
-    ).get(teacherId, start, end).c;
+    const endDate = clampEnd(end);
+    const scheduledClasses = db.prepare(`
+      SELECT COUNT(*) c FROM schedules s
+      WHERE s.teacher_id = ? AND s.status != 'cancelled' AND s.date >= ? AND s.date <= ?
+    `).get(teacherId, start, end).c;
+    const classes = db.prepare(`
+      SELECT COUNT(*) c FROM schedules s
+      WHERE s.teacher_id = ? AND s.status != 'cancelled' AND s.date >= ? AND s.date <= ?
+        AND EXISTS (SELECT 1 FROM attendances a WHERE a.schedule_id = s.id)
+    `).get(teacherId, start, endDate).c;
     const students = db.prepare(`
       SELECT COUNT(*) c FROM attendances a
       JOIN schedules s ON s.id = a.schedule_id
       WHERE s.teacher_id = ? AND s.status != 'cancelled'
         AND a.status IN ('present','late') AND a.date >= ? AND a.date <= ?
-    `).get(teacherId, start, end).c;
-    return { classes, students };
+    `).get(teacherId, start, endDate).c;
+    return { classes, scheduledClasses, students };
   };
 
-  const totalClasses = db.prepare(
-    "SELECT COUNT(*) c FROM schedules WHERE teacher_id = ? AND status != 'cancelled'"
-  ).get(teacherId).c;
+  const totalScheduledClasses = db.prepare(`
+    SELECT COUNT(*) c FROM schedules s
+    WHERE s.teacher_id = ? AND s.status != 'cancelled' AND s.date <= ?
+  `).get(teacherId, today).c;
+  const totalClasses = db.prepare(`
+    SELECT COUNT(*) c FROM schedules s
+    WHERE s.teacher_id = ? AND s.status != 'cancelled' AND s.date <= ?
+      AND EXISTS (SELECT 1 FROM attendances a WHERE a.schedule_id = s.id)
+  `).get(teacherId, today).c;
   const totalStudents = db.prepare(`
     SELECT COUNT(*) c FROM attendances a
     JOIN schedules s ON s.id = a.schedule_id
     WHERE s.teacher_id = ? AND s.status != 'cancelled' AND a.status IN ('present','late')
-  `).get(teacherId).c;
+      AND a.date <= ?
+  `).get(teacherId, today).c;
 
   return {
     today: calc(today, today),
     week: calc(weekStart, weekEnd),
     month: calc(monthStart, monthEnd),
     year: calc(yearStart, yearEnd),
-    total: { classes: totalClasses, students: totalStudents },
+    total: { classes: totalClasses, scheduledClasses: totalScheduledClasses, students: totalStudents },
   };
 }
 
 // 课时明细行（具体到哪天/哪节课/多少人）
 function coachClassRows(teacherId, startDate, endDate) {
+  // payable 标记「这节课是否计入计薪课次」—— 判据与 utils/payroll.js 的
+  // PAYABLE_SCHEDULE_SQL 同源（有考勤记录、且不晚于今天）。
+  // 明细**刻意保留未计薪的行**（排了但没上成），否则教练/管理员看不到「排了却没发生」的课，
+  // 也就发现不了停课未改状态这类问题。但消费方**不得用明细行数当作节数** ——
+  // 那正是「同一屏出现两个都叫『节』却不等的数字」的根源；节数一律取汇总的
+  // scheduledClasses / classes。
+  const todayStr = formatDate(now());
   return db.prepare(`
     SELECT s.id, s.date, s.course_name, s.start_time, s.end_time, s.status, s.enrolled_count,
       (SELECT COUNT(*) FROM attendances a
-        WHERE a.schedule_id = s.id AND a.status IN ('present','late')) AS attended
+        WHERE a.schedule_id = s.id AND a.status IN ('present','late')) AS attended,
+      CASE WHEN s.date <= ? AND EXISTS (SELECT 1 FROM attendances a WHERE a.schedule_id = s.id)
+        THEN 1 ELSE 0 END AS payable
     FROM schedules s
     WHERE s.teacher_id = ? AND s.status != 'cancelled' AND s.date >= ? AND s.date <= ?
     ORDER BY s.date ASC, s.start_time ASC
-  `).all(teacherId, startDate, endDate);
+  `).all(todayStr, teacherId, startDate, endDate);
 }
 
 /**
@@ -820,12 +1129,24 @@ router.post('/:id/enroll', (req, res) => {
 
     // 支持指定孩子报名（多孩家庭）；未指定时兼容旧行为取主绑定孩子
     const { studentId } = req.body || {};
+    // 入口类型校验：studentId 传对象（如 {"$ne":1}）会被 better-sqlite3 拒绝绑定而抛错，
+    // 原先直落 catch → HTTP 500（把「参数非法」误报成「服务器故障」）。统一在入口拦下，
+    // 管理员代报名与家长报名两条分支都受此保护。
+    if (studentId !== undefined && studentId !== null && studentId !== '' && typeof studentId !== 'string') {
+      return res.json(fail('成员ID不合法'));
+    }
     let bind;
     if (isAdmin) {
       // 管理员代报名：无需家长绑定，直接按成员 ID 操作（用于新学员入班/纠错）
       if (!studentId) return res.json(fail('管理员代报名请指定成员ID'));
-      const stu = db.prepare('SELECT id, name FROM students WHERE id = ?').get(studentId);
-      if (!stu) return res.json(fail('成员不存在'));
+      // 在册约束：已归档 / 已删除学员不得再被录入排期名单（此前只校验存在性，
+      // 归档学员录入会返回成功）。与名册、自动缺席同用 ACTIVE_STUDENT_SQL 单一判据。
+      const stu = db.prepare(`SELECT s.id, s.name FROM students s WHERE s.id = ? AND ${ACTIVE_STUDENT_SQL}`).get(studentId);
+      if (!stu) {
+        // 区分「不存在」与「非在册」，给出明确原因
+        const any = db.prepare('SELECT id FROM students WHERE id = ?').get(studentId);
+        return res.json(fail(any ? '该学员非在册状态，无法报名' : '成员不存在'));
+      }
       bind = { student_id: stu.id, student_name: stu.name, parent_name: '管理员' };
     } else if (studentId) {
       bind = db.prepare('SELECT * FROM parent_bindings WHERE parent_openid = ? AND student_id = ?').get(openid, studentId);
@@ -987,7 +1308,11 @@ router.delete('/:id/enroll', (req, res) => {
  */
 router.get('/:id', (req, res) => {
   try {
-    const s = db.prepare('SELECT * FROM schedules WHERE id = ?').get(req.params.id);
+    // 场地名双读（与列表查询同口径）：优先冗余列快照，为空回退 classrooms 实时取名
+    const s = db.prepare(`
+      SELECT s.*, COALESCE(NULLIF(s.classroom_name, ''), (SELECT name FROM classrooms WHERE id = s.classroom_id), '') AS classroom_name
+      FROM schedules s WHERE s.id = ?
+    `).get(req.params.id);
     if (!s) return res.json(fail('活动不存在'));
 
     // 当前用户是否已报名（通过绑定成员关联）
@@ -1108,6 +1433,23 @@ router.get('/:id', (req, res) => {
       if (!allowed) return res.status(403).json(safeFail('无权修改非本人授课的排期'));
     }
 
+    // 日期 / 时间合法性：只校验**本次请求显式提供**的字段（undefined 表示沿用原值）。
+    // 不能拿历史脏数据来拒绝一次与时间无关的修改，否则脏排期将永远无法被取消/修正。
+    const timeErr = validateScheduleTime({
+      date: date !== undefined ? date : null,
+      startTime: startTime !== undefined ? startTime : null,
+      endTime: endTime !== undefined ? endTime : null,
+    });
+    if (timeErr) return res.json(fail(timeErr));
+    // 先后顺序用「生效值」判定：只改开始时间（晚于原结束时间）也必须拦下
+    if (startTime !== undefined || endTime !== undefined) {
+      const effStart = startTime !== undefined ? startTime : existing.start_time;
+      const effEnd = endTime !== undefined ? endTime : existing.end_time;
+      if (effStart && effEnd && String(effStart) >= String(effEnd)) {
+        return res.json(fail('结束时间必须晚于开始时间'));
+      }
+    }
+
     // 冲突检测（排除自身）
     const checkTeacherId = teacherId || existing.teacher_id;
     const checkClassroomId = classroomId || existing.classroom_id;
@@ -1138,8 +1480,17 @@ router.get('/:id', (req, res) => {
 
     // 名称解析：字段显式传空串（''）表示“清除”，未传（undefined）表示“保持不变”。
     // 传了 ID 但查不到档案时同样清空名称，避免 id 与 name 不一致。
-    const course = courseId ? db.prepare('SELECT name FROM courses WHERE id = ?').get(courseId) : null;
-    const teacher = teacherId ? db.prepare('SELECT name FROM teachers WHERE id = ?').get(teacherId) : null;
+    // 与创建侧同口径：课程须在售、教练须在岗。**仅在「本次把课程/教练改成另一个」时校验**：
+    // 前端编辑表单会把 row.course_id / row.teacher_id 原样回传，若该课程已下架、该教练已离职，
+    // 一律拒绝会导致这类历史排期连改时间/取消都做不到，故「未变更」时放行。
+    const course = courseId
+      ? db.prepare('SELECT id, name, is_active, COALESCE(archived, 0) AS archived FROM courses WHERE id = ?').get(courseId)
+      : null;
+    if (isCourseUnavailable(course) && courseId !== existing.course_id) return res.json(fail('该课程已下架，请另选'));
+    const teacher = teacherId
+      ? db.prepare('SELECT id, name, alias, status FROM teachers WHERE id = ?').get(teacherId)
+      : null;
+    if (isTeacherInactive(teacher) && teacherId !== existing.teacher_id) return res.json(fail('该教练已停用，请另选'));
     const classroom = classroomId ? db.prepare('SELECT name FROM classrooms WHERE id = ?').get(classroomId) : null;
     const courseNameVal = courseId === '' ? '' : (course?.name ?? null);
     // 与创建逻辑一致：优先展示对外别名（alias），再回退真实姓名
@@ -1204,15 +1555,28 @@ router.get('/:id', (req, res) => {
       notifyRecipients = resolveEnrolledParents(id);
     }
 
-    // 通过修改状态取消活动时,级联取消报名(与 DELETE /:id 行为一致),避免"已取消活动仍显示已报名"
-    if (status === 'cancelled' && existing.status !== 'cancelled') {
-      // 主更新 + 回滚 + 级联取消报名，三者同一事务：
-      // 回滚（课时 / 积分 / 收入结转）必须排在状态更新**之前**，中途失败才能整笔撤销，
-      // 否则会留下「活动已取消、学员课时却仍被扣」的账实不符，且无法从数据判断是否回滚过。
-      const t = now();
-      const actor = getActor(req);
-      db.transaction(() => {
-        applyScheduleUpdate();
+    // 主更新 + 冲突检测（事务内重做）+ 取消回滚，全部收进同一 immediate 事务：
+    //  · 事务外预检与写入之间存在窗口，两个并发 PUT 可各自预检通过后互相覆盖
+    //    （本表无版本号/乐观锁）；检测必须在事务内重做一次，不依赖事务外结果。
+    //  · 取消分支的回滚（课时 / 积分 / 收入结转）必须与状态更新同事务、且排在更新之前，
+    //    中途失败才能整笔撤销，否则会留下「活动已取消、学员课时却仍被扣」的账实不符。
+    // revertScheduleAttendances 自身不开事务，此处在外层事务内调用是安全的（嵌套才报错）。
+    const t = now();
+    const actor = getActor(req);
+    let innerConflict = null;
+    db.transaction(() => {
+      const conflict2 = checkConflict({
+        teacherId: checkTeacherId,
+        classroomId: checkClassroomId,
+        date: checkDate,
+        startTime: checkStart,
+        endTime: checkEnd,
+        excludeId: id,
+        studentIds: effectiveStudentIds,
+      });
+      if (conflict2.conflict && !overrideAllowed) { innerConflict = conflict2.message; return; }
+      applyScheduleUpdate();
+      if (status === 'cancelled' && existing.status !== 'cancelled') {
         revertScheduleAttendances({
           scheduleId: id,
           actorId: actor.id,
@@ -1222,10 +1586,9 @@ router.get('/:id', (req, res) => {
         db.prepare("UPDATE enrollments SET status = 'cancelled', updated_at = ? WHERE schedule_id = ? AND status = 'active'")
           .run(t, id);
         db.prepare('UPDATE schedules SET enrolled_count = 0, updated_at = ? WHERE id = ?').run(t, id);
-      })();
-    } else {
-      applyScheduleUpdate();
-    }
+      }
+    }).immediate();
+    if (innerConflict) return res.json(fail(innerConflict));
 
     // 家长通知必须在事务提交成功之后再发：先发通知后落库时，事务一旦失败（写库异常 / 约束冲突），
     // 数据库里什么都没变——活动没取消、时间也没调整，家长却已收到「已取消 / 时间调整为…」的

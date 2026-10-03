@@ -9,8 +9,10 @@ import { themeTick } from './theme'
 // 班级 / 课程默认色（亮色主题值；作为 CSS 变量不可用时的兜底）
 export const CLASS_FALLBACK = '#0071e3'
 
-// 图表调色板（亮色值；与 --t-chart-1..6 对应）
-export const CHART_PALETTE = ['#0071e3', '#34C759', '#FF9500', '#FF3B30', '#AF52DE', '#FF2D55']
+// 图表调色板（亮色值；与 --t-chart-1..6 对应，两处必须同步修改）
+// 已改为「色盲安全序列」并整体压暗：避免相邻红绿对撞，且每色对白底 ≥3:1（WCAG 1.4.11）。
+// 明细与依据见 src/styles/index.scss 的 --t-chart-* 注释。
+export const CHART_PALETTE = ['#0071e3', '#C93400', '#6D28D9', '#DB2777', '#0F766E', '#B45309']
 
 // 教师配色（周视图等按教师区分场景），首项与班级默认色一致
 export const TEACHER_COLORS = [

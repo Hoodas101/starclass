@@ -6,6 +6,8 @@ const crypto = require('crypto');
 const db = require('../db');
 const { now } = require('./index');
 const { getTerms, applyTerms } = require('./terms');
+// 「有效学员」单一事实来源：通知侧与报表侧（dashboard/growth/orders）统一口径
+const { ACTIVE_STUDENT_SQL } = require('./student-state');
 
 // ---------------------------------------------------------------------------
 // 「推送规则」的读取与文案渲染 —— 自动路径（本文件）与手动路径（utils/renewal.js）
@@ -105,6 +107,33 @@ function renderNotificationTemplate(template, vars, terms) {
     return m;
   });
   return terms ? applyTerms(filled, terms) : filled;
+}
+
+/**
+ * 取某学员的全部有效家长 openid（去重、去空）。
+ *
+ * 为什么不再只取 is_main=1：双家长家庭（爸爸 is_main=1 / 妈妈 is_main=0）里非主家长同样需要
+ * 共同知情（接送、请假、续费决策），只发主家长会让另一方永远收不到任何通知；
+ * 若历史数据 is_main 全为 0，则一条通知都发不出去。故收件人改为「该学员的全部有效家长」。
+ * DISTINCT 同时兜住历史脏数据：同一 openid 出现多行也只发一次。
+ * @param {string} studentId
+ * @returns {string[]} 去重后的家长 openid 列表
+ */
+function listParentOpenids(studentId) {
+  return db.prepare(
+    "SELECT DISTINCT parent_openid FROM parent_bindings WHERE student_id = ? AND parent_openid IS NOT NULL AND parent_openid != ''"
+  ).all(studentId).map((r) => r.parent_openid);
+}
+
+/**
+ * 通知 ID 的收件人后缀。
+ * 直接截断明文会把长微信 openid（wx + 28 位）切掉，同一提醒下多个家长 ID 前缀相同 →
+ * 主键冲突，只建得出第一条。用 openid 哈希后缀规避。
+ * @param {string} openid
+ * @returns {string}
+ */
+function recipientIdSuffix(openid) {
+  return crypto.createHash('sha1').update(openid).digest('hex').slice(0, 12);
 }
 
 /**
@@ -210,22 +239,35 @@ function generateLowClassReminders(nowMs = Date.now()) {
   // 过期卡的续费诉求由「已到期」提醒承担，两者混发会让家长收到自相矛盾的通知。
   // 本条件不依赖 expireOverdueCards 的调度时机（每日一次，存在最长 24h 的物化延迟），
   // 故在此独立成立。
+  // JOIN students 并套用 ACTIVE_STUDENT_SQL：通知侧与报表侧统一「有效学员」口径，
+  // 避免向已归档/已退费家庭推送「课时即将用尽，请续费」。
   const cards = db.prepare(`
-    SELECT mc.*, pb.parent_openid
+    SELECT mc.*
     FROM member_cards mc
-    LEFT JOIN parent_bindings pb ON pb.student_id = mc.student_id AND pb.is_main = 1
+    JOIN students s ON s.id = mc.student_id
     WHERE mc.status = 'active' AND mc.remaining_classes <= ? AND mc.remaining_classes > 0
       AND mc.expires_at IS NOT NULL AND mc.expires_at > ?
+      AND ${ACTIVE_STUDENT_SQL}
   `).all(threshold, nowMs);
 
   let sent = 0;
   const { terms } = getTerms(db);
   for (const card of cards) {
-    if (!card.parent_openid) continue;
     const weekKey = Math.floor(nowMs / weekMs);
+    // 幂等闸门：同一张卡同一周只生成一批（按 template_id 去重）。
+    // 收件人变多不破坏幂等——template_id 与收件人无关，多行共享同一 template_id，
+    // 后续扫描命中任意一行即视为本周已发。
     const key = `low_class_${card.id}_${weekKey}`;
     const exists = db.prepare('SELECT 1 FROM notifications WHERE template_id = ?').get(key);
     if (exists) continue;
+
+    // 收件人 = 该学员的全部有效家长（去重、去空），不再只发主家长
+    const recipients = listParentOpenids(card.student_id);
+    if (!recipients.length) {
+      // 无法送达：留痕便于运营补绑家长，不静默丢弃
+      console.warn(`[reminders] 无法送达低课时提醒：学员 ${card.student_id}(${card.student_name || '未知'}) 无有效家长绑定`);
+      continue;
+    }
 
     // 文案跟随机构称呼方案
     const content = applyTerms(
@@ -233,20 +275,24 @@ function generateLowClassReminders(nowMs = Date.now()) {
       terms
     );
     const title = applyTerms('课时不足提醒', terms);
-    db.prepare(`
+    const ins = db.prepare(`
       INSERT INTO notifications (id, user_id, title, content, priority, category, summary, template_id, channel, status, is_broadcast, sent_at, created_at)
       VALUES (?, ?, ?, ?, 'warning', 'system', ?, ?, 'inapp', 'sent', 0, ?, ?)
-    `).run(
-      `NTF_${key}`.toUpperCase(),
-      card.parent_openid,
-      title,
-      content,
-      content.slice(0, 60),
-      key,
-      nowMs,
-      nowMs
-    );
-    sent++;
+    `);
+    for (const openid of recipients) {
+      // 每位家长一行、ID 带 openid 哈希后缀，避免同一 key 下主键冲突只建出第一条
+      ins.run(
+        `NTF_${key}_${recipientIdSuffix(openid)}`.toUpperCase().slice(0, 64),
+        openid,
+        title,
+        content,
+        content.slice(0, 60),
+        key,
+        nowMs,
+        nowMs
+      );
+      sent++;
+    }
   }
   return { sent };
 }
@@ -359,11 +405,14 @@ function generateRenewalReminders(nowMs = Date.now()) {
   // 上界取 (maxDays + 1) 天是为了容纳最大档位的 +1 天窗口，否则最大档位会漏掉窗口右半侧。
   // 原实现按档位逐个窗口查询、且键里用的是档位值，手动路径却用计算天数，两者对不上，是重复推送的根因之一。
   const maxDays = Math.max(...reminderDays);
+  // JOIN students 并套用 ACTIVE_STUDENT_SQL：通知侧与报表侧统一「有效学员」口径，
+  // 避免向已归档/已退费家庭推送续费提醒（否则运营外呼无效返工）。
   const cards = db.prepare(`
-    SELECT mc.*, pb.parent_openid
+    SELECT mc.*
     FROM member_cards mc
-    LEFT JOIN parent_bindings pb ON pb.student_id = mc.student_id AND pb.is_main = 1
+    JOIN students s ON s.id = mc.student_id
     WHERE mc.status = 'active' AND mc.expires_at > ? AND mc.expires_at <= ?
+      AND ${ACTIVE_STUDENT_SQL}
   `).all(nowMs, nowMs + (maxDays + 1) * dayMs);
 
   const { terms } = getTerms(db);
@@ -372,8 +421,17 @@ function generateRenewalReminders(nowMs = Date.now()) {
     // 天数口径与去重键都走共用实现，保证与手动路径完全一致
     const daysLeft = resolveRenewalDaysLeft(card.expires_at, nowMs, reminderDays);
     if (daysLeft === null) continue;
+    // 幂等闸门：同一张卡同一档位只发一批（template_id 去重，与收件人无关）。
+    // 多收件人共享同一 template_id，故不会因收件人变多而重复生成提醒。
     if (hasRenewalNotification(db, card.id, daysLeft)) continue;
-    if (!card.parent_openid) continue;
+
+    // 收件人 = 该学员的全部有效家长（去重、去空），不再只发主家长
+    const recipients = listParentOpenids(card.student_id);
+    if (!recipients.length) {
+      // 无法送达：留痕便于运营补绑家长，不静默丢弃
+      console.warn(`[reminders] 无法送达续费提醒：学员 ${card.student_id}(${card.student_name || '未知'}) 无有效家长绑定`);
+      continue;
+    }
 
     const key = renewalDedupKey(card.id, daysLeft);
     const expireDate = fmtDate(card.expires_at);
@@ -387,20 +445,24 @@ function generateRenewalReminders(nowMs = Date.now()) {
       expireDate,
     }, terms);
     const title = applyTerms('会员即将到期提醒', terms);
-    db.prepare(`
+    const ins = db.prepare(`
       INSERT INTO notifications (id, user_id, title, content, priority, category, summary, template_id, channel, status, is_broadcast, sent_at, created_at)
       VALUES (?, ?, ?, ?, 'normal', 'system', ?, ?, 'inapp', 'sent', 0, ?, ?)
-    `).run(
-      `NTF_${key}`.toUpperCase(),
-      card.parent_openid,
-      title,
-      content,
-      content.slice(0, 60),
-      key,
-      nowMs,
-      nowMs
-    );
-    sent++;
+    `);
+    for (const openid of recipients) {
+      // 每位家长一行、ID 带 openid 哈希后缀，避免同一 key 下主键冲突只建出第一条
+      ins.run(
+        `NTF_${key}_${recipientIdSuffix(openid)}`.toUpperCase().slice(0, 64),
+        openid,
+        title,
+        content,
+        content.slice(0, 60),
+        key,
+        nowMs,
+        nowMs
+      );
+      sent++;
+    }
   }
   return { sent };
 }
@@ -420,4 +482,9 @@ module.exports = {
   renewalDedupKey,
   hasRenewalNotification,
   now,
+  // 收件人解析与通知 ID 后缀：多家长通知的唯一实现。
+  // routes/checkin.js 的缺席通知必须与本文件同口径 —— 三处通知若各写一套收件人逻辑，
+  // 口径日久必然漂移（一处改了、另两处没改），故一律从这里取。
+  listParentOpenids,
+  recipientIdSuffix,
 };

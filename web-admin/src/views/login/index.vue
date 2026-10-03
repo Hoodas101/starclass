@@ -33,8 +33,14 @@
           <div class="field-block" :style="{ '--i': 0 }">
             <div class="field-label">手机号</div>
             <el-form-item prop="phone">
+              <!-- type=tel + inputmode=numeric：移动端弹出数字键盘（此前是默认 text）；
+                   autocomplete=tel 让密码管理器/系统能识别并自动填充手机号。
+                   不再用 autocomplete="off" 阻止自动填充。 -->
               <el-input
                 v-model="loginForm.phone"
+                type="tel"
+                inputmode="numeric"
+                autocomplete="tel"
                 placeholder="请输入手机号"
                 maxlength="11"
                 :prefix-icon="Iphone"
@@ -62,9 +68,11 @@
             <div class="field-label">登录密码</div>
             <el-form-item prop="password" :rules="passwordRules">
               <el-input
+                ref="passwordRef"
                 v-model="loginForm.password"
                 type="password"
                 show-password
+                autocomplete="current-password"
                 placeholder="请输入登录密码"
                 maxlength="20"
                 :prefix-icon="Lock"
@@ -89,7 +97,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, nextTick, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { School, Iphone, UserFilled, Basketball, Setting, Lock } from '@element-plus/icons-vue'
 import { useUserStore } from '@/store/user'
@@ -102,6 +110,7 @@ const settingsStore = useSettingsStore()
 const t = settingsStore.t
 
 const loginFormRef = ref(null)
+const passwordRef = ref(null)
 const loading = ref(false)
 
 const loginForm = reactive({
@@ -162,7 +171,12 @@ const handleLogin = async () => {
         router.push('/dashboard')
       }
     } catch (error) {
+      // 登录失败：保留已填手机号（便于直接重试），清空密码并聚焦密码框，
+      // 减少「重新点一遍输入框」的操作。文案仍不区分「手机号不存在 / 密码错误」，
+      // 保持既有的防账号枚举策略。
       ElMessage.error(error.message || '登录失败')
+      loginForm.password = ''
+      nextTick(() => passwordRef.value?.focus())
     } finally {
       loading.value = false
     }

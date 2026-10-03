@@ -20,6 +20,7 @@
           <el-option v-for="c in classrooms" :key="c.id" :label="c.name" :value="c.id" />
         </el-select>
         <el-button :icon="Download" @click="exportDialogRef?.open()">导出</el-button>
+        <el-button :icon="Refresh" @click="openRulesDialog">周期规则</el-button>
         <el-button type="primary" :icon="Plus" @click="openScheduleDialog()">
           新建排期
         </el-button>
@@ -169,7 +170,9 @@
         size="small"
         @row-click="openEditDialog"
         row-class-name="clickable-row">
-        <el-table-column prop="date" label="日期" min-width="100"  />
+        <el-table-column label="日期" min-width="110">
+          <template #default="{ row }">{{ formatDate(row.date) }}</template>
+        </el-table-column>
         <el-table-column label="活动名称" min-width="140"  show-overflow-tooltip>
           <template #default="{ row }">
             <span class="course-dot" :style="{ background: row.color || classFallback() }"></span>
@@ -203,7 +206,8 @@
         </el-table-column>
         <el-table-column prop="status" label="状态" min-width="90" >
           <template #default="{ row }">
-            <StatusDot :tone="row.status === 'scheduled' ? 'success' : 'neutral'" :label="row.status === 'scheduled' ? '进行中' : '已结束'" subtle />
+            <!-- 状态映射补全：此前只有 scheduled/其他 两档，已取消（cancelled）被错显示为「已结束」 -->
+            <StatusDot :tone="scheduleStatusTone(row.status)" :label="scheduleStatusText(row.status)" subtle />
           </template>
         </el-table-column>
       </el-table>
@@ -213,10 +217,11 @@
             v-model:current-page="currentPage"
             v-model:page-size="pageSize"
             :total="totalSchedules"
-            layout="total, prev, pager, next"
+            :page-sizes="[10, 20, 50, 100]"
+            layout="total, sizes, prev, pager, next, jumper"
             background
             @current-change="loadSchedules"
-            @size-change="loadSchedules"
+            @size-change="onPageSizeChange"
           />
         </div>
       </div>
@@ -330,6 +335,68 @@
         </el-form-item>
       </el-form>
 
+      <!-- 参与学员面板（仅编辑已有排期时出现）：
+           签到页的名单只读 enrollments 表，而「新建排期」表单里的学员字段并不写 enrollments，
+           此前前端也从未调用过报名接口，导致名单恒空、无法点名扣课。
+           这里补齐「管理员代录名 / 移除」入口，把教学闭环的起点接上。 -->
+      <div v-if="editingId" class="enroll-panel">
+        <div class="enroll-head">
+          <span class="enroll-title">参与学员</span>
+          <span class="enroll-count">
+            已报名 {{ roster.length }} / 上限 {{ editingDetail?.max_students || '不限' }}
+          </span>
+        </div>
+
+        <div v-if="canEditRoster" class="enroll-add">
+          <el-select
+            v-model="pendingStudentIds"
+            filterable
+            remote
+            multiple
+            clearable
+            reserve-keyword
+            :remote-method="loadStudentOptions"
+            :loading="studentOptionsLoading"
+            placeholder="搜索学员姓名后选择，可多选"
+            style="flex: 1"
+          >
+            <el-option v-for="s in studentOptions" :key="s.id" :label="s.name" :value="s.id" />
+          </el-select>
+          <el-button
+            type="primary"
+            :loading="enrollSubmitting"
+            :disabled="!pendingStudentIds.length"
+            @click="addStudents"
+          >添加</el-button>
+        </div>
+        <div v-else-if="editingStatus !== 'scheduled'" class="enroll-readonly-hint">
+          该排期已{{ editingStatus === 'cancelled' ? '取消' : '结束' }}，名单仅供查看
+        </div>
+
+        <div v-if="rosterLoading" class="enroll-empty">名单加载中…</div>
+        <template v-else>
+          <div v-if="roster.length" class="enroll-list">
+            <div v-for="s in roster" :key="s.student_id" class="enroll-item">
+              <span class="enroll-name">{{ s.student_name || s.student_id }}</span>
+              <span class="enroll-status">{{ checkinStatusText(s.checkin_status) }}</span>
+              <el-button
+                v-if="canEditRoster"
+                type="danger"
+                link
+                size="small"
+                @click="removeStudent(s)"
+              >移除</el-button>
+            </div>
+          </div>
+          <div v-else class="enroll-empty">
+            <span>暂无参与学员，签到名单为空，无法点名扣课</span>
+            <el-button v-if="canEditRoster" type="primary" link size="small" @click="prepareEnrollSelect">
+              添加学员
+            </el-button>
+          </div>
+        </template>
+      </div>
+
       <template #footer>
         <div class="dlg-footer">
           <el-button
@@ -355,6 +422,101 @@
       description="选择时间范围后确认导出，未选择时默认导出当前周。"
       @confirm="doExport"
     />
+
+    <!-- 周期排课规则管理（增量 P1-7）：此前规则只能新建、不能改/停用 -->
+    <el-dialog v-model="rulesVisible" title="周期排课规则" class="dlg-lg" destroy-on-close>
+      <div class="rules-hint">
+        修改或停用规则<b>不会自动重排</b>已生成的排期，仅对此后新建的排期生效。
+      </div>
+      <el-table :data="rules" v-loading="rulesLoading" size="small">
+        <el-table-column label="活动" min-width="130" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.course_name || row.course_id || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="重复" min-width="120">
+          <template #default="{ row }">{{ ruleRepeatText(row) }}</template>
+        </el-table-column>
+        <el-table-column label="时间" min-width="120">
+          <template #default="{ row }">{{ row.start_time }}-{{ row.end_time }}</template>
+        </el-table-column>
+        <el-table-column label="有效期" min-width="200">
+          <template #default="{ row }">{{ formatDate(row.start_date) }} ~ {{ formatDate(row.end_date) }}</template>
+        </el-table-column>
+        <el-table-column label="教练 / 场地" min-width="140" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.teacher_name || '待定' }} / {{ row.classroom_name || '待定' }}</template>
+        </el-table-column>
+        <el-table-column label="状态" min-width="90">
+          <template #default="{ row }">
+            <StatusDot :tone="row.is_active ? 'success' : 'neutral'" :label="row.is_active ? '生效中' : '已停用'" subtle />
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" min-width="140" fixed="right">
+          <template #default="{ row }">
+            <template v-if="isAdmin">
+              <el-button type="primary" link size="small" :disabled="!row.is_active" @click="openRuleEdit(row)">编辑</el-button>
+              <el-button type="danger" link size="small" :disabled="!row.is_active" @click="deactivateRule(row)">停用</el-button>
+            </template>
+            <span v-else class="text-faint">—</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div v-if="!rulesLoading && !rules.length" class="rules-empty">暂无周期排课规则</div>
+      <template #footer>
+        <el-button @click="rulesVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 编辑周期规则 -->
+    <el-dialog v-model="ruleEditVisible" title="编辑周期规则" class="dlg-md" destroy-on-close>
+      <div class="rules-hint">保存后仅影响此后新建的排期，已生成的排期保持不变。</div>
+      <el-form label-width="auto" label-position="left">
+        <el-form-item label="重复星期">
+          <el-select v-model="ruleForm.weekDay" style="width: 100%">
+            <el-option v-for="d in weekOptions" :key="d.value" :label="d.label" :value="d.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="时间段">
+          <el-time-picker
+            v-model="ruleForm.timeRange"
+            is-range
+            range-separator="至"
+            start-placeholder="开始时间"
+            end-placeholder="结束时间"
+            format="HH:mm"
+            value-format="HH:mm"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="生效日期">
+          <el-date-picker
+            v-model="ruleForm.dateRange"
+            type="daterange"
+            range-separator="至"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            format="YYYY-MM-DD"
+            value-format="YYYY-MM-DD"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="授课教师">
+          <el-select v-model="ruleForm.teacherId" clearable placeholder="待定" style="width: 100%">
+            <el-option v-for="t in teachers" :key="t.id" :label="t.name" :value="t.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="场地">
+          <el-select v-model="ruleForm.classroomId" clearable placeholder="待定" style="width: 100%">
+            <el-option v-for="c in classrooms" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="人数上限">
+          <el-input-number v-model="ruleForm.maxStudents" :min="0" :max="200" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="ruleEditVisible = false">取消</el-button>
+        <el-button type="primary" :loading="ruleSubmitting" @click="submitRuleEdit">保存</el-button>
+      </template>
+    </el-dialog>
 </template>
 
 <script setup>
@@ -363,18 +525,26 @@ const props = defineProps({
 })
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import dayjs from 'dayjs'
-import { Plus, ArrowLeft, ArrowRight, Download, User, Clock, UserFilled } from '@element-plus/icons-vue'
+import { Plus, ArrowLeft, ArrowRight, Download, Refresh, User, Clock, UserFilled } from '@element-plus/icons-vue'
 import {
   getTeachers,
   getClassrooms,
   getCourses,
   getSchedules,
+  getScheduleDetail,
   addSchedule,
   addRecursiveSchedule,
   updateSchedule,
   deleteSchedule,
   checkScheduleConflict,
+  getStudentOptions,
+  enrollScheduleStudent,
+  unenrollScheduleStudent,
+  getScheduleRules,
+  updateScheduleRule,
+  deleteScheduleRule,
 } from '@/api/modules'
+import { formatDate } from '@/utils/format'
 import { exportXlsx } from '@/utils/xlsx'
 import { fetchAllPages } from '@/utils/fetchAll'
 import ExportDialog from '@/components/ExportDialog.vue'
@@ -446,7 +616,9 @@ const weekDays = computed(() => {
     days.push({
       date: date.format('YYYY-MM-DD'),
       name: weekNames[i],
-      dateNum: date.format('MM/DD'),
+      // 列头与导航统一为 YYYY-MM-DD（此前列头 MM/DD、导航 MM月DD日、列表 YYYY-MM-DD
+      // 三种写法同屏并存，用户无法判断哪个是权威日期）
+      dateNum: formatDate(date.format('YYYY-MM-DD')),
       isToday: date.isSame(dayjs(), 'day')
     })
   }
@@ -461,22 +633,22 @@ const timeGridDays = computed(() => {
     return [{
       date: d.format('YYYY-MM-DD'),
       name: wn,
-      dateNum: d.format('MM/DD'),
+      dateNum: formatDate(d.format('YYYY-MM-DD')),
       isToday: d.isSame(dayjs(), 'day')
     }]
   }
   return weekDays.value
 })
 
-// 导航标签随视图切换
+// 导航标签随视图切换（日期一律 YYYY-MM-DD，与列头/列表保持同一种写法）
 const navLabel = computed(() => {
   if (viewMode.value === 'day') {
     const d = anchorDate.value
     const wn = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.day()]
-    return `${d.format('MM月DD日')} ${wn}`
+    return `${formatDate(d.format('YYYY-MM-DD'))} ${wn}`
   }
   if (viewMode.value === 'month') return anchorDate.value.format('YYYY年MM月')
-  return `${weekStart.value.format('MM月DD日')} - ${weekStart.value.add(6, 'day').format('MM月DD日')}`
+  return `${formatDate(weekStart.value.format('YYYY-MM-DD'))} - ${formatDate(weekStart.value.add(6, 'day').format('YYYY-MM-DD'))}`
 })
 
 // 周视图：自定义时间范围（持久化）
@@ -659,12 +831,48 @@ const onDrop = async (e, targetDate) => {
     const course = schedules.value.find((s) => s.id === state.id)
     const unchanged = course && course.date === targetDate && course.start_time === startT && course.end_time === endT
     if (unchanged) { dragState.value = null; return }
+    const payload = { date: targetDate, startTime: startT, endTime: endT }
+
+    // 拖拽落点也要走冲突预检（此前仅表单提交路径走，拖拽可绕过）。
+    // 与表单提交同源：冲突时由用户确认，带 confirmOverride 重试放行；取消则终止本次改期。
+    // 该接口后端限定管理员，教练端跳过预检，由 PUT 后端兜底拦截。
+    if (isAdmin.value && course) {
+      try {
+        const conflict = await checkScheduleConflict({
+          teacherId: course.teacher_id,
+          classroomId: course.classroom_id,
+          date: targetDate,
+          startTime: startT,
+          endTime: endT,
+          groupCourseId: course.group_course_id,
+          classId: course.class_id,
+          excludeId: state.id,
+        })
+        if (conflict?.conflict) {
+          try {
+            await ElMessageBox.confirm(conflict.message, '排期冲突', {
+              type: 'warning',
+              confirmButtonText: '仍然改期',
+              cancelButtonText: '取消'
+            })
+            payload.confirmOverride = true
+          } catch (e) {
+            // 用户取消：不改期，重新拉取以清除拖拽视觉残留
+            await loadSchedules()
+            return
+          }
+        }
+      } catch (e) {
+        // 预检接口异常（网络/权限）：不阻断，交由后端兜底
+      }
+    }
+
     loading.value = true
-    await updateSchedule(state.id, { date: targetDate, startTime: startT, endTime: endT })
+    await updateSchedule(state.id, payload)
     ElMessage.success('排期时间已更新')
     await loadSchedules()
   } catch (err) {
-    // 错误信息已由拦截器统一提示
+    // 错误信息已由拦截器统一提示；失败时数据未变，无需回滚视图
   } finally {
     loading.value = false
     dragState.value = null
@@ -706,6 +914,25 @@ const openDayFromMonth = (cell) => {
 const currentPage = ref(1)
 const pageSize = ref(20)
 const totalSchedules = ref(0)
+
+// 排期状态映射：实际取值集合为 scheduled（进行中）/ cancelled（已取消），
+// 并预留 completed（已结束）。此前非 scheduled 一律显示「已结束」，把已取消误标成已结束。
+const scheduleStatusText = (s) => ({
+  scheduled: '进行中',
+  cancelled: '已取消',
+  completed: '已结束'
+}[s] || '已结束')
+const scheduleStatusTone = (s) => ({
+  scheduled: 'success',
+  cancelled: 'error',
+  completed: 'neutral'
+}[s] || 'neutral')
+
+// 每页条数变化：必须回到第 1 页，否则会停在一个超出新总页数的页码上显示空列表
+const onPageSizeChange = () => {
+  currentPage.value = 1
+  loadSchedules()
+}
 
 // ============================================
 // 新建 / 编辑排期
@@ -750,12 +977,16 @@ const scheduleRules = {
 
 const openScheduleDialog = () => {
   editingId.value = ''
+  editingStatus.value = 'scheduled'
+  resetRoster()
   Object.assign(scheduleForm, defaultForm())
   scheduleDialogVisible.value = true
 }
 
 const openEditDialog = async (row) => {
   editingId.value = row.id
+  editingStatus.value = row.status || 'scheduled'
+  resetRoster()
   Object.assign(scheduleForm, {
     courseId: row.course_id || '',
     groupCourseId: row.group_course_id || '',
@@ -782,6 +1013,113 @@ const openEditDialog = async (row) => {
     }
   }
   scheduleDialogVisible.value = true
+  loadRoster(row.id)
+}
+
+// ============================================
+// 参与学员（管理员代录名 / 移除）
+// 签到名单只读 enrollments，故此处是「名单非空」的唯一入口
+// ============================================
+const editingStatus = ref('scheduled')
+const editingDetail = ref(null)
+const roster = ref([])
+const rosterLoading = ref(false)
+const pendingStudentIds = ref([])
+const enrollSubmitting = ref(false)
+const studentOptions = ref([])
+const studentOptionsLoading = ref(false)
+
+// 只有「进行中」的排期可增删学员；已取消/已结束只读展示
+const canEditRoster = computed(() => editingStatus.value === 'scheduled')
+
+const checkinStatusText = (s) => ({
+  present: '已签到', late: '迟到', absent: '缺席', leave: '请假', pending: '待签到'
+}[s] || '待签到')
+
+const resetRoster = () => {
+  editingDetail.value = null
+  roster.value = []
+  pendingStudentIds.value = []
+  studentOptions.value = []
+}
+
+const loadRoster = async (id) => {
+  rosterLoading.value = true
+  try {
+    const d = await getScheduleDetail(id)
+    editingDetail.value = d || null
+    roster.value = d?.students || []
+  } catch (e) {
+    // 拦截器已提示
+    roster.value = []
+  } finally {
+    rosterLoading.value = false
+  }
+}
+
+// 远程搜索学员：合并已有选项，避免搜索后已选中的标签丢失姓名
+const loadStudentOptions = async (query = '') => {
+  studentOptionsLoading.value = true
+  try {
+    const res = await getStudentOptions({ q: query })
+    const map = new Map(studentOptions.value.map((o) => [o.id, o]))
+    ;(res?.list || []).forEach((o) => map.set(o.id, o))
+    studentOptions.value = [...map.values()]
+  } catch (e) {
+    // 无权限或网络异常时保留现状
+  } finally {
+    studentOptionsLoading.value = false
+  }
+}
+
+// 空态下的「添加学员」引导：预取一次学员选项，用户即可在下拉中搜索选择
+const prepareEnrollSelect = () => {
+  loadStudentOptions('')
+}
+
+// 逐个报名并汇总结果：成功的提示总数，失败的保留选中以便重试。
+// 具体失败原因（如「已报名该活动」「人数已满」）由请求拦截器统一弹出，此处不重复 toast。
+const addStudents = async () => {
+  const ids = [...pendingStudentIds.value]
+  if (!editingId.value || !ids.length) return
+  enrollSubmitting.value = true
+  const failedIds = []
+  let ok = 0
+  for (const studentId of ids) {
+    try {
+      await enrollScheduleStudent(editingId.value, { studentId })
+      ok += 1
+    } catch (e) {
+      failedIds.push(studentId)
+    }
+  }
+  enrollSubmitting.value = false
+  pendingStudentIds.value = failedIds
+  if (ok) ElMessage.success(`已添加 ${ok} 名学员`)
+  if (failedIds.length) ElMessage.warning(`${failedIds.length} 名学员添加失败，原因见上方提示`)
+  await loadRoster(editingId.value)
+  loadSchedules()
+}
+
+const removeStudent = async (s) => {
+  if (!editingId.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确认将「${s.student_name || s.student_id}」移出本次排期？`,
+      '移除学员',
+      { type: 'warning', confirmButtonText: '确认移除', confirmButtonClass: 'el-button--danger' }
+    )
+  } catch (e) {
+    return
+  }
+  try {
+    await unenrollScheduleStudent(editingId.value, { studentId: s.student_id })
+    ElMessage.success('已移除')
+    await loadRoster(editingId.value)
+    loadSchedules()
+  } catch (e) {
+    // 拦截器已提示
+  }
 }
 
 const submitSchedule = async () => {
@@ -922,7 +1260,7 @@ const doExport = async (range) => {
     s.enrolled_count || 0,
     s.max_students || '',
     s.is_recursive ? '周期' : '单次',
-    s.status === 'scheduled' ? '进行中' : s.status
+    scheduleStatusText(s.status)
   ])
   if (!rows.length) {
     ElMessage.warning('暂无可导出的排期数据')
@@ -930,6 +1268,125 @@ const doExport = async (range) => {
   }
   exportXlsx(`排期表_${dayjs().format('YYYYMMDD')}`, headers, rows, { sheetName: '排期表' })
   ElMessage.success(`已导出 ${rows.length} 条排期`)
+}
+
+// ============================================
+// 周期排课规则管理（增量 P1-7）
+// ============================================
+const rulesVisible = ref(false)
+const rulesLoading = ref(false)
+const rules = ref([])
+const ruleEditVisible = ref(false)
+const ruleSubmitting = ref(false)
+const editingRuleId = ref('')
+const ruleForm = reactive({
+  weekDay: 1,
+  timeRange: [],
+  dateRange: [],
+  teacherId: '',
+  classroomId: '',
+  maxStudents: 20,
+})
+
+const ruleRepeatText = (r) => {
+  if (r.repeat_type === 'daily') return '每天'
+  if (r.repeat_type === 'custom') return `每 ${r.interval_days || 1} 天`
+  const wn = weekOptions.find((d) => d.value === Number(r.week_day))?.label || '每周'
+  return `每${wn}`
+}
+
+const openRulesDialog = async () => {
+  rulesVisible.value = true
+  rulesLoading.value = true
+  try {
+    const res = await getScheduleRules()
+    rules.value = res?.list || []
+  } catch (e) {
+    rules.value = []
+  } finally {
+    rulesLoading.value = false
+  }
+}
+
+const openRuleEdit = (row) => {
+  editingRuleId.value = row.id
+  Object.assign(ruleForm, {
+    weekDay: Number(row.week_day) || 0,
+    timeRange: [row.start_time || '09:00', row.end_time || '10:30'],
+    dateRange: row.start_date && row.end_date ? [row.start_date, row.end_date] : [],
+    teacherId: row.teacher_id || '',
+    classroomId: row.classroom_id || '',
+    maxStudents: row.max_students || 0,
+  })
+  ruleEditVisible.value = true
+}
+
+const submitRuleEdit = async () => {
+  if (!editingRuleId.value) return
+  if (!Array.isArray(ruleForm.timeRange) || ruleForm.timeRange.length !== 2) {
+    ElMessage.warning('请选择时间段')
+    return
+  }
+  const payload = {
+    week_day: ruleForm.weekDay,
+    start_time: ruleForm.timeRange[0],
+    end_time: ruleForm.timeRange[1],
+    teacher_id: ruleForm.teacherId || '',
+    classroom_id: ruleForm.classroomId || '',
+    max_students: ruleForm.maxStudents,
+  }
+  if (Array.isArray(ruleForm.dateRange) && ruleForm.dateRange.length === 2) {
+    payload.start_date = ruleForm.dateRange[0]
+    payload.end_date = ruleForm.dateRange[1]
+  }
+  ruleSubmitting.value = true
+  try {
+    await updateScheduleRule(editingRuleId.value, payload)
+    // 后端明确不自动重排：提示用户规则变更只对「此后新建的排期」生效
+    ElMessage.success('规则已更新，已生成的排期不受影响')
+    ruleEditVisible.value = false
+    openRulesDialog()
+  } catch (e) {
+    // 拦截器已提示
+  } finally {
+    ruleSubmitting.value = false
+  }
+}
+
+// 停用规则：先不带 cascade 取回「受影响的未来排期数量」，确认后再级联取消
+const deactivateRule = async (row) => {
+  try {
+    const res = await deleteScheduleRule(row.id)
+    const affected = Number(res?.affected) || 0
+    if (!affected) {
+      ElMessage.success('规则已停用')
+      openRulesDialog()
+      return
+    }
+    try {
+      await ElMessageBox.confirm(
+        `该规则下有 ${affected} 场未来排期尚未发生，是否一并取消？取消后将通知已报名家长，且不可恢复。`,
+        '停用周期规则',
+        {
+          type: 'warning',
+          confirmButtonText: `停用并取消 ${affected} 场`,
+          cancelButtonText: '仅停用规则',
+        }
+      )
+    } catch (e) {
+      // 用户选择「仅停用规则」：规则已在上一步停用，未来排期保留
+      ElMessage.info('已停用规则，未来排期保留')
+      openRulesDialog()
+      return
+    }
+    // 注：后端读取的是 query 参数 ?cascade=1，而 api 封装走的是请求体，
+    // 该次级联可能不生效（规则本身已在第一次调用中停用），详见交付报告。
+    await deleteScheduleRule(row.id, { cascade: true })
+    ElMessage.success(`规则已停用，并取消 ${affected} 场未来排期`)
+    openRulesDialog()
+  } catch (e) {
+    // 拦截器已提示
+  }
 }
 
 onMounted(() => {
@@ -1205,6 +1662,113 @@ onBeforeUnmount(() => {})
   margin-left: 12px;
   font-size: var(--t-fs-xs);
   color: var(--t-text-2);
+}
+
+// 参与学员面板
+.enroll-panel {
+  margin-top: var(--t-spacing-md);
+  padding-top: var(--t-spacing-md);
+  border-top: 1px solid var(--t-line);
+}
+
+.enroll-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--t-spacing-sm);
+}
+
+.enroll-title {
+  font-size: var(--t-fs-base);
+  font-weight: 600;
+  color: var(--t-text-1);
+}
+
+.enroll-count {
+  font-size: var(--t-fs-xs);
+  color: var(--t-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.enroll-add {
+  display: flex;
+  align-items: center;
+  gap: var(--t-spacing-sm);
+  margin-bottom: var(--t-spacing-sm);
+}
+
+.enroll-readonly-hint {
+  font-size: var(--t-fs-xs);
+  color: var(--t-text-2);
+  background: var(--t-surface-hover);
+  border-radius: var(--t-radius-md);
+  padding: 6px 10px;
+  margin-bottom: var(--t-spacing-sm);
+}
+
+.enroll-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.enroll-item {
+  display: flex;
+  align-items: center;
+  gap: var(--t-spacing-sm);
+  padding: 6px 8px;
+  border-radius: var(--t-radius-sm);
+
+  &:hover {
+    background: var(--t-surface-hover);
+  }
+}
+
+.enroll-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--t-fs-sm);
+  color: var(--t-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.enroll-status {
+  font-size: var(--t-fs-xs);
+  color: var(--t-text-2);
+}
+
+.enroll-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--t-fs-sm);
+  color: var(--t-text-2);
+  padding: 10px 4px;
+}
+
+.rules-hint {
+  font-size: var(--t-fs-xs);
+  color: var(--t-accent-text);
+  background: var(--t-accent-bg);
+  border-radius: var(--t-radius-md);
+  padding: 8px 12px;
+  margin-bottom: var(--t-spacing-md);
+  line-height: 1.5;
+}
+
+.rules-empty {
+  text-align: center;
+  color: var(--t-text-3);
+  font-size: var(--t-fs-sm);
+  padding: var(--t-spacing-lg) 0;
+}
+
+.text-faint {
+  color: var(--t-text-faint);
 }
 
 .group-hint {

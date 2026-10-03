@@ -14,6 +14,7 @@ const { findDuplicateStudents } = require('../utils/duplicate');
 const { RENEWAL_WARN_DAYS, LOW_CLASS_THRESHOLD, EXPIRED_WINDOW_DAYS } = require('../utils/renewal');
 // 已删除 / 已归档学员的排除条件（三处预警共用同一判据，避免各写一份后逐渐走样）
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
+const { computeExpiry } = require('../utils/points-expiry');
 
 // 增长中心权限：管理员或拥有「growth」权限的员工（销售等）
 function canGrowth(req) {
@@ -24,6 +25,11 @@ function canGrowth(req) {
 // （此前此处另有 CREATE TABLE / CREATE INDEX / ALTER，均为冗余或静默空操作）
 
 const STAGE_TEXT = { new: '新线索', contacted: '已联系', trial: '体验中', deal: '已成交', lost: '已流失' };
+
+// 业绩归属（salesperson）是自由文本且无外键，写入前统一 trim：否则同一员工手输
+// 「张三」/「张三 」会在报表（admin.js / finance.js 的 GROUP BY salesperson）里
+// 分裂成两个业绩组。此处先保证写入侧不产生新脏数据；读取侧的 TRIM 归一建议见交付报告。
+const normSalesperson = (v) => String(v == null ? '' : v).trim();
 
 function formatLead(row) {
   if (!row) return null;
@@ -44,18 +50,42 @@ function nextMemberNo() {
   return `NO-${String(max + 1).padStart(4, '0')}`;
 }
 
+// 线索「已成交」的统一判据 —— 漏斗与转介绍共用同一份，避免两处各用 stage/status 导致
+// 同一批线索在漏斗里算成交、在转介绍里不算（两字段可独立漂移：手工改库、旧数据）。
+// 选 status='converted' 而非 stage='deal'：status 是「生命周期终态」，PUT /leads/:id 与
+// /leads/:id/stage 与 convert 三条写入路径都会同步它；而 stage 只是管道位置，可被任意改回。
+const LEAD_CONVERTED_SQL = "status = 'converted'";
+
 /**
  * GET /api/growth/funnel — 销售漏斗概览
+ *
+ * 口径（本次统一，均为**全量**，响应字段 window 中明确标注）：
+ *  - 各阶段计数按 stage 维度，但「已成交」改用 LEAD_CONVERTED_SQL（与转介绍同源）；
+ *    「已流失」同理按 status='lost' 计数。排除 status 为 'invalid'/'deleted' 的作废线索，
+ *    它们既非在跟、也非成交/流失，计入任何一档都会失真。
+ *  - 转化率分母含 lost：deal / (在跟各阶段 + deal + lost)。此前分母不含 lost，
+ *    失效率越高转化率反而越好看（把线索丢进 lost 即可「提升」转化率）。
+ *  - 另给 lostRate，让失效率单独可见。
+ *  - 试听转化率由 trial_bookings 关联计算（试听预约数 → 成交数），与线索漏斗分开，
+ *    不再用线索漏斗近似试听效果。
+ *  - monthOrder / monthLeads 仍是**当月**口径（经营看板需要当月数字），
+ *    故额外给出 monthStages 当月漏斗，避免同屏跨期混算。
  */
 router.get('/funnel', (req, res) => {
   try {
     if (!canGrowth(req)) return res.status(403).json(safeFail('无增长中心权限'));
 
     const stages = ['new', 'contacted', 'trial', 'deal', 'lost'];
+    // 已成交/已流失按统一的生命周期判据计数；其余阶段按 stage 计数并排除终态线索
+    const countByStage = (s) => {
+      if (s === 'deal') return db.prepare(`SELECT COUNT(*) c FROM leads WHERE ${LEAD_CONVERTED_SQL}`).get().c;
+      if (s === 'lost') return db.prepare("SELECT COUNT(*) c FROM leads WHERE status = 'lost'").get().c;
+      return db.prepare(
+        "SELECT COUNT(*) c FROM leads WHERE stage = ? AND COALESCE(status,'active') NOT IN ('converted','lost','invalid','deleted')"
+      ).get(s).c;
+    };
     const counts = {};
-    for (const s of stages) {
-      counts[s] = db.prepare('SELECT COUNT(*) as count FROM leads WHERE stage = ?').get(s).count;
-    }
+    for (const s of stages) counts[s] = countByStage(s);
 
     // 待跟进线索（next_follow_at <= now 或为空且近期新建）
     const followUp = db.prepare(`
@@ -74,9 +104,33 @@ router.get('/funnel', (req, res) => {
     // 本月新增线索
     const monthLeads = db.prepare('SELECT COUNT(*) as count FROM leads WHERE created_at >= ?').get(monthStart.getTime()).count;
 
+    // 当月漏斗：与 monthLeads / monthOrder 同一时间窗（按 created_at），避免全量漏斗与当月成交跨期混算
+    const monthCounts = {};
+    for (const s of stages) {
+      monthCounts[s] = s === 'deal'
+        ? db.prepare(`SELECT COUNT(*) c FROM leads WHERE ${LEAD_CONVERTED_SQL} AND created_at >= ?`).get(monthStart.getTime()).c
+        : s === 'lost'
+          ? db.prepare("SELECT COUNT(*) c FROM leads WHERE status = 'lost' AND created_at >= ?").get(monthStart.getTime()).c
+          : db.prepare(
+            "SELECT COUNT(*) c FROM leads WHERE stage = ? AND COALESCE(status,'active') NOT IN ('converted','lost','invalid','deleted') AND created_at >= ?"
+          ).get(s, monthStart.getTime()).c;
+    }
+
     const totalActive = counts.new + counts.contacted + counts.trial;
-    const conversion = totalActive + counts.deal > 0
-      ? Math.round((counts.deal / (totalActive + counts.deal)) * 1000) / 10
+    // 分母含 lost：失效率越高转化率越低，符合直觉
+    const denom = totalActive + counts.deal + counts.lost;
+    const conversion = denom > 0 ? Math.round((counts.deal / denom) * 1000) / 10 : 0;
+    const lostRate = denom > 0 ? Math.round((counts.lost / denom) * 1000) / 10 : 0;
+
+    // 试听转化率：试听预约（trial_bookings）→ 成交。成交判据为 status='converted'
+    // （由 POST /api/trial/:id/convert 写入），与线索漏斗分开统计。
+    const trialStat = db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN status = 'converted' THEN 1 ELSE 0 END), 0) AS converted
+      FROM trial_bookings
+    `).get();
+    const trialConversion = trialStat.total
+      ? Math.round((trialStat.converted / trialStat.total) * 1000) / 10
       : 0;
 
     res.json(success({
@@ -85,6 +139,10 @@ router.get('/funnel', (req, res) => {
       monthOrder,
       monthLeads,
       conversion,
+      lostRate,
+      monthStages: stages.map((s) => ({ stage: s, label: STAGE_TEXT[s], count: monthCounts[s] })),
+      trial: { total: trialStat.total, converted: trialStat.converted, conversion: trialConversion },
+      window: { stages: 'all', monthStages: 'current_month' },
     }));
   } catch (err) {
     res.status(500).json(safeFail('获取漏斗数据失败'));
@@ -134,7 +192,7 @@ router.post('/leads', (req, res) => {
     db.prepare(`
       INSERT INTO leads (id, name, phone, source, stage, intent_level, next_follow_at, note, salesperson, student_id, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
-    `).run(id, name, phone, source, stage, Math.min(5, Math.max(1, parseInt(intentLevel) || 3)), nextFollowAt || null, note, salesperson, studentId || '', t, t);
+    `).run(id, name, phone, source, stage, Math.min(5, Math.max(1, parseInt(intentLevel) || 3)), nextFollowAt || null, note, normSalesperson(salesperson), studentId || '', t, t);
     res.json(success({ id }));
   } catch (err) {
     res.status(500).json(safeFail('创建线索失败'));
@@ -158,7 +216,7 @@ router.put('/leads/:id', (req, res) => {
       intentLevel: intentLevel !== undefined ? Math.min(5, Math.max(1, parseInt(intentLevel) || 3)) : row.intent_level,
       nextFollowAt: nextFollowAt !== undefined ? nextFollowAt : row.next_follow_at,
       note: note !== undefined ? note : row.note,
-      salesperson: salesperson !== undefined ? salesperson : row.salesperson,
+      salesperson: salesperson !== undefined ? normSalesperson(salesperson) : row.salesperson,
       status: status !== undefined ? status : row.status,
       studentId: studentId !== undefined ? studentId : (row.student_id || ''),
     };
@@ -305,7 +363,7 @@ router.post('/leads/:id/convert', (req, res) => {
             INSERT INTO orders (id, order_no, user_id, student_id, student_name, order_type, items, total_amount, discount_amount, payable_amount, status, salesperson, remark, is_1v1, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 'pending', ?, ?, 0, ?, ?)
           `).run(orderId, orderNo, getOpenId(req), orderStudentId, student.name, 'membership', JSON.stringify([]),
-            row.salesperson || '', '线索成交自动生成，金额待收银台补全', t, t);
+            normSalesperson(row.salesperson), '线索成交自动生成，金额待收银台补全', t, t);
           out.orderId = orderId;
         }
       }
@@ -324,8 +382,8 @@ router.post('/leads/:id/convert', (req, res) => {
               .run(rewardPoints, rewardPoints, t, out.studentId);
           }
           const balance = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(out.studentId).balance;
-          db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-            .run(generateId('PLG'), out.studentId, 'earn', rewardPoints, balance, rewardReason, t);
+          db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, created_at, expire_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+            .run(generateId('PLG'), out.studentId, 'earn', rewardPoints, balance, rewardReason, t, computeExpiry(t));
           out.bonus = { points: rewardPoints, balance };
         }
       }
@@ -594,9 +652,10 @@ router.get('/referrals', (req, res) => {
     // 总数与已转化数按全量 COUNT 统计，不受下面列表 LIMIT 影响：
     // 原先用 rows.length 当分母，线索超过 200 条后 total 与 conversion 会静默算错，
     // 而接口对外声称 total 就是全部，属于"显示的数字与实际不符"。
+    // 已转化判据与漏斗共用 LEAD_CONVERTED_SQL（status='converted'），不再与漏斗各用一套。
     const stat = db.prepare(`
       SELECT COUNT(*) AS total,
-        COALESCE(SUM(CASE WHEN status = 'converted' THEN 1 ELSE 0 END), 0) AS converted
+        COALESCE(SUM(CASE WHEN ${LEAD_CONVERTED_SQL} THEN 1 ELSE 0 END), 0) AS converted
       FROM leads WHERE source = 'referral'
     `).get();
     const total = stat.total;
@@ -749,8 +808,9 @@ router.post('/points/adjust', (req, res) => {
         }
       }
       balance = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId)?.balance || 0;
-      db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(generateId('PLG'), studentId, type, amount, balance, reason, t);
+      const expAt = type === 'earn' ? computeExpiry(t) : null;
+      db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, created_at, expire_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(generateId('PLG'), studentId, type, amount, balance, reason, t, expAt);
     })();
     if (insufficient) return res.json(fail('积分余额不足'));
     // 积分可兑换属有价资产，手工调整必须可追责：记录操作者与调整前后余额
@@ -778,7 +838,7 @@ router.get('/points/ranking', (req, res) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const list = db.prepare(`
       SELECT student_id, student_name, balance, total_earned
-      FROM points ORDER BY balance DESC LIMIT ?
+      FROM points WHERE (frozen = 0 OR frozen IS NULL) ORDER BY balance DESC LIMIT ?
     `).all(limit).map((r, i) => ({ rank: i + 1, studentId: r.student_id, studentName: r.student_name, balance: r.balance, totalEarned: r.total_earned }));
     res.json(success({ list }));
   } catch (err) {

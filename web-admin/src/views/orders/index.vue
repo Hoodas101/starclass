@@ -85,7 +85,7 @@
             <span v-else-if="col.key === 'phone'" class="order-phone">{{ row.parent_phone || '-' }}</span>
 
             <span v-else-if="col.key === 'item'" class="order-course">
-              {{ row.item_name || row.order_type }}
+              {{ row.item_name || t(row.order_type) || row.order_type }}
               <el-tag v-if="row.is_1v1" size="small" type="warning" effect="light" class="one-v-one-tag">1v1</el-tag>
             </span>
 
@@ -294,7 +294,7 @@
           </div>
           <div class="detail-item">
             <span class="detail-label">项目</span>
-            <span class="detail-value">{{ detailOrder.item_name || detailOrder.order_type }}</span>
+            <span class="detail-value">{{ detailOrder.item_name || t(detailOrder.order_type) || detailOrder.order_type }}</span>
           </div>
           <div class="detail-item">
             <span class="detail-label">收款日期</span>
@@ -338,6 +338,16 @@
         <el-divider />
         <div class="detail-actions">
           <el-button :icon="Printer" @click="printReceipt">打印收据</el-button>
+          <!-- 挂账订单此前没有任何收款入口：handleConfirmPayment 早已写好却从未在模板绑定，
+               pending 订单在 UI 上永远无法转已收款、会积压成死单。此处补上唯一入口。 -->
+          <el-button
+            v-if="detailOrder.status === 'pending'"
+            type="success"
+            :loading="confirmingPay"
+            @click="handleConfirmPayment(detailOrder)"
+          >
+            确认收款
+          </el-button>
           <el-button v-if="detailOrder.status === 'paid'" type="danger" @click="openRefundDialog(detailOrder)">退款</el-button>
           <el-button
             v-if="detailOrder.status === 'paid'"
@@ -350,17 +360,6 @@
         </div>
       </div>
     </el-drawer>
-
-    <!-- 字段设置（双栏拖拽管理器） -->
-    <ColumnSettingsDialog
-      ref="colDialogRef"
-      title="销售字段设置"
-      :columns="orderColumnDefs"
-      v-model:settings="columnSettings"
-      :defaults="DEFAULT_COLUMN_SETTINGS"
-      @save="saveColumns"
-      no-button
-    />
 
     <!-- 批量导入销售记录 -->
     <ImportCsvDialog
@@ -402,13 +401,11 @@ import {
   getStudents,
   getCardTypes,
   getSettings,
-  saveSettings,
   getExport,
   getStaffOptions
 } from '@/api/modules'
 import { exportXlsx } from '@/utils/xlsx'
 import { fetchAllPages } from '@/utils/fetchAll'
-import ColumnSettingsDialog from '@/components/ColumnSettingsDialog.vue'
 import ImportCsvDialog from '@/components/ImportCsvDialog.vue'
 import StatusDot from '@/components/StatusDot.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -426,14 +423,21 @@ const route = useRoute()
 const router = useRouter()
 
 // 列表状态同步到 URL（借鉴 trycompai/crm 的 URL state）
+// 注意：必须合并而非整体替换 query —— 订单页可能被其他页带参跳入（如 focus/来源标记），
+// 直接 router.replace({ query }) 会把这些参数一并抹掉，返回或刷新后上下文丢失。
 const syncUrl = () => {
-  const query = {}
+  const query = { ...route.query }
   if (filterStatus.value) query.status = filterStatus.value
+  else delete query.status
   if (dateRange.value && dateRange.value.length === 2) {
     query.start = dateRange.value[0]
     query.end = dateRange.value[1]
+  } else {
+    delete query.start
+    delete query.end
   }
   if (currentPage.value > 1) query.page = String(currentPage.value)
+  else delete query.page
   router.replace({ query })
 }
 
@@ -515,7 +519,6 @@ const DEFAULT_COLUMN_SETTINGS = {
   salesperson: true, date: true, status: true, remark: true,
 }
 const columnSettings = ref({ ...DEFAULT_COLUMN_SETTINGS })
-const colDialogRef = ref(null)
 
 // 按用户设置的顺序渲染列
 const visibleCols = computed(() => {
@@ -531,16 +534,8 @@ const visibleCols = computed(() => {
   return [...ordered, ...rest]
 })
 
-const saveColumns = async (settings) => {
-  columnSettings.value = settings
-  try {
-    await saveSettings({ orders_columns: settings })
-    ElMessage.success('字段设置已保存')
-  } catch (e) {
-    console.error('[导出]', e)
-  }
-}
-
+// 列设置由后端 orders_columns 读取；「字段设置」弹窗此前无任何打开入口（no-button 且 ref 从未 open），
+// 属死功能，已移除弹窗与 @save 处理，仅保留读取以兼容历史已保存的列配置。
 const loadColumnSettings = async () => {
   try {
     const data = await getSettings()

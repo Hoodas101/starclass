@@ -11,6 +11,7 @@
  */
 const { claimJobs, completeJob, failJob, reclaimExpired } = require('./queue');
 const { generateClassReminders, generateLowClassReminders, generateRenewalReminders } = require('./reminders');
+const { recognizeTimeCardRevenue } = require('./revenue');
 
 const handlers = new Map();
 function registerHandler(type, fn) {
@@ -24,6 +25,32 @@ function getHandler(type) {
 registerHandler('class_reminder', async () => generateClassReminders(Date.now()));
 registerHandler('low_class_reminder', async () => generateLowClassReminders(Date.now()));
 registerHandler('renewal_reminder', async () => generateRenewalReminders(Date.now()));
+
+/**
+ * 每日维护任务（与 server.js 里的 expireOverdueCards 等日任务并列）。
+ *
+ * 目前只有一项：时效卡收入按时间摊销结转（P1-A3）。时效卡学员到课不产生
+ * deduction_logs，扣课路径的「扣课即结转」够不到它们，若不在日任务里摊销，
+ * recognizedRevenue 永远缺时效卡部分、合同负债被系统性高估。
+ *
+ * 幂等：recognizeTimeCardRevenue 内部同卡只保留一行、重复运行 delta ≤ 0 时不写入，
+ * 因此多实例并存 / 重复调度都安全。
+ *
+ * 注意：本函数挂在 worker 启动流程上（ENABLE_JOB_WORKER=true 时生效）。
+ * server.js 的日任务清单当前未调用它 —— 需要在 server.js 的日调度里
+ * 增加 `require('./utils/worker').runDailyMaintenance()`（server.js 不在本次改动范围内，
+ * 已在交付报告中标注为跨文件事项）。
+ *
+ * @param {number} [nowMs] 观察时间戳，便于测试控制
+ * @returns {{recognized:number, amount:number}}
+ */
+function runDailyMaintenance(nowMs) {
+  const r = recognizeTimeCardRevenue(nowMs);
+  if (r.recognized > 0) {
+    console.log(`[Revenue] 时效卡摊销结转 ${r.recognized} 张，本次新增确认收入 ${r.amount} 元`);
+  }
+  return r;
+}
 
 let controller = null;
 
@@ -64,6 +91,7 @@ function startWorker(db, { intervalMs = 5000, batchSize = 5, leaseMs = 60000, ba
   if (controller) return controller; // 已启动，避免重复
   let stopped = false;
   let timer = null;
+  let dailyTimer = null;
 
   async function tick() {
     if (stopped) return;
@@ -77,11 +105,21 @@ function startWorker(db, { intervalMs = 5000, batchSize = 5, leaseMs = 60000, ba
   }
 
   timer = setTimeout(tick, 0);
+  // 每日维护：启动时先跑一次（保证首次摊销及时生效），此后每 24h 一次。
+  // 单实例内不会重复；跨实例由 recognizeTimeCardRevenue 的幂等保证安全。
+  const runMaintenance = () => {
+    try { runDailyMaintenance(); } catch (e) { console.error('[worker] daily maintenance error:', e && e.message); }
+  };
+  runMaintenance();
+  dailyTimer = setInterval(runMaintenance, 24 * 3600 * 1000);
+
   controller = {
     stop() {
       stopped = true;
       if (timer) clearTimeout(timer);
+      if (dailyTimer) clearInterval(dailyTimer);
       timer = null;
+      dailyTimer = null;
       controller = null;
     },
   };
@@ -98,4 +136,5 @@ module.exports = {
   registerHandler,
   getHandler,
   runOnce,
+  runDailyMaintenance,
 };

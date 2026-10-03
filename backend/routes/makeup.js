@@ -108,6 +108,20 @@ router.post('/assign', (req, res) => {
     const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
     if (!student) return res.json(fail('学员不存在'));
 
+    // 原排期与缺席记录校验（判据与 GET /eligible 严格同源）：
+    // 补课权益只能对应「一次真实的缺席 / 请假」。此前 assign 完全不校验，
+    // 可为从未缺席的学员安排免费补课（凭空产生一次免扣课时的补课权益）。
+    // 缺省 originalScheduleId 时同样拒绝：否则只要不传该字段即可绕过本校验。
+    if (!originalScheduleId) {
+      return res.json(fail('缺少原排期：补课须对应一次缺席或请假记录'));
+    }
+    const absentRecord = db.prepare(
+      "SELECT 1 FROM attendances WHERE schedule_id = ? AND student_id = ? AND status IN ('absent', 'leave') LIMIT 1"
+    ).get(originalScheduleId, studentId);
+    if (!absentRecord) {
+      return res.json(fail('该学员在原排期没有缺席或请假记录，无法安排补课'));
+    }
+
     // 验证原排期
     let originalSchedule = null;
     let originalDate = null;

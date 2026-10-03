@@ -13,6 +13,9 @@ const { parseItems, itemQuantity, itemLineTotal } = require('../utils/items');
 const { getStaffDefaultPassword } = require('../utils/security');
 // 已删除（status='refunded'）/ 已归档学员的统一排除条件（学员表别名须为 s）
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
+// 到期口径单一来源：看板「即将到期」的窗口与状态必须与续费提醒扫描同源，
+// 否则会出现「预警清单列出、提醒却从不发出」的口径分裂（详见 utils/renewal.js 头注释）。
+const { EXPIRY_WINDOWS, buildExpiringWhere } = require('../utils/renewal');
 
 // E3：把 date(paid_at/1000,'unixepoch','localtime') 这类表达式谓词改写为 paid_at 的毫秒区间比较。
 // 函数包裹的列用不上索引 → 看板每次调用对 orders 全表扫描 13 次；016 迁移建的 idx_orders_paid_at
@@ -27,6 +30,10 @@ const nextMonthStartMs = (ym) => {
   return new Date(`${m === 12 ? y + 1 : y}-${String(nm).padStart(2, '0')}-01T00:00:00`).getTime();
 };
 const yearStartMs = (y) => new Date(`${y}-01-01T00:00:00`).getTime();
+
+// 看板「即将到期」统计窗口（天）：取自到期口径单一来源 EXPIRY_WINDOWS 的 7 天档位，
+// 不再在 SQL 里写死裸数字 7。若提醒档位配置调整、7 不再存在，回退到最大档位以免窗口落空。
+const DASHBOARD_EXPIRING_DAYS = EXPIRY_WINDOWS.includes(7) ? 7 : Math.max(...EXPIRY_WINDOWS);
 
 // courses.archived / teachers.class_fee / teachers.pay_rule 列已收编至 migrations/011
 
@@ -86,8 +93,13 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
       }
       if (!spName) spName = u.nickname || u.name || '';
     }
-    const spSql = spName ? ' AND salesperson = ?' : '';
-    const spParams = spName ? [spName] : [];
+    // 签单人筛选同样要 TRIM 归一：orders.salesperson 是自由文本，历史写入存在
+    // 未 trim 的值（'张三' / '张三 ' 视为两人）。写入侧已由 orders.js 统一 trim，
+    // 读取侧必须对称归一，否则同一个人的业绩在筛选与非筛选下会得出两个结果。
+    // 注意第 249 行有 `spSql.replace('salesperson', 'o.salesperson')`：它替换**第一个**
+    // 匹配，得到 `AND TRIM(o.salesperson) = ?` —— 恰好正确，无需改动该 replace。
+    const spSql = spName ? ' AND TRIM(salesperson) = ?' : '';
+    const spParams = spName ? [String(spName).trim()] : [];
 
     // 核心指标（在册成员：已删除/已归档学员不计入，否则看板数字虚高）
     const totalStudents = db.prepare(`SELECT COUNT(*) as count FROM students s WHERE s.status = 'active' AND ${ACTIVE_STUDENT_SQL}`).get().count;
@@ -181,27 +193,27 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
 
     // 本月签单人排名
     const monthSales = db.prepare(`
-      SELECT salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
+      SELECT TRIM(salesperson) AS salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND salesperson != '' AND paid_at >= ? AND paid_at < ?${spSql}
-      GROUP BY salesperson ORDER BY amount DESC LIMIT 10
+      WHERE status IN ('paid', 'refunded') AND TRIM(COALESCE(salesperson, '')) != '' AND paid_at >= ? AND paid_at < ?${spSql}
+      GROUP BY TRIM(salesperson) ORDER BY amount DESC LIMIT 10
     `).all(monthStartMs(monthStart), nextMonthStartMs(monthStart), ...spParams);
 
     // 本周签单人排名（与小程序管理端一致：按签单人聚合金额与单数）
     const weekSales = db.prepare(`
-      SELECT salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
+      SELECT TRIM(salesperson) AS salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND salesperson != ''
+      WHERE status IN ('paid', 'refunded') AND TRIM(COALESCE(salesperson, '')) != ''
         AND paid_at >= ? AND paid_at < ?${spSql}
-      GROUP BY salesperson ORDER BY amount DESC LIMIT 10
+      GROUP BY TRIM(salesperson) ORDER BY amount DESC LIMIT 10
     `).all(dayStartMs(weekStart), dayEndMs(today), ...spParams);
 
     // 本年签单人排名
     const yearSales = db.prepare(`
-      SELECT salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
+      SELECT TRIM(salesperson) AS salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND salesperson != '' AND paid_at >= ?${spSql}
-      GROUP BY salesperson ORDER BY amount DESC LIMIT 10
+      WHERE status IN ('paid', 'refunded') AND TRIM(COALESCE(salesperson, '')) != '' AND paid_at >= ?${spSql}
+      GROUP BY TRIM(salesperson) ORDER BY amount DESC LIMIT 10
     `).all(yearStartMs(today.slice(0, 4)), ...spParams);
 
     // 1v1 销售金额（is_1v1 标记）
@@ -272,12 +284,13 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
       itemStats = [];
     }
 
-    // 即将到期卡（7天内）—— 已删除/已归档学员的卡不计入，否则是无效续费提醒的虚高数字
+    // 即将到期卡（DASHBOARD_EXPIRING_DAYS 天内）—— 已删除/已归档学员的卡不计入，
+    // 否则是无效续费提醒的虚高数字。窗口与状态口径与提醒扫描同源（utils/renewal.js）。
     const expiringCards = db.prepare(
       `SELECT COUNT(*) as count FROM member_cards mc
        JOIN students s ON s.id = mc.student_id
-       WHERE mc.status = 'active' AND mc.expires_at < ? AND mc.expires_at > ? AND ${ACTIVE_STUDENT_SQL}`
-    ).get(currentTime + 7 * 86400000, currentTime).count;
+       WHERE ${buildExpiringWhere()} AND mc.expires_at < ? AND mc.expires_at > ? AND ${ACTIVE_STUDENT_SQL}`
+    ).get(currentTime + DASHBOARD_EXPIRING_DAYS * 86400000, currentTime).count;
 
     // 到场率：统一口径见 utils.attendanceRate（迟到计到场，请假不计入分母）
     const attendanceRatePct = attendanceRate({ present: todayCheckins, late: todayLate, absent: todayAbsent });
@@ -694,9 +707,9 @@ router.get('/export', adminOnly, (req, res) => {
         const fromMs = dayStartMs(dayFrom);
         const toMs = dayEndMs(dayTo);
         const rank = db.prepare(`
-          SELECT salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
-          FROM orders ${where} AND salesperson != ''
-          GROUP BY salesperson ORDER BY amount DESC
+          SELECT TRIM(salesperson) AS salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
+          FROM orders ${where} AND TRIM(COALESCE(salesperson, '')) != ''
+          GROUP BY TRIM(salesperson) ORDER BY amount DESC
         `).all(fromMs, toMs);
         const revenue = db.prepare(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count FROM orders ${where}`).get(fromMs, toMs);
         const itemMap = {};
@@ -856,6 +869,30 @@ router.get('/teachers', staffRead, (req, res) => {
 });
 
 /**
+ * GET /api/admin/teachers/options — 在职教师轻量选项（「授课教师」下拉用）
+ *
+ * 为什么单独开这个别名：前端「上课记录」页的教师筛选封装名为 getTeacherOptions，
+ * 请求路径 /admin/teachers/options，而后端此前只注册了 /admin/staff-options，
+ * 浏览器实测 404 → 教师筛选恒空。两者语义不同：
+ *   · staff-options   = 「全体员工」（teachers 表 + 角色映射，用于签单人下拉）；
+ *   · teachers/options = 「授课教师」（数据源 teachers 表，仅在职），本接口。
+ * 返回结构对齐 staff-options（{ list, total }），但每项仅 id/name（授课下拉无需角色）。
+ * 权限与 staff-options 一致（管理员/教练/含 dashboard|sales 权限者可读）。
+ * 注册位置：必须早于任何 /teachers/:id 动态路由，否则会被其吞掉（本文件动态路由是
+ * PUT/DELETE /teachers/:id，方法不同不会冲突，但仍按约定就近放置以防日后新增 GET）。
+ */
+router.get('/teachers/options', (req, res) => {
+  try {
+    const list = db.prepare(`
+      SELECT id, name FROM teachers WHERE status = 'active' ORDER BY created_at ASC
+    `).all();
+    res.json(success({ list, total: list.length }));
+  } catch (err) {
+    res.status(500).json(safeFail('获取教师选项失败'));
+  }
+});
+
+/**
  * GET /api/admin/parents — 家长通讯录（去重，含绑定成员）
  */
 router.get('/parents', adminOnly, (req, res) => {
@@ -979,12 +1016,19 @@ router.post('/teachers', adminOnly, (req, res) => {
 router.put('/teachers/:id', adminOnly, (req, res) => {
   try {
     const { name, phone, gender, specialty, hireDate, bio, status, role, permissions, resetPassword, classFee, payRule } = req.body;
-    const existing = db.prepare('SELECT id, name, phone FROM teachers WHERE id = ?').get(req.params.id);
+    const existing = db.prepare('SELECT id, name, phone, status FROM teachers WHERE id = ?').get(req.params.id);
     if (!existing) return res.json(fail('教师不存在'));
 
     // 防护：目标账号是管理员时，禁止停用/降级最后一位管理员，也禁止停用当前登录账号
     const targetPhone = phone || existing.phone;
-    const targetUser = targetPhone ? db.prepare('SELECT id, openid, role, status FROM users WHERE phone = ?').get(targetPhone) : null;
+    // 目标登录账号的定位：**先按旧手机号查**。改手机号时新号在 users 里尚不存在，
+    // 只按新号查必然为 null —— 这正是「同时改手机号 + 改角色」赋权静默失效的根因：
+    // 角色的 UPDATE 靠下方按新号回查命中老账号，但 token_version 的 bump 条件依赖
+    // 这里为 null 的 targetUser，于是老账号 role 虽已改、旧 token 却未失效，
+    // 7 天内仍带旧角色（权限提升未撤销 / 降级未落地）。旧号优先、再回退新号，
+    // 覆盖「未改号」「改号」「清空号码」三种形态。
+    const targetUser = (existing.phone ? db.prepare('SELECT id, openid, role, status FROM users WHERE phone = ?').get(existing.phone) : null)
+      || (targetPhone ? db.prepare('SELECT id, openid, role, status FROM users WHERE phone = ?').get(targetPhone) : null);
     const willDisable = status === 'inactive' || (role && role !== 'admin' && targetUser && targetUser.role === 'admin');
     if (willDisable && targetUser) {
       if (targetUser.openid === getOpenId(req)) {
@@ -1026,6 +1070,11 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
       payRule !== undefined ? (payRule && typeof payRule === 'object' ? JSON.stringify(payRule) : null) : null,
       req.params.id);
 
+    // 教师档案的最终状态：请求显式传入优先，未传则沿用原状态。
+    // 传入 syncCoachAccount 以「教师档案状态」为准同步登录账号 —— 此前该函数无条件
+    // 写 status='active'，停用教练后编辑档案即被静默复活（见 syncCoachAccount 注释）。
+    const teacherStatus = status || existing.status || 'active';
+
     // 同步教练登录账号（手机号/姓名/启用状态）
     if (phoneChanged) {
       if (oldPhone) {
@@ -1039,20 +1088,40 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
           }
         }
       }
-      if (newPhone) syncCoachAccount(newPhone, name || existing.name);
+      if (newPhone) syncCoachAccount(newPhone, name || existing.name, teacherStatus);
     } else {
-      // 手机号未变更：保持/确保登录账号为启用状态
-      syncCoachAccount(newPhone || oldPhone, name || existing.name);
+      // 手机号未变更：按教师档案状态同步登录账号（停用态不得被覆盖为 active）
+      syncCoachAccount(newPhone || oldPhone, name || existing.name, teacherStatus);
     }
     if (status === 'inactive') {
+      // 显式停用：bump token_version 吊销该账号所有旧 Token（syncCoachAccount 只改状态不吊销）
       db.prepare("UPDATE users SET status = 'inactive', token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE phone = ?").run(now(), newPhone || oldPhone);
+    }
+
+    // 登录账号状态变更单独留痕（entity='user'）：教师档案审计只记 teacher，
+    // 而账号启用/停用直接决定能否登录，属权限事件，必须能从「用户」维度追溯 ——
+    // 此前「停用教练被编辑档案静默复活」在 users 侧不留任何痕迹，事后无法察觉。
+    const accountAfter = (newPhone || oldPhone)
+      ? db.prepare('SELECT id, status FROM users WHERE phone = ?').get(newPhone || oldPhone)
+      : null;
+    if (accountAfter && targetUser && targetUser.status !== accountAfter.status) {
+      const actorAcc = getActor(req);
+      recordAudit(db, {
+        entity: 'user',
+        entityId: String(accountAfter.id),
+        action: accountAfter.status === 'active' ? 'activate' : 'deactivate',
+        actorId: actorAcc.id,
+        actorRole: actorAcc.role,
+        before: { status: targetUser.status || null },
+        after: { status: accountAfter.status, source: 'teacher_update' },
+      });
     }
 
     // Update permissions: sync the login account's role (coach / admin / sales)
     // and custom permissions. Role and permissions update independently so a
     // permissions-only call still takes effect.
     const hasValidRole = role && ['coach', 'admin', 'sales'].includes(role);
-    const permUser = targetUser || (targetPhone ? db.prepare('SELECT id FROM users WHERE phone = ?').get(targetPhone) : null);
+    const permUser = targetUser || (targetPhone ? db.prepare('SELECT id, role FROM users WHERE phone = ?').get(targetPhone) : null);
     if (permUser) {
       const updates = [];
       const params = [];
@@ -1061,8 +1130,11 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
         updates.push('permissions = ?');
         params.push(Array.isArray(permissions) ? JSON.stringify(permissions) : '');
       }
-      // Role changes must revoke old tokens — role is baked into the JWT payload
-      if (hasValidRole && targetUser && targetUser.role !== role) {
+      // 角色变更必须吊销旧 Token —— 角色被烘焙进 JWT payload，server.js 的
+      // req.userRole 是唯一权威源。判据用 permUser.role（改号后按新号回查命中的
+      // 同一老账号）而非改号前按新号查询恒为 null 的 targetUser，否则改号+改角色时
+      // bump 静默跳过，旧 token 7 天内仍带旧角色。
+      if (hasValidRole && permUser.role !== role) {
         updates.push('token_version = COALESCE(token_version,0) + 1');
       }
       if (updates.length) {
@@ -1172,6 +1244,205 @@ router.get('/classrooms', (req, res) => {
 });
 
 /**
+ * 场地未来排期守卫：列出仍引用该场地、且尚未取消的未来场次。
+ * schedules.classroom_id 无外键，停用/删除场地后未来排期仍指向它，
+ * 教练按排期到场才发现场地已不可用。故置为非 active 前先拦下并要求显式确认。
+ * 「未来」= date >= 今日；已取消（cancelled）场次不计入。
+ */
+function classroomFutureConflicts(classroomId) {
+  return db.prepare(`
+    SELECT id, date, start_time, end_time, course_name
+    FROM schedules
+    WHERE classroom_id = ? AND date >= ? AND status != 'cancelled'
+    ORDER BY date ASC, start_time ASC
+  `).all(classroomId, formatDate(now()));
+}
+
+/** 场地冲突响应体（数量 + 前 5 条明细），供前端展示「哪些场次占了场地」 */
+function classroomConflictPayload(conflicts) {
+  return {
+    conflictCount: conflicts.length,
+    conflicts: conflicts.slice(0, 5).map((c) => ({
+      id: c.id, date: c.date, start_time: c.start_time, end_time: c.end_time, course_name: c.course_name,
+    })),
+  };
+}
+
+/**
+ * POST /api/admin/classrooms — 新增场地
+ * Body: { name, capacity, area, equipment, location, color }
+ * 名称必填且唯一（trim + 忽略大小写）：同名场地会让教练排错课。
+ */
+router.post('/classrooms', adminOnly, (req, res) => {
+  try {
+    const { name, capacity, area, equipment, location, color } = req.body;
+    const cleanName = String(name || '').trim();
+    if (!cleanName) return res.json(fail('场地名称必填'));
+    // 唯一性校验用 LOWER(TRIM(name))：历史数据可能存在前后空格或大小写差异的同名场地
+    const dup = db.prepare('SELECT id FROM classrooms WHERE LOWER(TRIM(name)) = LOWER(?)').get(cleanName);
+    if (dup) return res.json(fail(`已存在同名场地「${cleanName}」`));
+
+    const id = generateId('classroom_');
+    const num = (v) => (v !== undefined && isFinite(Number(v)) ? Number(v) : 0);
+    db.prepare(`
+      INSERT INTO classrooms (id, name, capacity, area, equipment, location, status, color, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+    `).run(id, cleanName, num(capacity), num(area), equipment || '', location || '', color || '', now());
+    // 场地是排课基础数据，变更会影响未来排期，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'classroom',
+      entityId: id,
+      action: 'create',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { name: cleanName, capacity: num(capacity), location: location || '', color: color || '' },
+    });
+    res.json(success({ id }));
+  } catch (err) {
+    console.error('[admin classroom create]', err);
+    res.status(500).json(safeFail('新增场地失败'));
+  }
+});
+
+/**
+ * PUT /api/admin/classrooms/:id — 更新场地（改名/容量/设备/位置/颜色/状态）
+ *
+ * 停用守卫：把 status 置为非 'active' 时，若存在**未来**排期引用该场地则拒绝，
+ * 并在响应 data 里列出冲突场次；除非请求显式带 confirmCascade:true —— 此时把这些
+ * 未来排期的 classroom_id/classroom_name 清空（解除占用），但**不取消排期本身**
+ * （排期是教学事实，是否取消应由排课流程决定，不能因停用场地被连带取消）。
+ */
+router.put('/classrooms/:id', adminOnly, (req, res) => {
+  try {
+    const existing = db.prepare('SELECT * FROM classrooms WHERE id = ?').get(req.params.id);
+    if (!existing) return res.json(fail('场地不存在'));
+    const { name, capacity, area, equipment, location, color, status, confirmCascade } = req.body;
+
+    // 改名唯一性（trim + 忽略大小写），排除自身
+    if (name !== undefined) {
+      const cleanName = String(name).trim();
+      if (!cleanName) return res.json(fail('场地名称不能为空'));
+      const dup = db.prepare('SELECT id FROM classrooms WHERE LOWER(TRIM(name)) = LOWER(?) AND id != ?')
+        .get(cleanName, req.params.id);
+      if (dup) return res.json(fail(`已存在同名场地「${cleanName}」`));
+    }
+
+    const nextStatus = status !== undefined ? String(status) : existing.status;
+    const willDeactivate = nextStatus !== 'active';
+    let conflicts = [];
+    if (willDeactivate) {
+      conflicts = classroomFutureConflicts(req.params.id);
+      if (conflicts.length && confirmCascade !== true) {
+        return res.status(400).json({
+          code: 400,
+          data: classroomConflictPayload(conflicts),
+          message: `该场地仍有 ${conflicts.length} 场未来排期，停用前请先调整；如确认强制停用请带 confirmCascade:true 解除占用`,
+        });
+      }
+    }
+
+    const numOrNull = (v) => (v !== undefined && isFinite(Number(v)) ? Number(v) : null);
+    // 事务：更新场地 + （可选）清空未来排期引用必须同生共死，避免半完成状态
+    const detached = db.transaction(() => {
+      db.prepare(`
+        UPDATE classrooms SET
+          name = COALESCE(?, name),
+          capacity = COALESCE(?, capacity),
+          area = COALESCE(?, area),
+          equipment = COALESCE(?, equipment),
+          location = COALESCE(?, location),
+          color = COALESCE(?, color),
+          status = COALESCE(?, status)
+        WHERE id = ?
+      `).run(
+        name !== undefined ? String(name).trim() : null,
+        numOrNull(capacity), numOrNull(area),
+        equipment !== undefined ? String(equipment) : null,
+        location !== undefined ? String(location) : null,
+        color !== undefined ? String(color) : null,
+        status !== undefined ? nextStatus : null,
+        req.params.id
+      );
+      if (willDeactivate && confirmCascade === true && conflicts.length) {
+        const ph = conflicts.map(() => '?').join(',');
+        db.prepare(`UPDATE schedules SET classroom_id = '', classroom_name = '' WHERE id IN (${ph})`)
+          .run(...conflicts.map((c) => c.id));
+      }
+      return (willDeactivate && confirmCascade === true) ? conflicts.length : 0;
+    })();
+    // 场地配置/状态变更影响未来排课，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'classroom',
+      entityId: req.params.id,
+      action: 'update',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { name: existing.name, status: existing.status },
+      after: {
+        name: name !== undefined ? String(name).trim() : existing.name,
+        status: nextStatus,
+        detached_schedules: detached,
+      },
+    });
+    res.json(success({ id: req.params.id, status: nextStatus, detachedSchedules: detached }));
+  } catch (err) {
+    console.error('[admin classroom update]', err);
+    res.status(500).json(safeFail('更新场地失败'));
+  }
+});
+
+/**
+ * DELETE /api/admin/classrooms/:id — 软删场地
+ *
+ * 一律软删（status='inactive'），不做物理删除：历史排期以 classroom_id/classroom_name
+ * 记录「这节课当时在哪上」，物理删掉会让历史数据失去归属；而 GET /classrooms 只返回
+ * active 场地，软删后自然从可选列表消失。未来排期守卫同 PUT（可 confirmCascade 解除占用）。
+ */
+router.delete('/classrooms/:id', adminOnly, (req, res) => {
+  try {
+    const existing = db.prepare('SELECT id, name, status FROM classrooms WHERE id = ?').get(req.params.id);
+    if (!existing) return res.json(fail('场地不存在'));
+    // confirmCascade 兼容 body 与 query 两种传法（DELETE 带 body 的客户端支持不一致）
+    const confirmCascade = (req.body && req.body.confirmCascade === true)
+      || req.query.confirmCascade === 'true';
+    const conflicts = classroomFutureConflicts(req.params.id);
+    if (conflicts.length && !confirmCascade) {
+      return res.status(400).json({
+        code: 400,
+        data: classroomConflictPayload(conflicts),
+        message: `该场地仍有 ${conflicts.length} 场未来排期，删除前请先调整；如确认强制删除请带 confirmCascade:true 解除占用`,
+      });
+    }
+    const detached = db.transaction(() => {
+      db.prepare("UPDATE classrooms SET status = 'inactive' WHERE id = ?").run(req.params.id);
+      if (confirmCascade && conflicts.length) {
+        const ph = conflicts.map(() => '?').join(',');
+        db.prepare(`UPDATE schedules SET classroom_id = '', classroom_name = '' WHERE id IN (${ph})`)
+          .run(...conflicts.map((c) => c.id));
+      }
+      return confirmCascade ? conflicts.length : 0;
+    })();
+    // 删除（软删）场地影响未来排课与历史数据归属，需留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'classroom',
+      entityId: req.params.id,
+      action: 'delete',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { name: existing.name, status: existing.status },
+      after: { status: 'inactive', soft_deleted: true, detached_schedules: detached },
+    });
+    res.json(success({ id: req.params.id, softDeleted: true, detachedSchedules: detached }));
+  } catch (err) {
+    console.error('[admin classroom delete]', err);
+    res.status(500).json(safeFail('删除场地失败'));
+  }
+});
+
+/**
  * GET /api/admin/courses — 活动列表
  */
 router.get('/courses', (req, res) => {
@@ -1181,7 +1452,7 @@ router.get('/courses', (req, res) => {
     const where = req.query.includeInactive === '1' ? '' : 'WHERE is_active = 1 AND archived = 0';
     const list = db.prepare(`
       SELECT id, name, category, description, duration, consume_classes, color,
-             min_age, max_age, max_students, price_per_class, is_active, archived,
+             min_age, max_age, training_plan, max_students, price_per_class, is_active, archived,
              (SELECT COUNT(*) FROM student_class WHERE class_id = courses.id) AS member_count
       FROM courses ${where} ORDER BY created_at ASC
     `).all();
@@ -1217,20 +1488,55 @@ router.get('/courses/options', (req, res) => {
 });
 
 /**
+ * 解析并校验课程适龄区间（分龄段开班：3-5 / 6-8 / 9-12 / 13-15）。
+ *
+ * 空串 / null / undefined → NULL，表示「不限」；其余必须是 0–18 的整数。
+ * 两端都有值时要求 min <= max，否则这个区间永远匹配不到任何学员，
+ * 静默存进去比拒绝更糟（用户以为设好了，实际分不出班）。
+ *
+ * @returns {{min:number|null, max:number|null}|{err:string}}
+ */
+function parseAgeRange(minAge, maxAge) {
+  const toAge = (v) => {
+    if (v === undefined || v === null || v === '') return null;
+    const n = Number(v);
+    return Number.isInteger(n) ? n : NaN;
+  };
+  const min = toAge(minAge);
+  const max = toAge(maxAge);
+  if (Number.isNaN(min)) return { err: '适龄下限需为 0-18 的整数' };
+  if (Number.isNaN(max)) return { err: '适龄上限需为 0-18 的整数' };
+  if (min !== null && (min < 0 || min > 18)) return { err: '适龄下限需为 0-18 的整数' };
+  if (max !== null && (max < 0 || max > 18)) return { err: '适龄上限需为 0-18 的整数' };
+  if (min !== null && max !== null && min > max) return { err: '适龄下限不能大于上限' };
+  return { min, max };
+}
+
+// 教案文本长度上限：存的是要点/文件链接，不是富文本，2000 字符足够且防止塞爆单行
+const TRAINING_PLAN_MAX = 2000;
+
+/**
  * POST /api/admin/courses — 新建活动
  */
 router.post('/courses', adminOnly, (req, res) => {
   try {
-    const { name, category, description, duration, consumeClasses, color, maxStudents, pricePerClass } = req.body;
+    const { name, category, description, duration, consumeClasses, color, maxStudents, pricePerClass,
+      minAge, maxAge, trainingPlan } = req.body;
     if (!name || !name.trim()) return res.json(fail('活动名称必填'));
+    // 适龄区间与教案：前端课程表单已暴露这三个字段（按年龄分层开班 + 教案挂载）。
+    // 后端若不接收就会**静默丢弃** —— 表单能填、存不进去，比没有这个字段更容易误导。
+    const age = parseAgeRange(minAge, maxAge);
+    if (age.err) return res.json(fail(age.err));
+    const plan = String(trainingPlan || '').trim().slice(0, TRAINING_PLAN_MAX);
 
     const id = generateId('course_');
     db.prepare(`
       INSERT INTO courses (id, name, category, description, duration, consume_classes, color,
-        max_students, price_per_class, is_active, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        max_students, price_per_class, min_age, max_age, training_plan, is_active, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
     `).run(id, name.trim(), category || '常规训练', description || '', duration || 90,
-      consumeClasses || 1, color || '#FF6B35', maxStudents || 0, pricePerClass || 0, now());
+      consumeClasses || 1, color || '#FF6B35', maxStudents || 0, pricePerClass || 0,
+      age.min, age.max, plan, now());
     // 新建活动（班级）属业务基础数据变更，需留痕
     const actor = getActor(req);
     recordAudit(db, {
@@ -1239,7 +1545,10 @@ router.post('/courses', adminOnly, (req, res) => {
       action: 'create',
       actorId: actor.id,
       actorRole: actor.role,
-      after: { name: name.trim(), category: category || '常规训练', consume_classes: consumeClasses || 1 },
+      after: {
+        name: name.trim(), category: category || '常规训练', consume_classes: consumeClasses || 1,
+        min_age: age.min, max_age: age.max, training_plan: plan ? '（已填写）' : '',
+      },
     });
 
     res.json(success({ id }));
@@ -1278,6 +1587,27 @@ router.put('/courses/:id', adminOnly, (req, res) => {
         is_active = COALESCE(?, is_active)
       WHERE id = ?
     `).run(p(name), p(category), p(description), p(duration), p(consumeClasses), p(color), p(maxStudents), p(pricePerClass), p(isActive), req.params.id);
+
+    // 适龄区间与教案**不能用 COALESCE**：前端要把适龄改回「不限」时会传 null / ''，
+    // 而 COALESCE(?, col) 在传入 NULL 时保留旧值，永远清不掉 —— 用户点了「不限」
+    // 却仍看到旧区间，属静默失效。故对这三个字段改用显式存在性判断。
+    const has = (k) => Object.prototype.hasOwnProperty.call(req.body, k);
+    let ageAfter = null;
+    if (has('minAge') || has('maxAge')) {
+      // 只传一端时，另一端沿用库内现值再校验，避免「只改上限」把区间改成非法组合。
+      const age = parseAgeRange(
+        has('minAge') ? req.body.minAge : existing.min_age,
+        has('maxAge') ? req.body.maxAge : existing.max_age,
+      );
+      if (age.err) return res.json(fail(age.err));
+      db.prepare('UPDATE courses SET min_age = ?, max_age = ? WHERE id = ?')
+        .run(age.min, age.max, req.params.id);
+      ageAfter = age;
+    }
+    if (has('trainingPlan')) {
+      db.prepare('UPDATE courses SET training_plan = ? WHERE id = ?')
+        .run(String(req.body.trainingPlan || '').trim().slice(0, TRAINING_PLAN_MAX), req.params.id);
+    }
     // 活动（班级）配置变更影响课时消耗口径与售卖，需留痕
     const actor = getActor(req);
     recordAudit(db, {
@@ -1286,12 +1616,18 @@ router.put('/courses/:id', adminOnly, (req, res) => {
       action: 'update',
       actorId: actor.id,
       actorRole: actor.role,
-      before: { name: existing.name },
+      before: { name: existing.name, min_age: existing.min_age, max_age: existing.max_age },
       after: {
         name: name || existing.name,
         consume_classes: consumeClasses === undefined ? null : consumeClasses,
         is_active: isActive === undefined ? null : (isActive ? 1 : 0),
         archived: (typeof archived === 'number' || typeof archived === 'boolean') ? (archived ? 1 : 0) : null,
+        // 未改动时为 null（与既有字段一致的「未变更」表示法），避免审计里刷无意义的行
+        min_age: ageAfter ? ageAfter.min : null,
+        max_age: ageAfter ? ageAfter.max : null,
+        training_plan: has('trainingPlan')
+          ? (String(req.body.trainingPlan || '').trim() ? '（已填写）' : '（已清空）')
+          : null,
       },
     });
 
@@ -1444,11 +1780,17 @@ router.get('/courses/:id/members', adminOnly, (req, res) => {
              st.name, st.avatar, st.gender,
              -- 原先直接取 st.age，但 students 表根本没有 age 列（只有 birthday），
              -- 这条查询对任何调用恒 500 且被 catch 吞掉，名册永远空白。
-             -- 改为按 birthday 派生，口径与学员列表（students.js）完全一致，
+             -- 改为按 birthday 派生，口径必须与学员列表（students.js）完全一致，
              -- 否则同一学员在名册页与学员页会显示两个不同的年龄。
+             -- 用「年份差 − 今年生日是否已过」而非 365.25 天数除法：后者是截断，
+             -- 生日当天及之前约 3 个月都会少算 1 岁（实测生日当天算出 9，实际应为 10）。
+             -- ⚠️ 分龄段（courses.min_age/max_age）一旦启用，本口径会整体右移一岁。
              CASE
                WHEN st.birthday IS NOT NULL AND st.birthday != ''
-               THEN CAST((julianday('now') - julianday(st.birthday)) / 365.25 AS INTEGER)
+                    AND st.birthday <= date('now')
+               THEN CAST(strftime('%Y', 'now') AS INTEGER)
+                    - CAST(strftime('%Y', st.birthday) AS INTEGER)
+                    - (strftime('%m-%d', 'now') < strftime('%m-%d', st.birthday))
                ELSE NULL
              END AS age
       FROM student_class sc
@@ -1611,24 +1953,37 @@ module.exports = router;
  * 同步教练登录账号：根据手机号创建或启用 users 表中 role=coach 的记录
  * @param {string} phone
  * @param {string} name
+ * @param {string} [status] 教师档案状态（'active'/'inactive'）。显式传入时同步到登录账号；
+ *   未传时**保持账号既有状态**。
+ *
+ * 为什么 status 必须是显式入参：此前本函数无条件写 status='active'，而 PUT /teachers/:id 的
+ * 「手机号未变更」分支无条件调用它 —— 管理员停用离职教练后，只要再编辑一次该教师档案
+ * （哪怕只改名字 / 课时费），离职账号就被静默复活，员工可立即重新登录，且只记 teacher 审计、
+ * users 侧无任何痕迹。现改为以教师档案的 teachers.status 为准同步：停用态不会被覆盖为 active。
  */
 // 员工初始/重置密码：可通过 STAFF_DEFAULT_PASSWORD 环境变量改为机构自定义初始密码。
 // 硬编码 123456 意味着任何拿到 MIT 源码的人都可尝试「已知手机号 + 123456」接管员工账号；
 // 正式部署务必设置自定义值，并在创建员工后通过私密渠道告知本人尽快修改。
 // 常量本身已收敛至 utils/security.js，登录 / 改密 / 强制拦截共用同一份定义。
 
-function syncCoachAccount(phone, name) {
+function syncCoachAccount(phone, name, status) {
   if (!phone) return;
   const existing = db.prepare('SELECT id, role FROM users WHERE phone = ?').get(phone);
   if (existing) {
-    // 已存在账号：仅同步昵称与启用状态，保留既有角色（管理员权限不被覆盖）
-    db.prepare("UPDATE users SET nickname = COALESCE(?, nickname), status = 'active', updated_at = ? WHERE id = ?")
-      .run(name || null, now(), existing.id);
+    // 已存在账号：仅同步昵称，保留既有角色（管理员权限不被覆盖）；
+    // status 只在显式传入时写入，避免「编辑档案」意外恢复登录权限。
+    if (status) {
+      db.prepare('UPDATE users SET nickname = COALESCE(?, nickname), status = ?, updated_at = ? WHERE id = ?')
+        .run(name || null, status, now(), existing.id);
+    } else {
+      db.prepare('UPDATE users SET nickname = COALESCE(?, nickname), updated_at = ? WHERE id = ?')
+        .run(name || null, now(), existing.id);
+    }
   } else {
     db.prepare(`
       INSERT INTO users (id, openid, phone, nickname, avatar, role, password, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, '', 'coach', ?, 'active', ?, ?)
-    `).run(generateId('user_'), `coach_${phone}`, phone, name || '教练', hashPassword(getStaffDefaultPassword()), now(), now());
+      VALUES (?, ?, ?, ?, '', 'coach', ?, ?, ?, ?)
+    `).run(generateId('user_'), `coach_${phone}`, phone, name || '教练', hashPassword(getStaffDefaultPassword()), status || 'active', now(), now());
   }
 }
 

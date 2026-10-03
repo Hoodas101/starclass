@@ -11,7 +11,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, isAdminReq, isCoachReq, canViewStudentData, calcCardExpiresAt } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, isAdminReq, isCoachReq, canViewStudentData, calcCardExpiresAt, parsePagination } = require('../utils');
 // 订单明细解析 / 每次课消耗课时数：与签到扣课、导出报表共用同一实现
 const { parseItems, itemLineTotal } = require('../utils/items');
 const { resolveConsumeClasses } = require('../utils/deduction');
@@ -159,9 +159,12 @@ router.post('/resume', (req, res) => {
 router.post('/card-type', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可管理产品'));
-    const { name, totalClasses, validDays, billingMode = 'time', price, pointsReward = 0, courseScope, transferable, refundable, productType = 'membership', unit = '', description = '' } = req.body;
+    const { name, totalClasses, validDays, billingMode = 'time', price, pointsReward = 0, courseScope, transferable, refundable, productType = 'membership', unit = '', description = '', visitLimitPerWeek, visitLimitPerMonth } = req.body;
     if (!name) return res.json(fail('名称为必填'));
     const type = productType === 'goods' ? 'goods' : 'membership';
+    // 到店限次（0/NULL = 不限次）；负数与非法值一律归 0
+    const vw = Math.max(0, Number(visitLimitPerWeek) || 0);
+    const vm = Math.max(0, Number(visitLimitPerMonth) || 0);
 
     if (type === 'goods') {
       const id = generateId('gd_');
@@ -191,9 +194,9 @@ router.post('/card-type', (req, res) => {
 
     const id = generateId('ct_');
     db.prepare(`
-      INSERT INTO membership_cards (id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, transferable, refundable, product_type, unit, description, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'membership', '', ?, ?)
-    `).run(id, name, mode === 'count' ? totalClasses : 0, validDays || 0, mode, pointsReward || 0, price || 0, courseScope || '', transferable ? 1 : 0, refundable !== false ? 1 : 0, description || '', now());
+      INSERT INTO membership_cards (id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, transferable, refundable, product_type, unit, description, visit_limit_per_week, visit_limit_per_month, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'membership', '', ?, ?, ?, ?)
+    `).run(id, name, mode === 'count' ? totalClasses : 0, validDays || 0, mode, pointsReward || 0, price || 0, courseScope || '', transferable ? 1 : 0, refundable !== false ? 1 : 0, description || '', vw, vm, now());
 
     // 产品（卡类型/商品）定价与权益变更影响销售口径，需留痕
     const actor = getActor(req);
@@ -210,6 +213,8 @@ router.post('/card-type', (req, res) => {
         price: price || 0,
         total_classes: mode === 'count' ? totalClasses : 0,
         valid_days: validDays || 0,
+        visit_limit_per_week: vw,
+        visit_limit_per_month: vm,
       },
     });
 
@@ -225,7 +230,8 @@ router.post('/card-type', (req, res) => {
 router.get('/card-types', (req, res) => {
   try {
     const { type } = req.query;
-    let sql = `SELECT id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, transferable, refundable, is_active, product_type, unit, description
+    // 带上到店限次字段：管理端产品页需要展示/回填，否则「已设置限次」在列表里看不见
+    let sql = `SELECT id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, transferable, refundable, is_active, product_type, unit, description, visit_limit_per_week, visit_limit_per_month
       FROM membership_cards`;
     const params = [];
     if (type === 'membership' || type === 'goods') {
@@ -292,10 +298,13 @@ router.get('/products', (req, res) => {
 router.put('/card-type/:id', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可管理产品'));
-    const { name, totalClasses, validDays, billingMode, price, pointsReward, courseScope, transferable, refundable, isActive, productType, unit, description } = req.body;
+    const { name, totalClasses, validDays, billingMode, price, pointsReward, courseScope, transferable, refundable, isActive, productType, unit, description, visitLimitPerWeek, visitLimitPerMonth } = req.body;
     const existing = db.prepare('SELECT id, product_type FROM membership_cards WHERE id = ?').get(req.params.id);
     if (!existing) return res.json(fail('产品不存在'));
     const isGoods = productType === 'goods' || existing.product_type === 'goods';
+    // 到店限次：未传（undefined/null）→ 保持原值（COALESCE 兜底）；显式传值则写库，负数/非法值归 0
+    const vw = (visitLimitPerWeek === undefined || visitLimitPerWeek === null) ? null : Math.max(0, Number(visitLimitPerWeek) || 0);
+    const vm = (visitLimitPerMonth === undefined || visitLimitPerMonth === null) ? null : Math.max(0, Number(visitLimitPerMonth) || 0);
 
     if (isGoods) {
       db.prepare(`
@@ -321,9 +330,11 @@ router.put('/card-type/:id', (req, res) => {
           transferable = COALESCE(?, transferable),
           refundable = COALESCE(?, refundable),
           description = COALESCE(?, description),
-          is_active = COALESCE(?, is_active)
+          is_active = COALESCE(?, is_active),
+          visit_limit_per_week = COALESCE(?, visit_limit_per_week),
+          visit_limit_per_month = COALESCE(?, visit_limit_per_month)
         WHERE id = ?
-      `).run(name, totalClasses, validDays, billingMode, pointsReward, price, courseScope, transferable, refundable, description, isActive, req.params.id);
+      `).run(name, totalClasses, validDays, billingMode, pointsReward, price, courseScope, transferable, refundable, description, isActive, vw, vm, req.params.id);
     }
 
     // 产品（卡类型/商品）定价与权益变更影响销售口径，需留痕
@@ -389,13 +400,19 @@ router.post('/activate', (req, res) => {
     const activatedAt = now();
     const expiresAt = calcCardExpiresAt(activatedAt, cardType.valid_days, cardType.billing_mode || 'time');
 
+    // 到店限次（每周/每月）随开卡快照到卡实例：与 total_classes / valid_days 同一处理方式，
+    // 保证日后调整卡种不追溯改写已售出的卡（已售合同不可单方面变更）。
+    const visitLimitPerWeek = Number(cardType.visit_limit_per_week) || 0;
+    const visitLimitPerMonth = Number(cardType.visit_limit_per_month) || 0;
+
     db.prepare(`
       INSERT INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name,
-        total_classes, remaining_classes, used_classes, activated_at, expires_at, status, order_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active', ?, ?, ?)
+        total_classes, remaining_classes, used_classes, activated_at, expires_at, status, order_id,
+        visit_limit_per_week, visit_limit_per_month, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active', ?, ?, ?, ?, ?)
     `).run(id, cardTypeId, cardType.name, cardType.billing_mode || 'time', studentId, student.name,
       cardType.total_classes, cardType.total_classes,
-      activatedAt, expiresAt, orderId || '', now(), now());
+      activatedAt, expiresAt, orderId || '', visitLimitPerWeek, visitLimitPerMonth, now(), now());
 
     // 开卡即产生一项会员资产（课时/有效期），需留痕
     const actor = getActor(req);
@@ -412,6 +429,8 @@ router.post('/activate', (req, res) => {
         total_classes: cardType.total_classes,
         expires_at: expiresAt,
         order_id: orderId || '',
+        visit_limit_per_week: visitLimitPerWeek,
+        visit_limit_per_month: visitLimitPerMonth,
       },
     });
 
@@ -422,9 +441,146 @@ router.post('/activate', (req, res) => {
 });
 
 /**
+ * POST /api/membership/card/:id/transfer — 会员卡转让
+ * Body: { toStudentId, reason? }
+ *
+ * 背景：卡种 ct_003（时效年卡）transferable = 1 已在售，但此前无任何转让入口。
+ * 线下转让后系统无记录，受让人上课查无卡 → 扣课失败但考勤已记，账实不符。
+ *
+ * 历史不可改写：deduction_logs / attendances / orders / revenue_recognitions 一律不动，
+ * 转让只改卡的归属（member_cards.student_id）并写一条 card_transfer_logs 流水。
+ */
+router.post('/card/:id/transfer', (req, res) => {
+  try {
+    if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可办理会员卡转让'));
+    const cardId = req.params.id;
+    const { toStudentId, reason = '' } = req.body;
+    if (!toStudentId) return res.json(fail('缺少受让学员'));
+
+    const actor = getActor(req);
+
+    // 转让是有价资产易主：校验 + 改归属 + 写流水整体事务化，避免中途失败留下半转让状态
+    const result = db.transaction(() => {
+      const card = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(cardId);
+      if (!card) return { err: '会员卡不存在' };
+      if (card.status !== 'active') return { err: '仅进行中的会员卡可转让' };
+
+      const cardType = db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(card.card_type_id);
+      if (!cardType || Number(cardType.transferable) !== 1) return { err: '该卡种不可转让' };
+
+      // 防重/幂等：目标学员已是持卡人即拒绝（同卡不能转给同一人）
+      if (toStudentId === card.student_id) return { err: '受让学员不能是原持卡人' };
+
+      // 受让学员必须存在且在册（已删除/已归档不得受让）；学员表别名须为 s
+      const toStudent = db.prepare(
+        `SELECT s.id, s.name FROM students s WHERE s.id = ? AND ${ACTIVE_STUDENT_SQL}`
+      ).get(toStudentId);
+      if (!toStudent) return { err: '受让学员不存在或已失效' };
+
+      const currentTime = now();
+      db.prepare(`
+        UPDATE member_cards SET
+          student_id = ?,
+          student_name = ?,
+          transfer_from_student_id = ?,
+          transfer_from_student_name = ?,
+          transferred_at = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(toStudentId, toStudent.name, card.student_id, card.student_name, currentTime, currentTime, cardId);
+
+      // 转让流水：audit_log 的 JSON 快照无法回答「这张卡被转过几次、每次转给谁」，故单表留痕
+      db.prepare(`
+        INSERT INTO card_transfer_logs (id, card_id, card_type_name, from_student_id, from_student_name,
+          to_student_id, to_student_name, remaining_classes, expires_at, reason, operator_id, operator_role, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(generateId('CTL'), cardId, card.card_type_name, card.student_id, card.student_name,
+        toStudentId, toStudent.name, card.remaining_classes, card.expires_at, reason || '',
+        actor.id, actor.role, currentTime);
+
+      return {
+        cardId,
+        fromStudentId: card.student_id,
+        fromStudentName: card.student_name,
+        toStudentId,
+        toStudentName: toStudent.name,
+        transferredAt: currentTime,
+      };
+    })();
+
+    if (result.err) return res.json(fail(result.err));
+
+    recordAudit(db, {
+      entity: 'membership_card',
+      entityId: cardId,
+      action: 'transfer',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { student_id: result.fromStudentId, student_name: result.fromStudentName },
+      after: {
+        student_id: result.toStudentId,
+        student_name: result.toStudentName,
+        reason: reason || '',
+      },
+    });
+
+    res.json(success(result));
+  } catch (err) {
+    console.error('[membership transfer]', err);
+    res.status(500).json(safeFail('会员卡转让失败'));
+  }
+});
+
+/**
  * GET /api/membership/my — 我的会员卡
  * Query: { studentId } 或通过 openid 查询绑定成员的卡
  */
+/**
+ * GET /api/membership/cards — 会员卡实例列表（管理端）
+ *
+ * 与 `/my`（家长/家长视角自己的卡）不同：本接口是**管理视角**的卡台账，
+ * 供学员档案页与卡列表展示「到店限次、卡状态、转让来源」等管理字段。
+ * 此前前端只能靠 `/my`（按绑定关系取，且不含管理字段）或 `/card-types`
+ * （卡种模板，不是卡实例），导致「卡实例」这一层在管理端没有可读接口。
+ *
+ * 权限：仅管理端工作人员（与 /expiring 同口径）—— 卡实例含学员隐私，
+ * 不带 studentId 时是全机构查询，绝不能对家长开放。
+ *
+ * 路由顺序：**必须注册在 `/my` 之前**。`/cards` 与 `/card/:id/transfer`
+ * 是不同前缀段，当前不会互相吞掉；但放在此处可避免日后新增
+ * `/:id` 形态的动态路由时被误匹配。
+ */
+router.get('/cards', (req, res) => {
+  try {
+    if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可查看会员卡'));
+
+    const { studentId, status } = req.query;
+    const { page, pageSize, offset } = parsePagination(req.query);
+
+    const where = [];
+    const params = [];
+    if (studentId) { where.push('student_id = ?'); params.push(studentId); }
+    if (status) { where.push('status = ?'); params.push(status); }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const total = db.prepare(`SELECT COUNT(*) AS count FROM member_cards ${whereSql}`).get(...params).count;
+    const list = db.prepare(`
+      SELECT id, card_type_id, card_type_name, student_id, student_name, billing_mode,
+        total_classes, remaining_classes, used_classes, activated_at, expires_at,
+        status, order_id, visit_limit_per_week, visit_limit_per_month,
+        transfer_from_student_id, transfer_from_student_name, transferred_at,
+        created_at, updated_at
+      FROM member_cards ${whereSql}
+      ORDER BY created_at DESC LIMIT ? OFFSET ?
+    `).all(...params, pageSize, offset);
+
+    res.json(success({ list, total, page, pageSize }));
+  } catch (err) {
+    console.error('[membership cards]', err && err.stack ? err.stack : err);
+    res.status(500).json(safeFail('获取会员卡列表失败'));
+  }
+});
+
 router.get('/my', (req, res) => {
   try {
     const openid = getOpenId(req);
@@ -509,11 +665,21 @@ router.post('/deduct', (req, res) => {
     // 查找学员当前生效的会员卡（优先指定卡）
     // 显式指定 cardId 时也必须校验 status = 'active'：订单全额退款只把卡标记为 status='refunded'，
     // 并不会清零 remaining_classes，若不校验 status，学员拿回全额退款后仍可显式传该卡 id 继续扣课时。
-    let card = cardId
-      ? db.prepare("SELECT * FROM member_cards WHERE id = ? AND student_id = ? AND status = 'active'").get(cardId, studentId)
-      : db.prepare(
-          "SELECT * FROM member_cards WHERE student_id = ? AND status = 'active' AND expires_at > ? ORDER BY expires_at ASC LIMIT 1"
-        ).get(studentId, now());
+    // 显式路径还必须校验有效期（expires_at > now）：自动选卡路径一直带此条件，
+    // 显式路径此前漏了，于是已过期卡在过期窗口内（最长 24h）仍可被手工扣课。
+    let card;
+    if (cardId) {
+      card = db.prepare("SELECT * FROM member_cards WHERE id = ? AND student_id = ? AND status = 'active'").get(cardId, studentId);
+      // 卡存在但已过期 → 给出明确原因，而不是笼统的「没有可用会员卡」
+      if (card && !(Number(card.expires_at) > now())) {
+        return res.json(fail('该卡已过期'));
+      }
+    } else {
+      // 自动选卡路径口径不变（由另一处统一收敛）
+      card = db.prepare(
+        "SELECT * FROM member_cards WHERE student_id = ? AND status = 'active' AND expires_at > ? ORDER BY expires_at ASC LIMIT 1"
+      ).get(studentId, now());
+    }
 
     if (!card) return res.json(fail('没有可用会员卡'));
 
@@ -671,9 +837,18 @@ router.post('/refund', (req, res) => {
           }
         }
       }
+      // 【资金安全】本卡是否存在「已支付」的收款订单 —— 退款的唯一合法依据。
+      // 后台直接激活的卡（order_id = ''）从未收款；订单行缺失、或订单已非 paid
+      // （已取消 / 已退完）同样意味着「这笔钱不在账上」。此时绝不允许产生任何退款额：
+      // 否则下方兜底会拿卡类型**标价**算出 paidPrice，再经退费规则生成 refundAmount，
+      // 最终落地成 refund_standalone 载体订单（payable=0、refunded=退款额、paid_at=当前）——
+      // 钱从未流入，却凭空产生一笔真实现金流出，财务报表现金净额被侵蚀。
+      const hasPaidOrder = !!(orderId && order && order.status === 'paid');
+
       // 最后兜底：连订单明细都拿不到时用卡类型标价，但仍按整单折扣比例折减
-      // （旧实现直接取标价，折扣单会按原价退 → 超退）
-      if (!paidPrice && cardType) {
+      // （旧实现直接取标价，折扣单会按原价退 → 超退）。
+      // 仅在有已支付订单时才允许此兜底：无收款记录的卡不存在「可退的成交价」。
+      if (!paidPrice && cardType && hasPaidOrder) {
         const base = Number(cardType.price) || 0;
         paidPrice = discountRatio < 1 ? Math.round(base * discountRatio) : base;
       }
@@ -719,6 +894,10 @@ router.post('/refund', (req, res) => {
         const room = Math.max(0, orderPayable - orderRefundedSoFar);
         if (refundAmount > room) refundAmount = room;
       }
+
+      // 双保险：无已支付订单 ⇒ 强制零退款。即使上方任一分支算出了金额也一并归零，
+      // 确保「钱从未流入」的卡绝不产生真实现金流出（仅回收卡权益）。
+      if (!hasPaidOrder) refundAmount = 0;
 
       // 更新卡状态：次数卡同时回收剩余课时并计入已用，理由与订单退款路径一致
       // （orders.js 退款回收）—— 只置 status='refunded' 而留着 remaining_classes，
@@ -829,23 +1008,28 @@ router.post('/refund', (req, res) => {
       // 或统一改由上方 order_type='refund_standalone' 的载体订单记账。
       // 另注：tests/finance-refund-regression.cjs 依赖它当前的形态（该套件按
       // `order_type = 'refund'` 统计行数、并要求 payable_amount <= 240），改它的值会破坏既有测试。
-      const refundOrderId = generateId('RFND');
-      // order_no 有 UNIQUE 约束：同一毫秒内连续退卡/同事务重试时纯时间戳必撞（回归测试实测）
-      const orderNo = `RF${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
-      db.prepare(`
-        INSERT INTO orders (id, order_no, student_id, student_name, order_type, items, total_amount, payable_amount, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'refund', ?, ?, ?, 'refunded', ?, ?)
-      `).run(refundOrderId, orderNo, studentId, card.student_name, JSON.stringify([{ cardId, reason }]), refundAmount, refundAmount, currentTime, currentTime);
+      // 无已支付订单时不落任何资金台账行（RFND 也是台账），只回收卡权益。
+      // 有已支付订单时保持既有形态（含 refundAmount=0 的边界，行为不变）。
+      let refundOrderId = null;
+      if (hasPaidOrder) {
+        refundOrderId = generateId('RFND');
+        // order_no 有 UNIQUE 约束：同一毫秒内连续退卡/同事务重试时纯时间戳必撞（回归测试实测）
+        const orderNo = `RF${Date.now()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+        db.prepare(`
+          INSERT INTO orders (id, order_no, student_id, student_name, order_type, items, total_amount, payable_amount, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 'refund', ?, ?, ?, 'refunded', ?, ?)
+        `).run(refundOrderId, orderNo, studentId, card.student_name, JSON.stringify([{ cardId, reason }]), refundAmount, refundAmount, currentTime, currentTime);
+      }
 
-      return { ok: true, refundAmount, orderId: refundOrderId };
+      return { ok: true, refundAmount, orderId: refundOrderId, noPaidOrder: !hasPaidOrder };
     })();
 
     if (result.err) return res.json(fail(result.err));
-    // 退卡涉及资金流出与权益回收，必须留痕
+    // 退卡涉及资金流出与权益回收，必须留痕（无收款记录的作废也留痕，便于事后解释「为何无退款」）
     const actor = getActor(req);
     recordAudit(db, {
       entity: 'refund',
-      entityId: result.orderId,
+      entityId: result.orderId || cardId,
       action: 'refund',
       actorId: actor.id,
       actorRole: actor.role,
@@ -853,10 +1037,14 @@ router.post('/refund', (req, res) => {
         card_id: cardId,
         student_id: studentId,
         refund_amount: result.refundAmount,
+        no_paid_order: !!result.noPaidOrder,
         reason: reason || '',
       },
     });
-    res.json(success({ cardId, refundAmount: result.refundAmount, orderId: result.orderId }));
+    const payload = { cardId, refundAmount: result.refundAmount, orderId: result.orderId };
+    // 明确告知前端：本次只作废卡、未产生任何退款，避免财务误以为有一笔退款
+    if (result.noPaidOrder) payload.message = '无收款记录，仅作废卡，不产生退款';
+    res.json(success(payload));
   } catch (err) {
     console.error('[membership refund]', err);
     res.status(500).json(safeFail("操作失败，请稍后重试"));
@@ -930,6 +1118,13 @@ router.get('/expiring', (req, res) => {
   try {
     // 全机构即将到期列表仅管理端工作人员可见（涉及成员隐私）
     if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可查看'));
+    // 默认 30 天是对外契约（前端/报表依赖），不得擅自改动。
+    // ⚠️ 到期窗口在全仓有四处口径互不一致，改动前需先与主控统一：
+    //   · 本接口 /membership/expiring        默认 30 天（此处）
+    //   · routes/admin.js 看板/attention      7 天
+    //   · utils/renewal.js RENEWAL_WARN_DAYS  15 天（growth.js 续费清单同源）
+    //   · utils/renewal.js 提醒扫描档位        15 / 7 / 1 天
+    // 本窗口常量需与 utils/renewal.js 的窗口常量保持一致（收敛由主控统一处理，勿单点改动）。
     const days = parseInt(req.query.days) || 30;
     const threshold = now() + days * 24 * 3600 * 1000;
 

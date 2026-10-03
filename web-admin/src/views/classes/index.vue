@@ -12,7 +12,11 @@
           clearable
           style="width: 220px"
         />
-        <span class="toolbar-count">共 {{ courses.length }} 个项目</span>
+        <!-- 年龄段筛选：支持按 3-5 / 6-8 / 9-12 / 13-15 分层查看班型 -->
+        <el-select v-model="ageBand" placeholder="全部年龄段" clearable style="width: 150px">
+          <el-option v-for="b in AGE_BANDS" :key="b.value" :label="`${b.min}-${b.max} 岁`" :value="b.value" />
+        </el-select>
+        <span class="toolbar-count">共 {{ filteredCourses.length }} 个项目</span>
       </div>
       <div class="toolbar-right">
         <el-button :icon="Download" @click="exportDialogRef?.open()">导出</el-button>
@@ -55,6 +59,10 @@
             <div class="info-item">
               <el-icon><DataLine /></el-icon>
               <span>{{ cls.consume_classes || 1 }} 课时/次</span>
+            </div>
+            <div class="info-item">
+              <el-icon><UserFilled /></el-icon>
+              <span>适龄 {{ ageText(cls) }}</span>
             </div>
           </div>
 
@@ -104,6 +112,38 @@
         <el-form-item label="人数上限">
           <el-input-number v-model="form.maxStudents" :min="1" :max="100" />
         </el-form-item>
+        <el-form-item label="适龄区间" prop="maxAge">
+          <div class="age-range">
+            <el-input-number
+              v-model="form.minAge"
+              :min="0"
+              :max="18"
+              :controls="false"
+              :value-on-clear="null"
+              placeholder="下限"
+              class="age-input"
+            />
+            <span class="age-sep">至</span>
+            <el-input-number
+              v-model="form.maxAge"
+              :min="0"
+              :max="18"
+              :controls="false"
+              :value-on-clear="null"
+              placeholder="上限"
+              class="age-input"
+            />
+            <span class="unit-text">岁（留空表示不限）</span>
+          </div>
+        </el-form-item>
+        <el-form-item label="训练内容 / 教案">
+          <el-input
+            v-model="form.trainingPlan"
+            type="textarea"
+            :rows="3"
+            placeholder="填写每节课的训练要点、动作清单或教案文件链接，选填"
+          />
+        </el-form-item>
         <el-form-item label="单次价格">
           <el-input-number v-model="form.pricePerClass" :min="0" :max="9999" :step="50" />
           <span class="unit-text">元</span>
@@ -152,6 +192,15 @@
             <span class="detail-label">消耗课时</span>
             <span class="detail-value">{{ selectedClass.consume_classes || 1 }} 课时/次</span>
           </div>
+          <div class="detail-item">
+            <span class="detail-label">适龄区间</span>
+            <span class="detail-value">{{ ageText(selectedClass) }}</span>
+          </div>
+        </div>
+
+        <div class="detail-plan">
+          <span class="detail-label">训练内容 / 教案</span>
+          <p class="detail-plan-text">{{ selectedClass.training_plan || '暂未填写' }}</p>
         </div>
 
         <div class="detail-actions">
@@ -172,7 +221,7 @@
     <ExportDialog
       ref="exportDialogRef"
       title="导出项目数据"
-      description="选择时间范围后确认导出；留空导出全部项目。"
+      description="导出当前筛选结果（含年龄筛选）；项目档案无时间维度，时间范围不参与筛选。"
       @confirm="doExport"
     />
 </template>
@@ -182,7 +231,7 @@ const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
 import { ref, reactive, computed, onMounted } from 'vue'
-import { Plus, Search, User, Clock, Money, DataLine, Download, Edit, Delete, CircleCheck, FolderChecked } from '@element-plus/icons-vue'
+import { Plus, Search, User, Clock, Money, DataLine, Download, Edit, Delete, CircleCheck, FolderChecked, UserFilled } from '@element-plus/icons-vue'
 import { getCourses, addCourse, updateCourse, deleteCourse } from '@/api/modules'
 import dayjs from 'dayjs'
 import { exportXlsx } from '@/utils/xlsx'
@@ -192,9 +241,29 @@ import ExportDialog from '@/components/ExportDialog.vue'
 import { classFallback } from '@/utils/theme-colors'
 
 const searchKeyword = ref('')
+const ageBand = ref('')
 const courses = ref([])
 const loading = ref(false)
 const submitting = ref(false)
+
+// 年龄段筛选档位（与机构分层建班口径一致）
+const AGE_BANDS = [
+  { value: '3-5', min: 3, max: 5 },
+  { value: '6-8', min: 6, max: 8 },
+  { value: '9-12', min: 9, max: 12 },
+  { value: '13-15', min: 13, max: 15 },
+]
+
+// 适龄文案：两端都有显示区间，只有一端显示开区间，都没有显示「不限」
+const ageText = (c) => {
+  const has = (v) => v !== null && v !== undefined && v !== ''
+  const min = c?.min_age
+  const max = c?.max_age
+  if (!has(min) && !has(max)) return '不限'
+  if (has(min) && has(max)) return `${min}-${max} 岁`
+  if (has(min)) return `${min} 岁以上`
+  return `${max} 岁以下`
+}
 
 const error = ref('')
 
@@ -213,23 +282,42 @@ const loadCourses = async () => {
 }
 
 const filteredCourses = computed(() => {
-  if (!searchKeyword.value) return courses.value
-  const kw = searchKeyword.value.toLowerCase()
-  return courses.value.filter(
-    (c) => (c.name || '').toLowerCase().includes(kw) || (c.category || '').toLowerCase().includes(kw)
-  )
+  let list = courses.value
+  if (searchKeyword.value) {
+    const kw = searchKeyword.value.toLowerCase()
+    list = list.filter(
+      (c) => (c.name || '').toLowerCase().includes(kw) || (c.category || '').toLowerCase().includes(kw)
+    )
+  }
+  if (ageBand.value) {
+    const band = AGE_BANDS.find((b) => b.value === ageBand.value)
+    const has = (v) => v !== null && v !== undefined && v !== ''
+    list = list.filter((c) => {
+      // 未设年龄的课程视为「不限」，对所有年龄段均适用
+      if (!has(c.min_age) && !has(c.max_age)) return true
+      const lo = has(c.min_age) ? Number(c.min_age) : 0
+      const hi = has(c.max_age) ? Number(c.max_age) : 99
+      // 课程年龄区间与筛选档位有交集即命中
+      return lo <= band.max && hi >= band.min
+    })
+  }
+  return list
 })
 
 const doExport = (range) => {
+  // 项目档案无时间维度（courses 无业务日期），故时间范围不参与筛选：
+  // 描述文案已与实际行为对齐，避免用户以为选了范围就会过滤。
   const items = filteredCourses.value
   if (!items.length) {
     ElMessage.warning('暂无可导出的项目数据')
     return
   }
-  const headers = ['项目名称', '分类', '描述', '人数上限', '时长(分钟)', '价格(元/次)', '消耗课时', '状态']
+  const headers = ['项目名称', '分类', '适龄', '训练内容/教案', '描述', '人数上限', '时长(分钟)', '价格(元/次)', '消耗课时', '状态']
   const rows = items.map((c) => [
     c.name || '',
     c.category || '',
+    ageText(c),
+    c.training_plan || '',
     c.description || '',
     c.max_students || '',
     c.duration || 90,
@@ -256,11 +344,25 @@ const form = reactive({
   maxStudents: 20,
   pricePerClass: 0,
   color: classFallback(),
-  description: ''
+  description: '',
+  minAge: null,
+  maxAge: null,
+  trainingPlan: ''
 })
 
+// 适龄区间校验：下限不得大于上限（两端均可留空表示不限）
+const validateMaxAge = (rule, value, cb) => {
+  const min = form.minAge
+  if (min !== null && min !== undefined && value !== null && value !== undefined && Number(min) > Number(value)) {
+    cb(new Error('年龄上限不能小于下限'))
+    return
+  }
+  cb()
+}
+
 const formRules = {
-  name: [{ required: true, message: '请输入项目名称', trigger: 'blur' }]
+  name: [{ required: true, message: '请输入项目名称', trigger: 'blur' }],
+  maxAge: [{ validator: validateMaxAge, trigger: 'change' }]
 }
 
 const openAddDialog = (row) => {
@@ -274,7 +376,10 @@ const openAddDialog = (row) => {
     maxStudents: row?.max_students || 20,
     pricePerClass: row?.price_per_class || 0,
     color: row?.color || classFallback(),
-    description: row?.description || ''
+    description: row?.description || '',
+    minAge: row?.min_age ?? null,
+    maxAge: row?.max_age ?? null,
+    trainingPlan: row?.training_plan || ''
   })
   dialogVisible.value = true
 }
@@ -572,6 +677,39 @@ onMounted(loadCourses)
   margin-left: 8px;
   color: var(--t-text-2);
   font-size: var(--t-fs-sm);
+}
+
+.age-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.age-input {
+  width: 90px;
+}
+
+.age-sep {
+  color: var(--t-text-2);
+  font-size: var(--t-fs-sm);
+}
+
+.detail-plan {
+  background: var(--t-surface-hover);
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-radius-md);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detail-plan-text {
+  margin: 0;
+  font-size: var(--t-fs-sm);
+  line-height: 1.7;
+  color: var(--t-text-1);
+  white-space: pre-wrap;
 }
 
 .empty-box {

@@ -12,6 +12,13 @@ const router = express.Router();
 const db = require('../db');
 const { success, safeFail, isAdminReq } = require('../utils');
 
+// 退款归属时间（全站唯一口径）：优先 last_refunded_at（迁移 022 起记录「最后一次退款发生时间」），
+// 仅在历史行尚未回填（last_refunded_at=0）时回退到 updated_at（旧口径），
+// 保证升级前后报表数字连续、不跳变，也绝不漏掉任何一笔真实退款。
+// 此前直接借用 updated_at 归集退款：3 月退的款、5 月改一次备注（PUT 刷新 updated_at）
+// 就会在月报里从 3 月搬到 5 月；summary / by-sales / by-product 也因此互相矛盾。
+const REFUND_TS_SQL = 'COALESCE(NULLIF(last_refunded_at, 0), updated_at)';
+
 // 所有财务接口仅管理员可访问
 router.use((req, res, next) => {
   if (!isAdminReq(req)) return res.status(403).json({ code: 403, data: null, message: '仅管理员可查看财务报表' });
@@ -57,12 +64,14 @@ router.get('/summary', (req, res) => {
       WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
     `).get(start, end);
 
-    // 退款总额（与收入同一行集合：paid 的部分退 + refunded 的全额退，避免跨口径双扣）
+    // 退款总额（与收入同一行集合：paid 的部分退 + refunded 的全额退，避免跨口径双扣）。
+    // 时间列改用 REFUND_TS_SQL（退款发生时间），与 monthly / by-sales / by-product 完全同口径。
     const refunded = db.prepare(`
       SELECT COUNT(*) as refund_count,
              COALESCE(SUM(refunded_amount), 0) as refund_amount
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND refunded_amount > 0 AND updated_at >= ? AND updated_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND COALESCE(refunded_amount, 0) > 0
+        AND ${REFUND_TS_SQL} >= ? AND ${REFUND_TS_SQL} <= ?
     `).get(start, end);
 
     // 按订单类型分组
@@ -200,15 +209,16 @@ router.get('/monthly', (req, res) => {
       ORDER BY month
     `).all(startMs, endMs);
 
-    // 退款单独按「退款发生月份」（orders.updated_at）归属，与 /summary 的 revenue.refunded 完全同口径。
+    // 退款单独按「退款发生月份」（REFUND_TS_SQL = last_refunded_at）归属，与 /summary 的
+    // revenue.refunded 完全同口径。若沿用 updated_at，改备注会刷新该列 → 退款错月；
     // 若沿用 paid_at，跨月退款会落在原支付月，导致同一年内 summary 与 monthly 的退款额永远对不平。
     const refundsByMonth = db.prepare(`
       SELECT
-        strftime('%m', datetime(updated_at/1000, 'unixepoch', 'localtime')) as month,
+        strftime('%m', datetime(${REFUND_TS_SQL}/1000, 'unixepoch', 'localtime')) as month,
         COALESCE(SUM(refunded_amount), 0) as refunded
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND refunded_amount > 0
-        AND updated_at >= ? AND updated_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND COALESCE(refunded_amount, 0) > 0
+        AND ${REFUND_TS_SQL} >= ? AND ${REFUND_TS_SQL} <= ?
       GROUP BY month
       ORDER BY month
     `).all(startMs, endMs);
@@ -312,23 +322,34 @@ router.get('/by-product', (req, res) => {
     // 行小计优先 totalPrice（与 CSV 导出 sales 分支同一字段），使单品收入按真实价格结构分摊。
     // 四舍五入刻意留在 JS：SQL 的 round() 对负数是「远离零」，JS Math.round 是「向上」，
     // 而 net 可能为负，两者会在 .5 处产生分歧。
+    // 收入与退款分别按各自的时间归属：收入按「支付时间」paid_at，退款按「退款发生时间」
+    // REFUND_TS_SQL，与 summary / monthly / by-sales 同一时间列、同一过滤条件。
+    // 旧实现把两者都挂在 paid_at 上（refunded 按支付月归集），跨月退款会错月，
+    // 且与 summary 的退款口径不同 → 同区间跨报表对不平。
+    // 为此在 valid 里同时算出 in_paid / in_refund 两个布尔标记，订单集合取二者并集，
+    // 聚合时各自只计入落在本区间的那部分，避免把同一套 CTE 复制两遍。
     const rows = db.prepare(`
       WITH valid AS (
         SELECT o.id, o.payable_amount, o.refunded_amount,
+               (o.paid_at >= ? AND o.paid_at <= ?) AS in_paid,
+               (${REFUND_TS_SQL} >= ? AND ${REFUND_TS_SQL} <= ?) AS in_refund,
                CASE WHEN json_valid(o.items) AND json_type(o.items) = 'array'
                     THEN o.items ELSE '[]' END AS items_json
         FROM orders o
         WHERE o.status IN ('paid', 'refunded') AND o.order_type != 'refund'
-          AND o.paid_at >= ? AND o.paid_at <= ?
+          AND (
+            (o.paid_at >= ? AND o.paid_at <= ?)
+            OR (COALESCE(o.refunded_amount, 0) > 0 AND ${REFUND_TS_SQL} >= ? AND ${REFUND_TS_SQL} <= ?)
+          )
       ),
       exploded AS (
-        SELECT v.id, v.payable_amount, v.refunded_amount,
+        SELECT v.id, v.payable_amount, v.refunded_amount, v.in_paid, v.in_refund,
                json_array_length(v.items_json) AS n_items,
                CASE WHEN json_valid(it.value) THEN it.value END AS ev
         FROM valid v, json_each(v.items_json) AS it
       ),
       shaped AS (
-        SELECT id, payable_amount, refunded_amount, n_items, ev,
+        SELECT id, payable_amount, refunded_amount, in_paid, in_refund, n_items, ev,
                CASE WHEN json_type(ev) = 'object' AND CAST(json_extract(ev, '$.quantity') AS REAL) > 0
                     THEN CAST(json_extract(ev, '$.quantity') AS REAL) ELSE 1 END AS qty,
                CASE WHEN json_type(ev) = 'object'
@@ -338,7 +359,7 @@ router.get('/by-product', (req, res) => {
         FROM exploded
       ),
       weighted AS (
-        SELECT id, payable_amount, refunded_amount, n_items, name, qty,
+        SELECT id, payable_amount, refunded_amount, in_paid, in_refund, n_items, name, qty,
                CASE WHEN json_type(ev) = 'object'
                     THEN COALESCE(NULLIF(CAST(json_extract(ev, '$.totalPrice') AS REAL), 0),
                                   NULLIF(CAST(json_extract(ev, '$.unitPrice') AS REAL), 0) * qty,
@@ -351,16 +372,16 @@ router.get('/by-product', (req, res) => {
         SELECT id, SUM(line_total) AS gross FROM weighted GROUP BY id
       )
       SELECT w.name AS name,
-             SUM(w.qty) AS count,
-             SUM(CASE WHEN p.gross > 0 THEN w.payable_amount * (w.line_total / p.gross)
-                      WHEN w.n_items > 0 THEN w.payable_amount * 1.0 / w.n_items
+             SUM(CASE WHEN w.in_paid THEN w.qty ELSE 0 END) AS count,
+             SUM(CASE WHEN w.in_paid AND p.gross > 0 THEN w.payable_amount * (w.line_total / p.gross)
+                      WHEN w.in_paid AND w.n_items > 0 THEN w.payable_amount * 1.0 / w.n_items
                       ELSE 0 END) AS revenue,
-             SUM(CASE WHEN p.gross > 0 THEN w.refunded_amount * (w.line_total / p.gross)
-                      WHEN w.n_items > 0 THEN w.refunded_amount * 1.0 / w.n_items
+             SUM(CASE WHEN w.in_refund AND w.refunded_amount > 0 AND p.gross > 0 THEN w.refunded_amount * (w.line_total / p.gross)
+                      WHEN w.in_refund AND w.refunded_amount > 0 AND w.n_items > 0 THEN w.refunded_amount * 1.0 / w.n_items
                       ELSE 0 END) AS refunded
       FROM weighted w JOIN per_order p ON p.id = w.id
       GROUP BY w.name
-    `).all(start, end);
+    `).all(start, end, start, end, start, end, start, end);
 
     const result = rows
       .map((p) => ({
@@ -397,27 +418,56 @@ router.get('/by-sales', (req, res) => {
       end = now.getTime();
     }
 
-    const list = db.prepare(`
+    // 收入/单量/1v1 按「订单支付月份」（paid_at）归属。
+    // 读取侧 TRIM 归一：历史未 trim 数据（'张三' / '张三 ' / ' 张三'）不再分裂成多个业绩组，
+    // 与 orders.js 写入侧 trim 对称。GROUP BY 用 COALESCE(TRIM(...), '') 而非裸 TRIM：
+    // SQLite 里 NULL 与 '' 是两个分组，若不一并归一会重复出两行「未分配」。
+    const revenueList = db.prepare(`
       SELECT
-        salesperson,
+        COALESCE(TRIM(salesperson), '') AS salesperson,
         COUNT(*) as order_count,
         COALESCE(SUM(payable_amount), 0) as revenue,
-        COALESCE(SUM(refunded_amount), 0) as refunded,
         COALESCE(SUM(CASE WHEN is_1v1 = 1 THEN 1 ELSE 0 END), 0) as vip_count
       FROM orders
       WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
-      GROUP BY salesperson
-      ORDER BY revenue DESC
+      GROUP BY COALESCE(TRIM(salesperson), '')
     `).all(start, end);
 
-    const result = list.map(s => ({
-      salesperson: s.salesperson || '未分配',
-      orderCount: s.order_count,
-      revenue: s.revenue,
-      refunded: s.refunded,
-      net: s.revenue - s.refunded,
-      vipCount: s.vip_count,
-    }));
+    // 退款按「退款发生时间」REFUND_TS_SQL 独立归集，与 summary / monthly / by-product
+    // 同一时间列、同一过滤条件 —— 否则同一区间跨报表退款额对不平（旧实现按 paid_at 归集，跨月退款错月）。
+    // 读取侧 TRIM 归一：与 revenueList 同一分组键，否则同一签单人的收入与退款会落到两个桶里。
+    const refundList = db.prepare(`
+      SELECT COALESCE(TRIM(salesperson), '') AS salesperson, COALESCE(SUM(refunded_amount), 0) as refunded
+      FROM orders
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND COALESCE(refunded_amount, 0) > 0
+        AND ${REFUND_TS_SQL} >= ? AND ${REFUND_TS_SQL} <= ?
+      GROUP BY COALESCE(TRIM(salesperson), '')
+    `).all(start, end);
+
+    // 按归一后的 salesperson 归并两段结果；空值统一显示为「未分配」
+    const refundMap = new Map();
+    for (const r of refundList) refundMap.set(r.salesperson || '', r.refunded);
+    const seen = new Set(revenueList.map((s) => s.salesperson || ''));
+    for (const r of refundList) {
+      // 期间内只有退款、没有收入业绩的签单人也要出账，否则 by-sales 退款合计与 summary 对不平
+      if (!seen.has(r.salesperson || '')) {
+        revenueList.push({ salesperson: r.salesperson, order_count: 0, revenue: 0, vip_count: 0 });
+      }
+    }
+
+    const result = revenueList
+      .map((s) => {
+        const refunded = refundMap.get(s.salesperson || '') || 0;
+        return {
+          salesperson: s.salesperson || '未分配',
+          orderCount: s.order_count,
+          revenue: s.revenue,
+          refunded,
+          net: s.revenue - refunded,
+          vipCount: s.vip_count,
+        };
+      })
+      .sort((a, b) => b.revenue - a.revenue);
 
     res.json(success({ list: result, total: result.length }));
   } catch (err) {

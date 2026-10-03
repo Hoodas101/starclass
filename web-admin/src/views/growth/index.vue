@@ -1,7 +1,7 @@
 <template>
   <div class="page-shell">
     <!-- 顶部标题 -->
-<PageHeader v-if="!embedded" title="增长中心" />
+<PageHeader v-if="!embedded" title="招生漏斗" />
     <!-- 顶部操作栏 -->
     <div class="toolbar">
       <div class="toolbar-left">
@@ -58,11 +58,11 @@
         </div>
         <div class="card table-container">
           <div class="filter-row">
-            <el-input v-model="leadKeyword" placeholder="搜索姓名 / 电话" :prefix-icon="Search" clearable style="width: 200px" @change="loadLeads" @clear="loadLeads" />
-            <el-select v-model="leadStage" placeholder="全部阶段" clearable style="width: 130px" @change="loadLeads">
+            <el-input v-model="leadKeyword" placeholder="搜索姓名 / 电话" :prefix-icon="Search" clearable style="width: 200px" @change="onLeadFilterChange" @clear="onLeadFilterChange" />
+            <el-select v-model="leadStage" placeholder="全部阶段" clearable style="width: 130px" @change="onLeadFilterChange">
               <el-option v-for="s in stageOptions" :key="s.value" :label="s.label" :value="s.value" />
             </el-select>
-            <el-select v-model="leadSource" placeholder="全部来源" clearable style="width: 130px" @change="loadLeads">
+            <el-select v-model="leadSource" placeholder="全部来源" clearable style="width: 130px" @change="onLeadFilterChange">
               <el-option v-for="s in sourceOptions" :key="s.value" :label="s.label" :value="s.value" />
             </el-select>
           </div>
@@ -97,7 +97,7 @@
             </el-table-column>
           </el-table>
           <div class="pagination-wrap">
-            <el-pagination v-model:current-page="leadPage" :page-size="leadPageSize" :total="leadTotal" layout="total, prev, pager, next" background @current-change="loadLeads" />
+            <el-pagination v-model:current-page="leadPage" v-model:page-size="leadPageSize" :total="leadTotal" :page-sizes="[10, 20, 50]" layout="total, sizes, prev, pager, next, jumper" background @current-change="loadLeads" @size-change="onLeadSizeChange" />
           </div>
         </div>
 
@@ -145,13 +145,13 @@
       <template v-else-if="activeSection === 'followups'">
         <div class="card table-container">
           <div class="filter-row">
-            <el-input v-model="fuKeyword" placeholder="搜索姓名 / 电话" :prefix-icon="Search" clearable style="width: 200px" @change="loadFollowUps" @clear="loadFollowUps" />
-            <el-select v-model="fuStatus" placeholder="全部状态" clearable style="width: 130px" @change="loadFollowUps">
+            <el-input v-model="fuKeyword" placeholder="搜索姓名 / 电话" :prefix-icon="Search" clearable style="width: 200px" @change="onFuFilterChange" @clear="onFuFilterChange" />
+            <el-select v-model="fuStatus" placeholder="全部状态" clearable style="width: 130px" @change="onFuFilterChange">
               <el-option label="待办" value="pending" />
               <el-option label="已完成" value="done" />
               <el-option label="已取消" value="cancelled" />
             </el-select>
-            <el-select v-model="fuType" placeholder="全部类型" clearable style="width: 130px" @change="loadFollowUps">
+            <el-select v-model="fuType" placeholder="全部类型" clearable style="width: 130px" @change="onFuFilterChange">
               <el-option v-for="(label, value) in fuTypeOptions" :key="value" :label="label" :value="value" />
             </el-select>
             <el-button :icon="MagicStick" @click="handleGenerate">生成跟进任务</el-button>
@@ -186,7 +186,7 @@
             </el-table-column>
           </el-table>
           <div class="pagination-wrap">
-            <el-pagination v-model:current-page="fuPage" :page-size="fuPageSize" :total="fuTotal" layout="total, prev, pager, next" background @current-change="loadFollowUps" />
+            <el-pagination v-model:current-page="fuPage" v-model:page-size="fuPageSize" :total="fuTotal" :page-sizes="[10, 20, 50]" layout="total, sizes, prev, pager, next, jumper" background @current-change="loadFollowUps" @size-change="onFuSizeChange" />
           </div>
         </div>
       </template>
@@ -585,7 +585,7 @@ const loadFunnel = async () => {
 const leads = ref([])
 const leadTotal = ref(0)
 const leadPage = ref(1)
-const leadPageSize = 10
+const leadPageSize = ref(10)
 const leadLoading = ref(false)
 const leadKeyword = ref('')
 const leadStage = ref('')
@@ -593,13 +593,17 @@ const leadSource = ref('')
 
 const errorLeads = ref('')
 
+// 筛选/每页条数变化时回到第 1 页：否则在第 N 页改条件可能落到新的空页
+const onLeadFilterChange = () => { leadPage.value = 1; loadLeads() }
+const onLeadSizeChange = () => { leadPage.value = 1; loadLeads() }
+
 const loadLeads = async () => {
   errorLeads.value = ''
   leadLoading.value = true
   const seq = ++leadsSeq
   try {
     const res = await getLeads({
-      page: leadPage.value, pageSize: leadPageSize,
+      page: leadPage.value, pageSize: leadPageSize.value,
       keyword: leadKeyword.value || undefined,
       stage: leadStage.value || undefined,
       source: leadSource.value || undefined,
@@ -823,7 +827,7 @@ const moveStage = async (row, stage) => {
 const followUps = ref([])
 const fuTotal = ref(0)
 const fuPage = ref(1)
-const fuPageSize = 10
+const fuPageSize = ref(10)
 const fuLoading = ref(false)
 const fuKeyword = ref('')
 const fuStatus = ref('')
@@ -833,13 +837,17 @@ const fuTagType = (t) => ({ renewal: 'warning', lead_followup: 'primary', trial_
 
 const errorFU = ref('')
 
+// 筛选/每页条数变化时回到第 1 页
+const onFuFilterChange = () => { fuPage.value = 1; loadFollowUps() }
+const onFuSizeChange = () => { fuPage.value = 1; loadFollowUps() }
+
 const loadFollowUps = async () => {
   errorFU.value = ''
   fuLoading.value = true
   try {
     const res = await getFollowUps({
       page: fuPage.value,
-      pageSize: fuPageSize,
+      pageSize: fuPageSize.value,
       keyword: fuKeyword.value || undefined,
       status: fuStatus.value || undefined,
       taskType: fuType.value || undefined,
@@ -959,7 +967,11 @@ const onFollowupTap = (row) => {
   if (row.target_type === 'student' && row.target_id && row.target_id !== 'manual') {
     router.push(`/students?focus=${row.target_id}`)
   } else if (row.target_type === 'lead') {
-    router.push('/growth?tab=leads')
+    // 回到「线索管理」区块。旧写法 router.push('/growth?tab=leads') 会命中旧路径
+    // redirect → /sales?tab=growth，重定向会丢弃原 query 且区块不切换 —— 点了没反应。
+    // 改为跳真实路由 /sales?tab=growth，并直接把区块切到 leads。
+    activeSection.value = 'leads'
+    router.push({ path: '/sales', query: { tab: 'growth' } }).catch(() => {})
   }
 }
 

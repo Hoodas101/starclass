@@ -21,6 +21,7 @@ const { normalizePhone } = require('../utils/duplicate');
 // 「学员是否已失效（已删除/已归档）」的单一事实来源：导入匹配学员时必须排除已退学的人，
 // 否则历史订单会被挂到早已删除的学员头上（要求 SQL 中学员表别名为 s）。
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
+const { computeExpiry } = require('../utils/points-expiry');
 
 // 销售权限：管理员或拥有「sales」权限的员工（销售）
 function canSales(req) {
@@ -130,12 +131,18 @@ function grantOrderBenefits(order, paidAt) {
         for (let n = issued; n < wanted; n++) {
           const cardId = generateId('CARD');
           const expiresAt = calcCardExpiresAt(currentTime, product.valid_days, product.billing_mode || 'time');
+          // 到店限次（每周/每月）随开卡快照到卡实例：与 membership.js /activate 同一口径，
+          // 保证日后调整卡种不追溯改写已售出的卡；缺列/空值时 Number(undefined)||0 → 0（不限次）
+          const visitLimitPerWeek = Number(product.visit_limit_per_week) || 0;
+          const visitLimitPerMonth = Number(product.visit_limit_per_month) || 0;
           db.prepare(`
             INSERT INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name,
-              total_classes, remaining_classes, activated_at, expires_at, status, order_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+              total_classes, remaining_classes, activated_at, expires_at, status, order_id,
+              visit_limit_per_week, visit_limit_per_month, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
           `).run(cardId, product.id, product.name, product.billing_mode || 'time', order.student_id, order.student_name,
-            product.total_classes, product.total_classes, currentTime, expiresAt, order.id, currentTime, currentTime);
+            product.total_classes, product.total_classes, currentTime, expiresAt, order.id,
+            visitLimitPerWeek, visitLimitPerMonth, currentTime, currentTime);
         }
       }
 
@@ -155,8 +162,8 @@ function grantOrderBenefits(order, paidAt) {
               .run(reward, reward, currentTime, order.student_id);
           }
           const bal = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(order.student_id)?.balance || reward;
-          db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, description, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-            .run(generateId('PLG'), order.student_id, 'earn', reward, bal, '购买「' + product.name + '」赠送积分', refId, '购买产品赠送', currentTime);
+          db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, description, created_at, expire_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            .run(generateId('PLG'), order.student_id, 'earn', reward, bal, '购买「' + product.name + '」赠送积分', refId, '购买产品赠送', currentTime, computeExpiry(currentTime));
         }
       }
     }
@@ -178,6 +185,31 @@ router.post('/', (req, res) => {
     const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
     if (!student) return res.json(fail('成员不存在'));
 
+    // items 来自请求体，入口必须做形状校验：此前传字符串（有 length、无 reduce）
+    // 或数组里混入 null / 裸字符串元素，都会让下方的 reduce 与属性访问抛 TypeError → 500。
+    // 非法输入属业务错误，统一返回 fail（HTTP 200 + code!=0）而非 500。
+    if (items !== undefined && items !== null && !Array.isArray(items)) {
+      return res.json(fail('订单项格式不正确'));
+    }
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          return res.json(fail('订单项格式不正确'));
+        }
+        // 单价/数量若给出必须能解析为有限数，否则 totalAmount 会算出 NaN 并写库
+        if (item.unitPrice !== undefined && item.unitPrice !== null && !Number.isFinite(Number(item.unitPrice))) {
+          return res.json(fail('订单项单价不合法'));
+        }
+        if (item.quantity !== undefined && item.quantity !== null && !Number.isFinite(Number(item.quantity))) {
+          return res.json(fail('订单项数量不合法'));
+        }
+      }
+    }
+
+    // 业绩归属是自由文本且无外键，写入前统一 trim：否则同一员工手输「张三」/「张三 」
+    // 会在报表里分裂成两个业绩组。批量导入路径（下方 /import）本就 trim，两条路径策略须一致。
+    const salespersonNorm = String(salesperson || '').trim();
+
     let orderItems = items;
     let totalAmount = 0;
 
@@ -185,8 +217,10 @@ router.post('/', (req, res) => {
     if (orderType === 'membership' && cardTypeId && !items) {
       const cardType = db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(cardTypeId);
       if (!cardType) return res.json(fail('会员卡类型不存在'));
-      orderItems = [{ itemType: 'membershipCard', itemId: cardTypeId, itemName: cardType.name, quantity: 1, unitPrice: cardType.price, totalPrice: cardType.price }];
-      totalAmount = cardType.price;
+      const cardPrice = Number(cardType.price);
+      if (!Number.isFinite(cardPrice)) return res.json(fail('会员卡价格不合法'));
+      orderItems = [{ itemType: 'membershipCard', itemId: cardTypeId, itemName: cardType.name, quantity: 1, unitPrice: cardPrice, totalPrice: cardPrice }];
+      totalAmount = cardPrice;
     } else if (items?.length) {
       totalAmount = items.reduce((sum, item) => sum + (item.unitPrice || 0) * (item.quantity || 1), 0);
     } else {
@@ -207,7 +241,7 @@ router.post('/', (req, res) => {
       db.prepare(`
         INSERT INTO orders (id, order_no, user_id, student_id, student_name, order_type, items, total_amount, discount_amount, payable_amount, status, salesperson, remark, is_1v1, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, orderNo, openid, studentId, student.name, orderType, JSON.stringify(orderItems), totalAmount, discountAmount, payableAmount, status, salesperson, remark, is1v1 ? 1 : 0, currentTime, currentTime);
+      `).run(id, orderNo, openid, studentId, student.name, orderType, JSON.stringify(orderItems), totalAmount, discountAmount, payableAmount, status, salespersonNorm, remark, is1v1 ? 1 : 0, currentTime, currentTime);
 
       // 直接录入已收款订单：立即结算并激活会员卡（settleOrder/grantOrderBenefits 内部按 reference_id 幂等去重）
       if (status === 'paid') {
@@ -492,6 +526,7 @@ router.post('/:id/refund', (req, res) => {
     const { reason = '', refundAmount, confirmOverride } = req.body;
     const currentTime = now();
     let clawback = null; // set when a partial refund reclaims card entitlement
+    let revertedRecognitions = 0; // 全额退款时冲销的已结转收入行数（审计用）
     // Refund runs in one transaction with an optimistic lock on refunded_amount
     // to prevent concurrent double refunds.
     const result = db.transaction(() => {
@@ -527,8 +562,10 @@ router.post('/:id/refund', (req, res) => {
       // a negotiated custom amount is a voluntary discount and keeps card benefits.
       const appliedSuggestion = Math.abs(requested - suggestion.amount) <= 1;
       // Optimistic lock: fails if refunded_amount changed concurrently
-      const upd = db.prepare("UPDATE orders SET refunded_amount = ?, status = CASE WHEN ? >= ? THEN 'refunded' ELSE status END, updated_at = ? WHERE id = ? AND refunded_amount = ?")
-        .run(newRefunded, newRefunded, paidAmount, currentTime, order.id, refundedSoFar);
+      // last_refunded_at 记录「最后一次退款发生时间」：月报按它归集退款，改备注/取消订单都不得写它，
+      // 否则一笔 3 月的退款会因 5 月改备注被搬到 5 月。部分退款与全额退款都要刷新。
+      const upd = db.prepare("UPDATE orders SET refunded_amount = ?, status = CASE WHEN ? >= ? THEN 'refunded' ELSE status END, last_refunded_at = ?, updated_at = ? WHERE id = ? AND refunded_amount = ?")
+        .run(newRefunded, newRefunded, paidAmount, currentTime, currentTime, order.id, refundedSoFar);
       if (upd.changes === 0) return { conflict: true };
 
       if (isFull) {
@@ -547,6 +584,21 @@ router.post('/:id/refund', (req, res) => {
           }
         }
         if (cards.length > 0) clawback = '全额退款已同步回收卡内剩余权益';
+        // 全额退款必须冲销该订单已结转的收入：学员已消课部分此前已从合同负债结转为收入，
+        // 退款后若不冲销，collected 归零而结转记录仍在 → 该订单对合同负债的贡献变成负数，
+        // 量大时整体 liability 为负。口径与 utils/attendance-revert 的 revertRevenueRecognition 一致：
+        // 按 order_id 删除该订单的结转行（DELETE 天然幂等，重复退款安全）。
+        // revenue_recognitions 由迁移 017 建立，老库可能不存在 —— 先判表存在，不存在时静默跳过。
+        try {
+          const hasRecognitionTable = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'revenue_recognitions'"
+          ).get();
+          if (hasRecognitionTable) {
+            revertedRecognitions = db.prepare('DELETE FROM revenue_recognitions WHERE order_id = ?').run(order.id).changes;
+          }
+        } catch (e) {
+          console.error('[orders refund] 冲销结转记录失败', e && e.message);
+        }
         // 全额退款：回收购买赠送的积分（按 订单+商品 维度查找，支持多商品订单）
         const rewardLogs = db.prepare("SELECT * FROM point_logs WHERE reference_id GLOB ? AND type = 'earn'").all('order_' + order.id + '*');
         let totalReward = 0;
@@ -620,6 +672,7 @@ router.post('/:id/refund', (req, res) => {
           full: isFull,
           appliedSuggestion,
           clawback: clawback || null,
+          revertedRecognitions,
           reason,
           payment_id: paymentId,
         },
@@ -670,7 +723,7 @@ router.put('/:id', (req, res) => {
       params.push(amount);
       syncPaymentAmount = amount;
     }
-    if (salesperson !== undefined) { fields.push('salesperson = ?'); params.push(String(salesperson)); }
+    if (salesperson !== undefined) { fields.push('salesperson = ?'); params.push(String(salesperson).trim()); }
     if (remark !== undefined) { fields.push('remark = ?'); params.push(String(remark)); }
     if (fields.length === 0) return res.json(fail('没有需要修改的内容'));
 
@@ -696,7 +749,7 @@ router.put('/:id', (req, res) => {
           before: { payableAmount: prevPayable, salesperson: order.salesperson, remark: order.remark },
           after: {
             payableAmount: syncPaymentAmount,
-            salesperson: salesperson !== undefined ? String(salesperson) : order.salesperson,
+            salesperson: salesperson !== undefined ? String(salesperson).trim() : order.salesperson,
             remark: remark !== undefined ? String(remark) : order.remark,
           },
         });
@@ -737,12 +790,40 @@ router.post('/:id/cancel', (req, res) => {
     }
 
     const currentTime = now();
+    // 并发下本次取消是否真正生效；失败时 dupReason 给出原因（事务内赋值，事务外统一返回）
+    let cancelled = true;
+    let dupReason = null;
     // 已支付订单的资金回滚（会员卡、积分、支付流水、订单状态）整体事务化：
     // 中途抛错不再留下「卡已回收但订单仍 paid」的半回滚状态
     db.transaction(() => {
-      if (order.status === 'paid') {
-        // 回滚会员卡
-        const cards = db.prepare("SELECT * FROM member_cards WHERE order_id = ? AND status = 'active'").all(id);
+      // 事务内重读订单：事务外那份快照在并发下可能已过期（典型：并发的 POST /:id/pay
+      // 刚把 pending 置为 paid）。若仍按旧快照判断，会把「已支付」误判成「未支付」，
+      // 跳过卡/积分/流水回滚只置 cancelled —— 卡仍 active、流水仍 success、积分未回收，
+      // 且此后 refund 要求 status==='paid' 已够不到，卡和钱都追不回。
+      const fresh = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+      if (!fresh) { cancelled = false; dupReason = '订单不存在'; return; }
+      if (fresh.status === 'cancelled' || fresh.status === 'refunded') {
+        cancelled = false; dupReason = '订单已取消或已退款'; return;
+      }
+
+      // 原子认领：仅当状态仍是刚重读到的值时才置 cancelled，防止与并发 pay/refund 撕裂。
+      // 先认领再回滚权益——认领失败说明状态已被他人改动，此时绝不能回滚别人的权益。
+      const claim = db.prepare("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = ?")
+        .run(currentTime, id, fresh.status);
+      if (claim.changes === 0) {
+        // 重读后仍失败：状态被并发请求改写，重新判定并给出恰当结果
+        const cur = db.prepare('SELECT status FROM orders WHERE id = ?').get(id);
+        cancelled = false;
+        dupReason = (cur && (cur.status === 'cancelled' || cur.status === 'refunded'))
+          ? '订单已取消或已退款'
+          : '订单状态已变更，请刷新后重试';
+        return;
+      }
+
+      if (fresh.status === 'paid') {
+        // 回滚会员卡：必须同时回收暂停中的卡（status='paused'）——只回收 active 会让
+        // 「钱退了、卡暂停着还能恢复使用」，权益逃逸。
+        const cards = db.prepare("SELECT * FROM member_cards WHERE order_id = ? AND status IN ('active','paused')").all(id);
         for (const card of cards) {
           db.prepare("UPDATE member_cards SET status = 'cancelled', updated_at = ? WHERE id = ?").run(currentTime, card.id);
         }
@@ -758,7 +839,7 @@ router.post('/:id/cancel', (req, res) => {
         if (totalCancelReward > 0) {
           // 与全额退款回收同一口径：余额不足时只能扣到 0，流水必须记实际生效量 -actual，
           // 否则 SUM(point_logs.amount) 与 points.balance 永久对不上。
-          const acc = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(order.student_id);
+          const acc = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(fresh.student_id);
           const actual = Math.min(totalCancelReward, (acc && acc.balance) || 0);
           if (actual > 0) {
             const newBal = ((acc && acc.balance) || 0) - actual; // actual ≤ balance，结果自然 ≥ 0
@@ -768,18 +849,14 @@ router.post('/:id/cancel', (req, res) => {
                 balance = ?,
                 updated_at = ?
               WHERE student_id = ?
-            `).run(actual, newBal, currentTime, order.student_id);
+            `).run(actual, newBal, currentTime, fresh.student_id);
             db.prepare(`
               INSERT INTO point_logs (id, student_id, type, amount, balance, reference_id, reason, description, created_at)
               VALUES (?, ?, 'refund', ?, ?, ?, '订单取消回收积分', '订单取消回收积分', ?)
-            `).run(generateId('PLG'), order.student_id, -actual, newBal, 'order_' + id, currentTime);
+            `).run(generateId('PLG'), fresh.student_id, -actual, newBal, 'order_' + id, currentTime);
           }
         }
         db.prepare("UPDATE payments SET status = 'refunded' WHERE order_id = ?").run(id);
-      }
-
-      db.prepare("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?").run(currentTime, id);
-      if (order.status === 'paid') {
         // Cancelling a paid order rolls back money — same audit as refund
         recordAudit(db, {
           entity: 'order',
@@ -787,11 +864,12 @@ router.post('/:id/cancel', (req, res) => {
           action: 'cancel_paid',
           actorId: getOpenId(req),
           actorRole: req.userRole || '',
-          before: { status: 'paid', payable_amount: order.payable_amount },
+          before: { status: 'paid', payable_amount: fresh.payable_amount },
           after: { status: 'cancelled' },
         });
       }
     })();
+    if (!cancelled) return res.json(fail(dupReason || '订单无法取消'));
     res.json(success({ cancelled: true }));
   } catch (err) {
     console.error('[orders cancel]', err);

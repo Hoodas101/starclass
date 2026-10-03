@@ -1,7 +1,7 @@
 <template>
   <div class="page-shell">
     <!-- 顶部标题（hub 内嵌；embedded 时由 hub 提供，本页不重复） -->
-<PageHeader v-if="!embedded" title="签到管理" />
+<PageHeader v-if="!embedded" :title="`${$t('checkin')}管理`" />
     <!-- 顶部操作栏 -->
     <div class="toolbar">
       <div class="toolbar-left">
@@ -12,10 +12,11 @@
           format="YYYY-MM-DD"
           value-format="YYYY-MM-DD"
           style="width: 180px"
-          @change="loadTodayCourses"
+          @change="onDateChange"
         />
       </div>
       <div class="toolbar-right">
+        <el-button :icon="Printer" :disabled="!selectedCourse" @click="printRoster">打印</el-button>
         <el-button :icon="Download" @click="exportDialogRef?.open()">导出</el-button>
       </div>
     </div>
@@ -25,7 +26,7 @@
       <h3 class="section-title">今日活动</h3>
       <div v-if="!loading && todayCourses.length === 0 && !error" class="no-courses-tip">
         <el-icon :size="18"><Calendar /></el-icon>
-        <span>今日暂无课程安排，可在「排期管理」创建课程</span>
+        <span>今日暂无{{ $t('course') }}安排，可在「排期管理」创建{{ $t('course') }}</span>
       </div>
       <ListErrorState v-if="!loading && error" :error="error" @retry="loadTodayCourses" />
       <div class="course-cards">
@@ -75,7 +76,7 @@
     <div v-if="selectedCourse" class="checkin-area">
       <div class="checkin-header">
         <div>
-          <h3 class="section-title">{{ selectedCourse.name }} - 签到确认</h3>
+          <h3 class="section-title">{{ selectedCourse.name }} - {{ $t('checkin') }}确认</h3>
           <p class="checkin-subtitle">
             {{ selectedCourse.time }} · {{ selectedCourse.classroom }} · {{ selectedCourse.teacher }}
           </p>
@@ -163,14 +164,14 @@
 
     <!-- 空状态 -->
     <div v-else class="empty-state">
-      <el-empty description="请选择一门活动开始签到确认" />
+      <el-empty :description="`请选择一门活动开始${$t('checkin')}确认`" />
     </div>
   </div>
 
     <!-- 导出确认弹窗 -->
     <ExportDialog
       ref="exportDialogRef"
-      title="导出签到数据"
+      :title="`导出${$t('checkin')}数据`"
       description="选择时间范围后确认导出，未选择时默认导出选中日期。"
       default-shortcut="today"
       @confirm="doExport"
@@ -184,11 +185,12 @@ const props = defineProps({
 import { ref, computed, onMounted } from 'vue'
 import dayjs from 'dayjs'
 import { getSchedules, getScheduleDetail, checkinTeacher, getExport } from '@/api/modules'
-import { Download, UserFilled, Check, Close, Calendar, Clock, Location, User } from '@element-plus/icons-vue'
+import { Download, Printer, UserFilled, Check, Close, Calendar, Clock, Location, User } from '@element-plus/icons-vue'
 import { exportXlsx } from '@/utils/xlsx'
 import ExportDialog from '@/components/ExportDialog.vue'
 import StatusDot from '@/components/StatusDot.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import { useSettingsStore } from '@/store/settings'
 
 // ============================================
 // 数据
@@ -211,6 +213,19 @@ const submitting = ref(false)
 const exportDialogRef = ref(null)
 
 const error = ref('')
+
+// 机构名（打印表头用）：设置页写入 settings.org_info.name，全局 store 启动时已加载
+const settingsStore = useSettingsStore()
+
+// 切换日期：必须清空已选课程与名单，否则用户可能对上一个日期的排期误提交点名
+const onDateChange = () => {
+  if (selectedCourse.value) {
+    selectedCourse.value = null
+    courseStudents.value = []
+    ElMessage.info('已切换日期，请重新选择课程')
+  }
+  loadTodayCourses()
+}
 
 const loadTodayCourses = async () => {
   error.value = ''
@@ -365,7 +380,7 @@ const confirmCheckin = async () => {
   try {
     await ElMessageBox.confirm(
       pendingCount > 0
-        ? `有 ${pendingCount} 名成员尚未操作，将按「已签到」保存。确认提交签到结果？`
+        ? `有 ${pendingCount} 名${$t('learner')}尚未操作，将按「已签到」保存。确认提交签到结果？`
         : '确认提交当前签到结果？',
       '确认签到',
       { type: 'warning', confirmButtonText: '确认提交', cancelButtonText: '取消' }
@@ -375,19 +390,108 @@ const confirmCheckin = async () => {
   }
   submitting.value = true
   try {
-    await checkinTeacher({
+    const res = await checkinTeacher({
       scheduleId: selectedCourse.value.id,
       attendances: courseStudents.value.map((s) => ({
         studentId: s.id,
         status: s.status === 'pending' ? 'present' : s.status
       }))
     })
-    ElMessage.success('签到已保存')
+    // 后端对「暂停卡」等场景会逐条返回 warning（如未扣课未计积分）：去重后合并提示
+    const warnings = [...new Set((res?.results || []).map((r) => r.warning).filter(Boolean))]
+    if (warnings.length) {
+      ElMessage.warning(`签到已保存。${warnings.join('；')}`)
+    } else {
+      ElMessage.success('签到已保存')
+    }
     loadTodayCourses()
   } catch (e) {
-    // 拦截器已提示
+    // 点名失败（如到店次数已达上限）由拦截器展示后端具体文案，此处不覆盖
   } finally {
     submitting.value = false
+  }
+}
+
+// HTML 转义：打印窗口里拼接的学员姓名/课程名/教师名等均可能被用户录入，
+// 不转义会被注入脚本（订单页有同类 escapeHtml，此处复制本地实现以避免跨文件耦合）
+const escapeHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[c]))
+
+// 打印当前课程名单/签到表：新开窗口写入 HTML → 唤起打印，不强制关窗，
+// 用户点「取消」后可再次打印（订单页的 setTimeout 强关窗口会导致预览消失且无法重试）
+const printRoster = () => {
+  if (!selectedCourse.value) {
+    ElMessage.warning('请先选择课程')
+    return
+  }
+  const orgName = settingsStore.settings?.org_info?.name || '训练机构'
+  const course = selectedCourse.value
+  const rows = courseStudents.value.map((s, i) => `
+      <tr>
+        <td>${i + 1}</td>
+        <td>${escapeHtml(s.name)}</td>
+        <td>${escapeHtml(statusTextMap[s.status] || s.status)}</td>
+        <td class="sign"></td>
+      </tr>`).join('')
+  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8" />
+<title>${escapeHtml(course.name)} 签到表</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 24px; color: #111; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .org { font-size: 14px; color: #555; margin: 0 0 16px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px 24px; font-size: 13px; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border: 1px solid #999; padding: 8px 10px; text-align: left; }
+  th { background: #f2f2f2; }
+  td.sign { width: 180px; }
+  .foot { margin-top: 16px; font-size: 12px; color: #666; }
+  .no-print { display: flex; gap: 8px; margin-bottom: 16px; }
+  .no-print button { padding: 6px 16px; font-size: 13px; cursor: pointer; }
+  @media print { body { margin: 12mm; } .no-print { display: none; } }
+</style></head><body>
+<div class="no-print">
+  <button onclick="window.print()">打印</button>
+  <button onclick="window.close()">关闭</button>
+</div>
+<h1>${escapeHtml(course.name)} · 签到表</h1>
+<p class="org">${escapeHtml(orgName)}</p>
+<div class="meta">
+  <span>日期：${escapeHtml(selectedDate.value)}</span>
+  <span>时间：${escapeHtml(course.time)}</span>
+  <span>教师：${escapeHtml(course.teacher)}</span>
+  <span>场地：${escapeHtml(course.classroom)}</span>
+  <span>应到 ${courseStudents.value.length} 人</span>
+</div>
+<table>
+  <thead><tr><th style="width:48px">序号</th><th>姓名</th><th style="width:120px">签到状态</th><th>签名</th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="4">暂无学员名单</td></tr>'}</tbody>
+</table>
+<p class="foot">打印时间：${new Date().toLocaleString('zh-CN')}</p>
+</body></html>`
+
+  const w = window.open('', '_blank')
+  if (!w) {
+    ElMessage.warning('浏览器拦截了打印窗口，请允许弹出窗口后重试')
+    return
+  }
+  w.document.open()
+  w.document.write(html)
+  w.document.close()
+
+  // 自动唤起一次打印；用标志位避免 load 与兜底定时器重复触发
+  let printed = false
+  const doPrint = () => {
+    if (printed) return
+    printed = true
+    try { w.focus(); w.print() } catch (e) { /* 用户可手动点「打印」重试 */ }
+  }
+  if (w.document.readyState === 'complete') {
+    setTimeout(doPrint, 200)
+  } else {
+    w.addEventListener('load', doPrint, { once: true })
+    setTimeout(doPrint, 800)
   }
 }
 

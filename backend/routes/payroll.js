@@ -16,6 +16,11 @@ const { generateId, success, fail, safeFail, getOpenId, now, formatDate, recordA
 const {
   DEFAULT_RULE,
   normalizeRule,
+  normalizeConsumeClasses,
+  PAYABLE_SCHEDULE_SQL,
+  countScheduledLessons,
+  countConsumedLessons,
+  countLeaveDeductedHeads,
   calcLessonPay,
   ruleSummary,
   calcText,
@@ -62,22 +67,35 @@ function lessonRows(teacherId, startDate, endDate) {
   if (!teacher) return null;
   const rule = getPayRule(teacher);
   const effEnd = effectiveEnd(endDate);
-  // 计薪基数 = 实际授课：排了课但一条考勤记录都没有，说明该课并未实际发生
-  // （停课/改期/临时取消但未改状态），不应计课时费。反之「有考勤记录但学员全部
-  // 缺席」的课仍然计薪 —— 教师确实到场授课。故用 EXISTS 而非 attended > 0。
+  // 计薪基数 = 实际授课：判据收敛到 utils/payroll 的 PAYABLE_SCHEDULE_SQL（单一来源，
+  // 与教练课时页共用），避免同月在两个页面出现两个节数。
+  //   · status != 'cancelled' —— 取消的课不授课；
+  //   · EXISTS(考勤) —— 排了课但一条考勤都没有说明该课未实际发生（停课/改期/临时取消未改状态），
+  //     不计课时费；反之「有考勤但学员全缺席」仍计薪（教师确实到场）。
+  // consume_classes 一并带出：一次课消耗 N 节时按 N 节计酬（此前恒按 1 节）。
+  // leaveDeducted：请假已扣课人头 —— 请假路径不写 attendances，仅凭签到会漏掉这批已消课学员。
   const list = db.prepare(`
     SELECT s.id, s.date, s.course_name, s.start_time, s.end_time, s.status,
       s.enrolled_count, s.classroom_name,
+      (SELECT consume_classes FROM courses c WHERE c.id = s.course_id) AS consume_classes,
       (SELECT COUNT(*) FROM attendances a
-        WHERE a.schedule_id = s.id AND a.status IN ('present','late')) AS attended
+        WHERE a.schedule_id = s.id AND a.status IN ('present','late')) AS attended,
+      (SELECT COUNT(*) FROM leave_deduction_logs l
+        WHERE l.schedule_id = s.id AND l.mode = 'class') AS leave_deducted
     FROM schedules s
-    WHERE s.teacher_id = ? AND s.status != 'cancelled' AND s.date >= ? AND s.date <= ?
-      AND EXISTS (SELECT 1 FROM attendances a WHERE a.schedule_id = s.id)
+    WHERE s.teacher_id = ? AND s.date >= ? AND s.date <= ? AND ${PAYABLE_SCHEDULE_SQL}
     ORDER BY s.date ASC, s.start_time ASC
   `).all(teacherId, startDate, effEnd);
 
   const rows = list.map((r) => {
     const attended = r.attended || 0;
+    const leaveDeducted = r.leave_deducted || 0;
+    const consumeClasses = normalizeConsumeClasses(r.consume_classes);
+    // 计酬人头：按人头/混合模式纳入「请假已扣课」；按课时（fixed）金额与人头无关（除阶梯档位），
+    // 为不改动既有 fixed 数字，fixed 仍以签到人数参与阶梯判定。
+    const paidHeads = (rule.type === 'per_head' || rule.type === 'hybrid')
+      ? attended + leaveDeducted
+      : attended;
     return {
       id: r.id,
       date: r.date,
@@ -88,8 +106,11 @@ function lessonRows(teacherId, startDate, endDate) {
       classroomName: r.classroom_name || '',
       enrolledCount: r.enrolled_count || 0,
       attended,
-      calcText: calcText(rule, attended),
-      lessonAmount: calcLessonPay(rule, attended),
+      leaveDeducted,
+      billableHeads: paidHeads,
+      consumeClasses,
+      calcText: calcText(rule, paidHeads, consumeClasses),
+      lessonAmount: calcLessonPay(rule, paidHeads, consumeClasses),
     };
   });
 
@@ -102,6 +123,13 @@ function lessonRows(teacherId, startDate, endDate) {
     },
     { classes: 0, students: 0, amount: 0 }
   );
+
+  // 双列口径：已排课节数（仅排除取消） vs 计薪节数（实际授课）；消课节数取 deduction_logs
+  // （count 为 NULL 的历史行按课程 consume_classes 读取时兜底），让「课时消耗」这本账
+  // 在薪资侧可见 —— 此前薪资只看 attendances，卡已扣课但薪资侧完全看不到。
+  totals.scheduledLessons = countScheduledLessons(teacherId, startDate, effEnd);
+  totals.consumedLessons = countConsumedLessons(teacherId, startDate, effEnd);
+  totals.leaveDeductedHeads = countLeaveDeductedHeads(teacherId, startDate, effEnd);
 
   return {
     teacher: { id: teacher.id, name: teacher.name, phone: teacher.phone || '' },
@@ -144,7 +172,11 @@ router.get('/coaches', (req, res) => {
         status: t.status || 'active',
         payRule: rule,
         ruleSummary: ruleSummary(rule),
+        // 计薪节数（实际授课）与已排课节数（仅排除取消）并列回传：两者差额即「排了但未授课」，
+        // 前端双列展示后，同一屏不再出现两套互相矛盾的口径。
         classes: rows ? rows.totals.classes : 0,
+        scheduledLessons: rows ? rows.totals.scheduledLessons : 0,
+        consumedLessons: rows ? rows.totals.consumedLessons : 0,
         students: rows ? rows.totals.students : 0,
         amount: rows ? rows.totals.amount : 0,
       };
@@ -237,7 +269,15 @@ router.post('/settle', (req, res) => {
       const existing = db.prepare(
         "SELECT COUNT(*) c FROM payroll_logs WHERE month = ? AND status = 'settled'"
       ).get(month).c;
-      if (existing > 0) return { err: '该月已结算，如需重算请先作废原结算记录' };
+      if (existing > 0) {
+        // 已结算月份拒绝重复结算（保持幂等），但把「已结算金额/条数」一并回传，
+        // 让前端能明确提示「本月已结算 ¥X，月中新增课程需作废重结才计入」——
+        // 此前只回一句「该月已结算」，教练少发风险完全依赖操作纪律。
+        const agg = db.prepare(
+          "SELECT COALESCE(SUM(amount), 0) total, COUNT(*) c FROM payroll_logs WHERE month = ? AND status = 'settled'"
+        ).get(month);
+        return { err: '该月已结算，如需重算请先作废原结算记录', alreadySettled: true, settledAmount: Math.round(agg.total * 100) / 100, settledCount: agg.c };
+      }
 
       const ins = db.prepare(`
         INSERT INTO payroll_logs (id, teacher_id, teacher_name, month, lesson_count, amount, rule_snapshot, status, paid_at, created_at)
@@ -271,7 +311,17 @@ router.post('/settle', (req, res) => {
       return { ok: true, settled, totalAmount: Math.round(totalAmount * 100) / 100, month, clamped: effEnd < endDate };
     })();
 
-    if (result.err) return res.json(fail(result.err));
+    if (result.err) {
+      // 已结算：保留非 0 业务码（幂等拦截不变），额外回传金额/条数供前端提示补差路径
+      if (result.alreadySettled) {
+        return res.json({
+          code: 1,
+          data: { alreadySettled: true, month, settledAmount: result.settledAmount, settledCount: result.settledCount },
+          message: `该月已结算 ¥${result.settledAmount}（${result.settledCount} 条），月中新增课程不会自动补差；如需补差请先作废原结算记录后重结`,
+        });
+      }
+      return res.json(fail(result.err));
+    }
     res.json(success(result));
   } catch (err) {
     console.error('[payroll settle]', err);

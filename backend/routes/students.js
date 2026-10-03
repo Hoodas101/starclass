@@ -52,6 +52,46 @@ function backfillEmptyMemberNo() {
 }
 backfillEmptyMemberNo();
 
+/**
+ * 是否为「唯一约束冲突」（SQLite SQLITE_CONSTRAINT_UNIQUE）。
+ * 建档时的会员编号是「先查最大值再 +1」的竞态写法，迁移 027 已给 member_no
+ * 建部分唯一索引兜底；据此识别「编号撞车」并重试，而不是把整个建档判为失败。
+ */
+function isUniqueViolation(e) {
+  const code = e && e.code;
+  return code === 'SQLITE_CONSTRAINT_UNIQUE'
+    || /UNIQUE constraint failed/i.test(String((e && e.message) || ''));
+}
+
+/**
+ * 校验 YYYY-MM-DD 生日是否**真实存在**。
+ * 不能只跑正则：2015-02-29 这类不存在的日期会被 SQLite 宽松的 date() 静默归一成
+ * 2015-03-01 后入库，孩子的年龄从此错一天且无人察觉。
+ * @param {string} s 待校验字符串
+ * @returns {boolean}
+ */
+function isValidDateStr(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+/**
+ * 校验可空的身体数据（身高/体重/BMI）。空值（undefined/null/''）视为「未填写」，
+ * 返回 value=undefined 由调用方按新建（落 0）或更新（落 null）语义分别处理。
+ * 非空时必须是有限数且在合理范围内 —— 此前 -50 / 99999 这类明显错误的身体数据
+ * 会直接入库，体测趋势与分龄班型判断随之整体失真。
+ * @returns {{ok:boolean, value?:number, message?:string}}
+ */
+function validateMetric(raw, min, max, label) {
+  if (raw === undefined || raw === null || raw === '') return { ok: true, value: undefined };
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return { ok: false, message: `${label}必须是数字` };
+  if (n < min || n > max) return { ok: false, message: `${label}需在 ${min}–${max} 之间` };
+  return { ok: true, value: n };
+}
+
 // 认证中间件
 function requireAuth(req, res, next) {
   const openid = getOpenId(req);
@@ -76,76 +116,144 @@ router.post('/', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可新增成员'));
     const { name, gender, birthday, school, grade, hobby, remark, level, height, weight, bmi, phone, parentName, confirmDuplicate } = req.body;
-    if (!name) return res.json(fail('成员姓名不能为空'));
+    const nameVal = String(name || '').trim();
+    if (!nameVal) return res.json(fail('成员姓名不能为空'));
 
     // 建档查重：同一孩子被录两遍会让课时/积分/订单/考勤全部裂成两份且难以合并。
     // 手机号相同视为强重复 → 不直接建档，回传候选让操作者确认（confirmDuplicate 表示已确认）。
     // 仅同名不拦截（小机构同名常见），但在候选里一并给出供人工判断。
     if (!confirmDuplicate) {
-      const dup = findDuplicateStudents({ name, phone });
+      const dup = findDuplicateStudents({ name: nameVal, phone });
       if (dup.hasStrong) {
         return res.json(success({ duplicate: true, candidates: dup.list }));
       }
     }
 
-    const id = generateId('stu_');
-    // 新建学员即分配会员编号（避免留空：空号曾触发整体重排导致全员编号漂移）
-    db.prepare(`
-      INSERT INTO students (id, name, gender, birthday, school, grade, hobby, level, height, weight, bmi, remark, status, join_date, member_no, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
-    `).run(id, name, gender || '', birthday || '', school || '', grade || '', hobby || '', level || '',
-      height !== undefined && height !== '' ? Number(height) : 0,
-      weight !== undefined && weight !== '' ? Number(weight) : 0,
-      bmi !== undefined && bmi !== '' ? Number(bmi) : 0,
-      remark || '', now(), nextMemberNo(), now(), now());
-
-    // 录入家长手机号时，同时建立绑定关系与家长账号，便于手机号登录。
-    // 与批量导入走**同一判据**（utils/duplicate 的 normalizePhone + PHONE_RE）：先规范化
-    // 全角数字、空格、横线、+86/0086 前缀，再校验。原先这里用裸正则 ^1[3-9]\d{9}$，
-    // 于是「138 0013 8000」「+8613800138000」这类最常见的写法会静默跳过下面的家长账号
-    // 与绑定 —— 学员建好了、家长却永远登不上，之后所有家长通知都发不到人且无人察觉。
-    const phoneNorm = normalizePhone(String(phone || ''));
-    const phoneOk = PHONE_RE.test(phoneNorm);
-    if (phoneOk) {
-      const parentNameVal = parentName || `${name}家长`;
-      const openid = `phone_${phoneNorm}`;
-      const existingUser = db.prepare('SELECT id FROM users WHERE phone = ?').get(phoneNorm);
-      if (!existingUser) {
-        db.prepare(`
-          INSERT INTO users (id, openid, phone, nickname, avatar, role, status, created_at, updated_at)
-          VALUES (?, ?, ?, ?, '', 'parent', 'active', ?, ?)
-        `).run(generateId('user_'), openid, phoneNorm, parentNameVal, now(), now());
-      } else {
-        // 保留微信身份账号的 openid（wx_ 前缀），避免再次微信登录时账号分裂
-        if (!String(existingUser.openid || '').startsWith('wx_')) {
-          db.prepare('UPDATE users SET openid = ? WHERE phone = ?').run(openid, phoneNorm);
-        }
-      }
-      // 绑定记录使用该手机号用户的实际 openid（微信身份为 wx_ 前缀），保证登录后可见绑定
-      const bindOpenid = existingUser ? String(existingUser.openid || '') : openid;
-      // 去重：同一成员同一家长手机号只保留一条绑定
-      const dupBind = db.prepare('SELECT 1 FROM parent_bindings WHERE student_id = ? AND parent_phone = ?').get(id, phoneNorm);
-      if (!dupBind) {
-        db.prepare(`
-          INSERT INTO parent_bindings (student_id, student_name, parent_name, parent_openid, parent_phone, relation, is_main, created_at)
-          VALUES (?, ?, ?, ?, ?, '家长', 1, ?)
-        `).run(id, name, parentNameVal, bindOpenid, phoneNorm, now());
-      }
+    // 生日：非法日期（如 2015-02-29）不得静默入库 —— SQLite 的 date() 会把它悄悄
+    // 归一成 2015-03-01，孩子年龄从此错一天。空值表示未填写，允许。
+    const birthdayVal = String(birthday || '').trim();
+    if (birthdayVal && !isValidDateStr(birthdayVal)) {
+      return res.json(fail(`生日「${birthdayVal}」不是有效日期（格式 YYYY-MM-DD）`));
     }
 
-    // 新建成员会分配会员编号并可能创建家长账号/绑定，需留痕
-    const actor = getActor(req);
-    recordAudit(db, {
-      entity: 'student',
-      entityId: id,
-      action: 'create',
-      actorId: actor.id,
-      actorRole: actor.role,
-      after: { name, status: 'active', has_parent_phone: !!phoneOk },
+    // 身高/体重/BMI 合理范围校验：明显不合理的身体数据一旦入库，会污染体测趋势
+    // 与分龄班型判断，且事后无从区分「录错」与「真值」。超范围直接拒绝而非归零 ——
+    // 归零会让错误数据变成一个看似合法的默认值，更难被发现。
+    const h = validateMetric(height, 30, 250, '身高(cm)');
+    if (!h.ok) return res.json(fail(h.message));
+    const w = validateMetric(weight, 5, 300, '体重(kg)');
+    if (!w.ok) return res.json(fail(w.message));
+    const b = validateMetric(bmi, 5, 60, 'BMI');
+    if (!b.ok) return res.json(fail(b.message));
+
+    // 家长手机号：与批量导入走**同一判据**（utils/duplicate 的 normalizePhone + PHONE_RE）。
+    // 非法号码不改「建档成功」的判定（与 import 一致：学员本身建成了就算成功），
+    // 但必须在响应里明确提示「家长未绑定」，否则家长永远登不上、通知发不到人且无人察觉。
+    const warnings = [];
+    const phoneRaw = String(phone || '').trim();
+    const phoneNorm = normalizePhone(phoneRaw);
+    const phoneOk = PHONE_RE.test(phoneNorm);
+    if (phoneRaw && !phoneOk) {
+      warnings.push({
+        field: 'phone',
+        value: phoneRaw,
+        reason: `家长手机号「${phoneRaw}」不是有效的 11 位手机号，该学员未建立家长绑定，请补录后再发通知`,
+      });
+    }
+
+    // 整段建档收敛到**单个** immediate 事务：插学员 → 建家长账号 → 建绑定，
+    // 任一环节失败整体回滚。此前全程无事务，若中间撞上 users.openid 占用（openid 唯一）
+    // 会抛错返回 500，但**学员已落库**；操作者重试再建一条 → 同一孩子两条档案，
+    // 课时/积分/订单从此裂成两份。
+    const createStudent = db.transaction(() => {
+      const id = generateId('stu_');
+      // 会员编号「先查最大值再 +1」存在竞态：并发建档可能算出同一编号。
+      // 迁移 027 已给 member_no 建部分唯一索引兜底，这里捕获唯一冲突后重新生成，
+      // 最多重试 5 次；其它错误照常抛出由事务回滚。
+      const insertStmt = db.prepare(`
+        INSERT INTO students (id, name, gender, birthday, school, grade, hobby, level, height, weight, bmi, remark, status, join_date, member_no, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+      `);
+      let inserted = false;
+      for (let attempt = 0; attempt < 5 && !inserted; attempt++) {
+        try {
+          insertStmt.run(id, nameVal, gender || '', birthdayVal, school || '', grade || '', hobby || '', level || '',
+            h.value === undefined ? 0 : h.value,
+            w.value === undefined ? 0 : w.value,
+            b.value === undefined ? 0 : b.value,
+            remark || '', now(), nextMemberNo(), now(), now());
+          inserted = true;
+        } catch (e) {
+          // 仅对「会员编号唯一冲突」重试；主键/其它唯一约束冲突直接抛出（重试无意义）
+          if (isUniqueViolation(e) && /member_no/i.test(String(e.message || ''))) continue;
+          throw e;
+        }
+      }
+      if (!inserted) {
+        const e = new Error('会员编号生成冲突，请重试');
+        e.business = true;
+        throw e;
+      }
+
+      // 录入家长手机号时，同时建立绑定关系与家长账号，便于手机号登录。
+      // 与批量导入走**同一判据**（utils/duplicate 的 normalizePhone + PHONE_RE）：先规范化
+      // 全角数字、空格、横线、+86/0086 前缀，再校验。原先这里用裸正则 ^1[3-9]\d{9}$，
+      // 于是「138 0013 8000」「+8613800138000」这类最常见的写法会静默跳过下面的家长账号
+      // 与绑定 —— 学员建好了、家长却永远登不上，之后所有家长通知都发不到人且无人察觉。
+      if (phoneOk) {
+        const parentNameVal = parentName || `${nameVal}家长`;
+        const openid = `phone_${phoneNorm}`;
+        const existingUser = db.prepare('SELECT id, openid FROM users WHERE phone = ?').get(phoneNorm);
+        if (!existingUser) {
+          db.prepare(`
+            INSERT INTO users (id, openid, phone, nickname, avatar, role, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, '', 'parent', 'active', ?, ?)
+          `).run(generateId('user_'), openid, phoneNorm, parentNameVal, now(), now());
+        } else {
+          // 保留微信身份账号的 openid（wx_ 前缀），避免再次微信登录时账号分裂
+          if (!String(existingUser.openid || '').startsWith('wx_')) {
+            db.prepare('UPDATE users SET openid = ? WHERE phone = ?').run(openid, phoneNorm);
+          }
+        }
+        // 绑定记录使用该手机号用户的实际 openid（微信身份为 wx_ 前缀），保证登录后可见绑定
+        const bindOpenid = existingUser ? String(existingUser.openid || '') : openid;
+        // 去重：同一成员同一家长手机号只保留一条绑定
+        const dupBind = db.prepare('SELECT 1 FROM parent_bindings WHERE student_id = ? AND parent_phone = ?').get(id, phoneNorm);
+        if (!dupBind) {
+          db.prepare(`
+            INSERT INTO parent_bindings (student_id, student_name, parent_name, parent_openid, parent_phone, relation, is_main, created_at)
+            VALUES (?, ?, ?, ?, ?, '家长', 1, ?)
+          `).run(id, nameVal, parentNameVal, bindOpenid, phoneNorm, now());
+        }
+      }
+
+      // 新建成员会分配会员编号并可能创建家长账号/绑定，需留痕（与业务写入同一事务，回滚时一并撤销）
+      const actor = getActor(req);
+      recordAudit(db, {
+        entity: 'student',
+        entityId: id,
+        action: 'create',
+        actorId: actor.id,
+        actorRole: actor.role,
+        after: { name: nameVal, status: 'active', has_parent_phone: !!phoneOk },
+      });
+
+      return id;
     });
 
-    res.json(success({ id, name }));
+    const id = createStudent.immediate();
+    // 建档成功、但家长未绑定时附带 warning（不改变 code=0 的成功语义）
+    res.json(success(warnings.length ? { id, name: nameVal, warnings } : { id, name: nameVal }));
   } catch (err) {
+    // 唯一约束冲突（家长 openid/手机号已被占用）是**业务**失败，不是服务端故障：
+    // 事务已整体回滚（学员未落库），返回明确的失败原因供操作者核对，
+    // 而不是让前端看到 500 后盲目重试 —— 盲目重试正是「同一孩子两条档案」的成因。
+    if (isUniqueViolation(err)) {
+      console.warn('[createStudent] 家长账号/绑定唯一冲突，已整体回滚:', err.message);
+      return res.json(fail('家长手机号绑定失败：该号码已被占用，请核对后重试'));
+    }
+    if (err && err.business) return res.json(fail(err.message));
+    console.error('[createStudent]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }
 });
@@ -397,9 +505,17 @@ router.get('/', (req, res) => {
     const list = db.prepare(`
       SELECT s.id, s.member_no, s.archived, s.name, s.gender, s.birthday, s.school, s.grade, s.hobby, s.level, s.remark,
         s.status, s.join_date, s.created_at, s.updated_at,
+        -- 年龄改用「年份差 − 今年生日是否已过」计算，而非 (now - birthday)/365.25 后截断。
+        -- 旧写法在生日当天及之前约 3 个月都少算 1 岁（实测生日当天算出 9 应为 10），
+        -- 未来生日还会返回负数。守卫：生日晚于今天视为无效 → NULL；未填/非法 → NULL
+        --（与前端「未填写」展示统一，不再出现 age=NULL 与「0 岁」两套口径并存）。
+        -- 注意：分龄段（min_age/max_age）一旦启用，本处口径修正会让分龄结果整体右移一岁。
         CASE
           WHEN s.birthday IS NOT NULL AND s.birthday != ''
-          THEN CAST((julianday('now') - julianday(s.birthday)) / 365.25 AS INTEGER)
+            AND date(s.birthday) IS NOT NULL
+            AND date(s.birthday) <= date('now', 'localtime')
+          THEN CAST(strftime('%Y', 'now', 'localtime') AS INTEGER) - CAST(strftime('%Y', s.birthday) AS INTEGER)
+            - (strftime('%m-%d', 'now', 'localtime') < strftime('%m-%d', s.birthday))
           ELSE NULL
         END AS age,
         (SELECT COALESCE(SUM(mc.remaining_classes), 0) FROM member_cards mc
@@ -765,13 +881,21 @@ router.put('/:id', requireAuth, (req, res) => {
     const { id } = req.params;
     const { name, gender, birthday, school, grade, hobby, remark, level, height, weight, bmi, status, parentPhone, parentName, memberNo, archived } = req.body;
 
-    const existing = db.prepare('SELECT id, name, status FROM students WHERE id = ?').get(id);
+    const existing = db.prepare('SELECT id, name, status, archived FROM students WHERE id = ?').get(id);
     if (!existing) return res.status(404).json(safeFail('成员不存在'));
 
     // 验证绑定关系
     const bind = db.prepare('SELECT 1 FROM parent_bindings WHERE student_id = ? AND parent_openid = ?').get(id, req.openid);
     const isAdmin = isAdminReq(req);
     if (!bind && !isAdmin) return res.status(403).json(safeFail('无权修改该成员'));
+
+    // 生日合法性：PUT 是「编辑生日」的主路径，不能只在建档(POST)时校验，
+    // 否则通过编辑绕过校验仍能把 2015-02-29 这类不存在的日期写进库
+    //（SQLite 的 date() 会把它悄悄归一成 2015-03-01）。
+    const birthdayVal = birthday === undefined ? undefined : String(birthday).trim();
+    if (birthdayVal && !isValidDateStr(birthdayVal)) {
+      return res.json(fail(`生日「${birthdayVal}」不是有效日期（格式 YYYY-MM-DD）`));
+    }
 
     // 家长（非管理员）仅可修改成员基础信息字段，禁止修改 status / archived / member_no 等管理字段
     if (bind && !isAdmin) {
@@ -787,7 +911,7 @@ router.put('/:id', requireAuth, (req, res) => {
           remark = COALESCE(?, remark),
           updated_at = ?
         WHERE id = ?
-      `).run(name, gender, birthday, school, grade, hobby, level, remark, now(), id);
+      `).run(name, gender, birthdayVal, school, grade, hobby, level, remark, now(), id);
       // 家长自助修改成员基础信息，同样需要留痕
       const actor = getActor(req);
       recordAudit(db, {
@@ -803,29 +927,68 @@ router.put('/:id', requireAuth, (req, res) => {
     }
 
     // 管理员：可修改全部字段（含 status / archived / member_no）
-    db.prepare(`
-      UPDATE students SET
-        member_no = COALESCE(?, member_no),
-        archived = COALESCE(?, archived),
-        name = COALESCE(?, name),
-        gender = COALESCE(?, gender),
-        birthday = COALESCE(?, birthday),
-        school = COALESCE(?, school),
-        grade = COALESCE(?, grade),
-        hobby = COALESCE(?, hobby),
-        level = COALESCE(?, level),
-        height = COALESCE(?, height),
-        weight = COALESCE(?, weight),
-        bmi = COALESCE(?, bmi),
-        remark = COALESCE(?, remark),
-        status = ?,
-        updated_at = ?
-      WHERE id = ?
-    `).run(memberNo || null, archived !== undefined ? (archived ? 1 : 0) : null, name, gender, birthday, school, grade, hobby, level,
-      height !== undefined && height !== '' ? Number(height) : null,
-      weight !== undefined && weight !== '' ? Number(weight) : null,
-      bmi !== undefined && bmi !== '' ? Number(bmi) : null,
-      remark, status || existing.status, now(), id);
+    // 身体数据合理范围校验（与建档同一判据）：PUT 是编辑身高/体重的主路径，
+    // 只在 POST 校验等于留了一条绕过通道。
+    const h = validateMetric(height, 30, 250, '身高(cm)');
+    if (!h.ok) return res.json(fail(h.message));
+    const w = validateMetric(weight, 5, 300, '体重(kg)');
+    if (!w.ok) return res.json(fail(w.message));
+    const b = validateMetric(bmi, 5, 60, 'BMI');
+    if (!b.ok) return res.json(fail(b.message));
+
+    // 归档 / 反归档的资产联动（与 DELETE 的软删除语义对齐）：
+    //   · 归档（archived 0→1）：冻结该学员名下 status='active' 的会员卡。否则卡仍有效
+    //     → 派生状态把已归档学员显示成「在读」，归档等于没归档（扣课/激活/选卡路径
+    //     已统一只认 active，置 frozen 即可让这些路径不再选中该卡）。
+    //   · 反归档（archived 1→0）：把归档时冻结的卡（**仅** frozen）还原为 active；
+    //     已 refunded / expired 的卡语义不同，绝不顺手激活。
+    // 另外：反归档且 status 仍为 'refunded' 时，原写法 `status || existing.status`
+    // 会把 status 留在 'refunded'，而 ACTIVE_STUDENT_SQL 要求 archived=0 **且**
+    // status≠'refunded' 同时成立 → 「半复活」：列表可见、报表/续期预警/订单选人全不认。
+    // 故此时同事务把 status 复位为 'active'。
+    const archivedFlag = archived === undefined ? undefined : (archived ? 1 : 0);
+    const wasArchived = Number(existing.archived) === 1;
+    const archiving = archivedFlag === 1 && !wasArchived;
+    const unarchiving = archivedFlag === 0 && wasArchived;
+    const nextStatus = (unarchiving && existing.status === 'refunded') ? 'active' : (status || existing.status);
+
+    const applyAdminUpdate = db.transaction(() => {
+      db.prepare(`
+        UPDATE students SET
+          member_no = COALESCE(?, member_no),
+          archived = COALESCE(?, archived),
+          name = COALESCE(?, name),
+          gender = COALESCE(?, gender),
+          birthday = COALESCE(?, birthday),
+          school = COALESCE(?, school),
+          grade = COALESCE(?, grade),
+          hobby = COALESCE(?, hobby),
+          level = COALESCE(?, level),
+          height = COALESCE(?, height),
+          weight = COALESCE(?, weight),
+          bmi = COALESCE(?, bmi),
+          remark = COALESCE(?, remark),
+          status = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(memberNo || null, archivedFlag === undefined ? null : archivedFlag, name, gender, birthdayVal, school, grade, hobby, level,
+        h.value === undefined ? null : h.value,
+        w.value === undefined ? null : w.value,
+        b.value === undefined ? null : b.value,
+        remark, nextStatus, now(), id);
+
+      if (archiving) {
+        db.prepare("UPDATE member_cards SET status = 'frozen', updated_at = ? WHERE student_id = ? AND status = 'active'")
+          .run(now(), id);
+        // D4 归档冻结积分：标记冻结，排行榜/统计排除（membership_cards 余额冻结由 card status 承担）
+        db.prepare("UPDATE points SET frozen = 1, updated_at = ? WHERE student_id = ?").run(now(), id);
+      } else if (unarchiving) {
+        db.prepare("UPDATE member_cards SET status = 'active', updated_at = ? WHERE student_id = ? AND status = 'frozen'")
+          .run(now(), id);
+        db.prepare("UPDATE points SET frozen = 0, updated_at = ? WHERE student_id = ?").run(now(), id);
+      }
+    });
+    applyAdminUpdate.immediate();
 
     // 管理员可更新家长手机号/姓名绑定
     if (isAdmin && parentPhone) {
@@ -888,9 +1051,12 @@ router.put('/:id', requireAuth, (req, res) => {
       before: { name: existing.name, status: existing.status },
       after: {
         name: name || existing.name,
-        status: status || existing.status,
+        status: nextStatus,
         archived: archived === undefined ? null : (archived ? 1 : 0),
         parent_phone_changed: !!(isAdmin && parentPhone),
+        // 归档/反归档对会员卡的联动结果，供事后核对资产状态与学员状态是否一致
+        cards_frozen: archiving,
+        cards_restored: unarchiving,
       },
     });
 
@@ -914,11 +1080,20 @@ router.delete('/:id', requireAuth, (req, res) => {
     // 归档（软删除）并解绑家长绑定：避免家长端仍可见已退费成员，与课程删除级联一致
     const today = formatDate(Date.now());
     let releasedEnrolls = 0;
+    let frozenCards = 0;
     const tx = db.transaction(() => {
       // archived 必须一并置 1：学员列表默认只显示 archived = 0，只改 status 的话
       // 已删学员仍留在列表里（且因会员卡仍有效而被派生状态覆盖成「在读」），删除等于没删。
       db.prepare("UPDATE students SET status = 'refunded', archived = 1, updated_at = ? WHERE id = ?").run(now(), id);
       db.prepare('DELETE FROM parent_bindings WHERE student_id = ?').run(id);
+
+      // 冻结该学员名下仍有效的会员卡：归档后卡仍为 active，不仅会让派生状态把已删学员
+      // 显示成「在读」，扣课/续费/到期提醒也会继续把这张卡当作有效卡使用。
+      // 只冻结 active —— paused / refunded / expired 各有语义，冻结会破坏其原有状态
+      //（paused 卡若被冻结，反归档时会被误还原成 active）。
+      frozenCards = db.prepare(
+        "UPDATE member_cards SET status = 'frozen', updated_at = ? WHERE student_id = ? AND status = 'active'"
+      ).run(now(), id).changes;
 
       // 作废待补课权益：否则自动排补课时会把一个已删除学员塞进未来的场次。
       db.prepare("UPDATE makeup_records SET status = 'cancelled', updated_at = ? WHERE student_id = ? AND status = 'pending'")
@@ -969,7 +1144,7 @@ router.delete('/:id', requireAuth, (req, res) => {
       action: 'delete',
       actorId: actor.id,
       actorRole: actor.role,
-      after: { status: 'refunded', parents_unbound: true, future_enrolls_released: releasedEnrolls },
+      after: { status: 'refunded', parents_unbound: true, future_enrolls_released: releasedEnrolls, cards_frozen: frozenCards },
     });
     res.json(success({ id, status: 'refunded' }));
   } catch (err) {

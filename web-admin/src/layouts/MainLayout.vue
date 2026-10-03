@@ -61,29 +61,41 @@
         </div>
       </header>
 
-<aside class="sidebar" :class="{ collapsed: isCollapsed }">
-      <!-- 菜单 -->
-      <el-menu
-        :default-active="activeMenu"
-        :collapse="isCollapsed"
-        :collapse-transition="false"
-        class="sidebar-menu"
-        router
-      >
-        <el-menu-item
-          v-for="route in menuRoutes"
-          :key="route.path"
-          :index="'/' + route.path"
+<aside class="sidebar" :class="{ collapsed: menuCollapsed }">
+      <!-- 主导航。
+           键盘可达性（WCAG 2.1.1）：Element Plus 2.14 的垂直 el-menu 把每个
+           menu-item 的 tabindex 硬编码为 -1，且组件内部没有任何 keydown 处理，
+           所以 7 个一级入口在键盘下完全进不去。这里：
+             1) 用 <nav aria-label> 提供导航地标语义；
+             2) 给 el-menu 传 tabindex="0"，让 <ul role="menubar"> 可被 Tab 聚焦；
+             3) 在 nav 上补一套 roving tabindex（方向键移动焦点、Enter/Space 触发跳转），
+                因为 EP 自身不提供这套行为，只让容器可聚焦仍然无法激活菜单项。 -->
+      <nav class="sidebar-nav" aria-label="主导航" @keydown="onNavKeydown">
+        <el-menu
+          ref="menuRef"
+          :default-active="activeMenu"
+          :collapse="menuCollapsed"
+          :collapse-transition="false"
+          class="sidebar-menu"
+          tabindex="0"
+          router
         >
-          <el-icon v-if="iconMap[route.meta.icon]">
-            <component :is="iconMap[route.meta.icon]" />
-          </el-icon>
-          <template #title>{{ resolveTitle(route.meta.title) }}</template>
-        </el-menu-item>
-      </el-menu>
+          <el-menu-item
+            v-for="route in menuRoutes"
+            :key="route.path"
+            :index="'/' + route.path"
+            :aria-current="activeMenu === '/' + route.path ? 'page' : undefined"
+          >
+            <el-icon v-if="iconMap[route.meta.icon]">
+              <component :is="iconMap[route.meta.icon]" />
+            </el-icon>
+            <template #title>{{ resolveTitle(route.meta.title) }}</template>
+          </el-menu-item>
+        </el-menu>
+      </nav>
 
-      <!-- 底部折叠按钮 -->
-      <div class="sidebar-footer">
+      <!-- 底部折叠按钮：窄屏下侧栏被断点强制折叠，按钮失去意义，直接隐藏 -->
+      <div v-if="!isNarrow" class="sidebar-footer">
         <el-button
           text
           :aria-label="isCollapsed ? '展开侧栏' : '折叠侧栏'"
@@ -450,22 +462,63 @@ const onGlobalKeydown = (e) => {
   }
 }
 
+// ============================================
+// 侧边栏折叠
+// ============================================
+const isCollapsed = ref(false)
+const toggleCollapse = () => {
+  isCollapsed.value = !isCollapsed.value
+}
+
+// 窄屏（≤768px）：CSS 在该断点把侧栏宽度固定为 64px，但折叠状态与断点此前互不同步——
+// 手机上点「折叠」按钮毫无反应，用户永久损失约 17% 屏宽且无法改变。
+// 这里把断点状态并入折叠计算：窄屏一律折叠（与 CSS 的 64px 对齐），桌面端行为不变。
+const isNarrow = ref(false)
+let narrowMedia = null
+const syncNarrow = (e) => { isNarrow.value = e.matches }
+const menuCollapsed = computed(() => isCollapsed.value || isNarrow.value)
+
+// 侧栏键盘导航（roving tabindex）。EP 垂直菜单不提供键盘行为，需自行补：
+// 方向键在菜单项之间移动焦点，Home/End 跳首尾，Enter/Space 触发当前项跳转。
+const menuRef = ref(null)
+const navItems = () => Array.from(menuRef.value?.$el?.querySelectorAll('.el-menu-item') || [])
+const focusNavItem = (idx) => {
+  const items = navItems()
+  if (!items.length) return
+  const i = ((idx % items.length) + items.length) % items.length
+  items.forEach((el, k) => el.setAttribute('tabindex', k === i ? '0' : '-1'))
+  items[i].focus()
+}
+const onNavKeydown = (e) => {
+  const items = navItems()
+  if (!items.length) return
+  const cur = items.indexOf(document.activeElement)
+  switch (e.key) {
+    case 'ArrowDown': e.preventDefault(); focusNavItem(cur < 0 ? 0 : cur + 1); break
+    case 'ArrowUp': e.preventDefault(); focusNavItem(cur < 0 ? items.length - 1 : cur - 1); break
+    case 'Home': e.preventDefault(); focusNavItem(0); break
+    case 'End': e.preventDefault(); focusNavItem(items.length - 1); break
+    case 'Enter':
+    case ' ':
+      if (cur >= 0) { e.preventDefault(); items[cur].click() }
+      break
+  }
+}
+
 onMounted(() => {
   loadUnread()
   loadOrgName()
   window.addEventListener('keydown', onGlobalKeydown)
+  narrowMedia = window.matchMedia('(max-width: 768px)')
+  syncNarrow(narrowMedia)
+  narrowMedia.addEventListener('change', syncNarrow)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   clearTimeout(quickTimer) // 布局卸载后不再触发待执行的搜索请求
+  narrowMedia?.removeEventListener('change', syncNarrow)
 })
-
-// 侧边栏折叠状态
-const isCollapsed = ref(false)
-const toggleCollapse = () => {
-  isCollapsed.value = !isCollapsed.value
-}
 
 // 当前激活的菜单
 const activeMenu = computed(() => route.path)
@@ -564,12 +617,28 @@ const handleCommand = async (command) => {
   }
 }
 
+// 导航地标容器：承接 .sidebar 的 flex:1，内部仍由 .sidebar-menu 滚动
+.sidebar-nav {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .sidebar-menu {
   flex: 1;
   padding: 8px 0;
   background: transparent;
   border: none;
   overflow-y: auto;
+
+  // 键盘焦点可见性：roving tabindex 把焦点落在 li 上，需明确焦点环
+  &:focus-visible,
+  :deep(.el-menu-item:focus-visible) {
+    outline: 2px solid var(--t-accent-line);
+    outline-offset: -2px;
+    border-radius: 8px;
+  }
 
   :deep(.el-menu-item) {
     color: var(--t-text-2);
@@ -958,9 +1027,36 @@ const handleCommand = async (command) => {
     margin-left: 64px;
   }
 
+  // 375px 顶栏溢出修复：此前 .header scrollWidth 409 / clientWidth 375，
+  // 右侧的用户菜单（个人设置/退出登录）被挤出视口且无法横向滚到；
+  // .logo-text 还被压成 14px 宽的竖排文字。窄屏下隐藏这些纯装饰/次要文本，
+  // 并给头部与右侧容器 min-width:0 允许收缩。
   .header {
-    padding: 0 16px;
+    padding: 0 12px;
     height: 56px;
+    min-width: 0;
+    gap: 8px;
+  }
+
+  .header-brand {
+    min-width: 0;
+    flex-shrink: 0;
+  }
+
+  .header-right {
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .logo-text,
+  .quick-switch-text,
+  .quick-kbd,
+  .user-name {
+    display: none;
+  }
+
+  .quick-switch-btn {
+    padding: 0 8px;
   }
 
   .content {

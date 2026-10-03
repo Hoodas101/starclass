@@ -10,6 +10,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, isAdminReq, isStaffReq, canViewStudentData, recordAudit } = require('../utils');
+const { computeExpiry } = require('../utils/points-expiry');
 
 /**
  * GET /api/points/balance — 积分余额
@@ -78,8 +79,8 @@ router.post('/add', (req, res) => {
           .run(amount, amount, currentTime, studentId);
       }
       const points = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
-      db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(generateId('PLG'), studentId, 'earn', amount, points.balance, reason, referenceId, currentTime);
+      db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, created_at, expire_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(generateId('PLG'), studentId, 'earn', amount, points.balance, reason, referenceId, currentTime, computeExpiry(currentTime));
       // 积分可兑换属有价资产，管理员手工发放必须留痕，事后可查到是谁加了多少
       recordAudit(db, {
         entity: 'points',
@@ -126,8 +127,8 @@ router.post('/consume', (req, res) => {
         .run(amount, amount, currentTime, studentId);
       const updated = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
       // 记录流水
-      db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(generateId('PLG'), studentId, 'consume', amount, updated.balance, reason, referenceId, currentTime);
+      db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, created_at, expire_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(generateId('PLG'), studentId, 'consume', amount, updated.balance, reason, referenceId, currentTime, null);
       // 积分可兑换属有价资产，管理员手工扣减必须留痕，事后可查到是谁扣了多少
       recordAudit(db, {
         entity: 'points',

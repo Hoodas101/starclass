@@ -8,7 +8,7 @@
         <span class="toolbar-count">与小程序端积分实时同步</span>
       </div>
       <div class="toolbar-right">
-        <el-input v-model="keyword" placeholder="搜索成员姓名 / 电话" :prefix-icon="Search" clearable style="width: 220px" @change="loadList" @clear="loadList" @keyup.enter="loadList" />
+        <el-input v-model="keyword" placeholder="搜索成员姓名 / 电话" :prefix-icon="Search" clearable style="width: 220px" @change="onFilterChange" @clear="onFilterChange" @keyup.enter="onFilterChange" />
         <el-button :icon="Download" @click="exportDialogRef?.open()">导出</el-button>
         <el-button :type="selectMode ? 'primary' : 'default'" :icon="selectMode ? 'Check' : 'Finished'" @click="toggleSelectMode">
           {{ selectMode ? '退出多选' : '多选' }}
@@ -56,7 +56,7 @@
         <el-table-column v-if="selectMode" type="selection" width="40" />
         <el-table-column label="排名" min-width="56">
           <template #default="{ $index }">
-            <span class="rank-no" :class="{ top: $index < 3 }">{{ $index + 1 }}</span>
+            <span class="rank-no" :class="{ top: globalRank($index) <= 3 }">{{ globalRank($index) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="成员" min-width="120">
@@ -77,7 +77,16 @@
         <el-table-column label="累计消耗" min-width="90" prop="total_consumed" align="right" />
       </el-table>
       <div class="pagination-wrap">
-        <el-pagination v-model:current-page="page" :page-size="pageSize" :total="total" layout="total, prev, pager, next" background @current-change="loadList" />
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :total="total"
+          :page-sizes="[10, 20, 50]"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+          @current-change="loadList"
+          @size-change="onSizeChange"
+        />
       </div>
     </div>
 
@@ -162,7 +171,7 @@
     <ExportDialog
       ref="exportDialogRef"
       title="导出积分数据"
-      description="选择时间范围后确认导出；留空导出全部成员积分。"
+      :description="exportDescription"
       @confirm="doExportByAction"
     />
 </template>
@@ -171,7 +180,7 @@
 const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { Search, Download } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { getPointsSummary, getPointsList, getPointsLogs, adjustPoints } from '@/api/modules'
@@ -185,9 +194,24 @@ const summary = reactive({ accounts: 0, totalEarned: 0, totalConsumed: 0, totalB
 const list = ref([])
 const total = ref(0)
 const page = ref(1)
-const pageSize = 10
+const pageSize = ref(10)
 const loading = ref(false)
 const keyword = ref('')
+
+// 全局连续名次：后端 /growth/points/list 已按 balance DESC 分页返回，但不返回 rank，
+// 此前用 $index+1 → 翻到第 2 页排名又从 1 开始（跨页重计）。
+// 这里按「页偏移 + 行序号」换算，与后端排序口径一致，不额外造排序逻辑。
+const globalRank = (index) => (page.value - 1) * pageSize.value + index + 1
+
+// 搜索条件变化时回到第 1 页，避免落在新的空页
+const onFilterChange = () => {
+  page.value = 1
+  loadList()
+}
+const onSizeChange = () => {
+  page.value = 1
+  loadList()
+}
 
 // 多选模式（平时不显示多选列，进入多选后才出现）
 const selectMode = ref(false)
@@ -211,7 +235,7 @@ const loadList = async () => {
   error.value = ''
   loading.value = true
   try {
-    const res = await getPointsList({ page: page.value, pageSize, keyword: keyword.value || undefined })
+    const res = await getPointsList({ page: page.value, pageSize: pageSize.value, keyword: keyword.value || undefined })
     list.value = res?.list || []
     total.value = res?.total || 0
   } catch (e) {
@@ -268,6 +292,15 @@ const openLogs = async (row) => {
 
 // 导出弹窗：动作分发（logs=成员积分明细 / list=全员积分表）
 const exportAction = ref('list')
+
+// 导出范围口径与行为一致：成员积分表是余额快照、无时间维度；明细按时间范围过滤。
+// 此前两种动作共用同一句描述，导出成员表时选了范围却不生效，属描述与行为不符。
+const exportDescription = computed(() => (
+  exportAction.value === 'logs'
+    ? '选择时间范围后确认导出；未选择时导出该成员全部积分明细。'
+    : '成员积分为当前余额快照，不支持按时间筛选；确认后将导出全部成员积分。'
+))
+
 const openExport = (action) => {
   exportAction.value = action
   exportDialogRef.value?.open()
@@ -279,11 +312,21 @@ const doExportByAction = async (range) => {
 }
 
 // 导出当前成员的积分明细（时间序列流水）
-const doExportLogs = (range) => {
-  if (!logs.value.length) { ElMessage.warning('暂无可导出的积分明细'); return }
+// 此前直接导出 logs.value（弹窗只加载了前 50 条），超过 50 条的流水被静默截断；
+// 改为循环拉全量，再按所选时间范围过滤。
+const doExportLogs = async (range) => {
+  if (!logStudent.value) return
+  let all = []
+  try {
+    all = await fetchAllPages(getPointsLogs, { studentId: logStudent.value.student_id }, 100)
+  } catch (e) {
+    ElMessage.warning('积分明细拉取失败，已导出当前已加载内容')
+    all = logs.value
+  }
+  if (!all.length) { ElMessage.warning('暂无可导出的积分明细'); return }
   const headers = ['类型', '变动', '变动后余额', '原因', '时间']
   const typeText = { earn: '获得', consume: '消耗', refund: '退款回收', checkin: '签到' }
-  const rows = logs.value.map((l) => [
+  const rows = all.map((l) => [
     typeText[l.type] || l.type,
     (l.type === 'earn' || l.type === 'checkin' ? '+' : '-') + (l.amount ?? 0),
     l.balance ?? '',

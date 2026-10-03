@@ -4,7 +4,7 @@
 <PageHeader v-if="!embedded" title="请假管理" />
     <div class="toolbar">
       <div class="toolbar-left">
-                <el-radio-group v-model="filterStatus" size="default">
+                <el-radio-group v-model="filterStatus" size="default" @change="onFilterChange">
           <el-radio-button value="">全部</el-radio-button>
           <el-radio-button value="pending">待审批</el-radio-button>
           <el-radio-button value="approved">已批准</el-radio-button>
@@ -51,10 +51,11 @@
           v-model:current-page="currentPage"
           v-model:page-size="pageSize"
           :total="total"
-          layout="total, prev, pager, next"
+          :page-sizes="[10, 20, 50]"
+          layout="total, sizes, prev, pager, next, jumper"
           background
           @current-change="loadList"
-          @size-change="loadList"
+          @size-change="onSizeChange"
         />
       </div>
     </div>
@@ -122,6 +123,19 @@ const statusTextMap = { pending: '待审批', approved: '已批准', rejected: '
 const formatDate = (v) => (v ? dayjs(Number(v)).format('YYYY-MM-DD HH:mm') : '-')
 
 const error = ref('')
+
+// 状态筛选此前没有 @change/ watch：点击「待审批/已批准」列表纹丝不动，
+// 而导出却按 filterStatus 过滤 —— 屏幕与导出结果不一致，用户以为系统丢数据。
+const onFilterChange = () => {
+  currentPage.value = 1
+  loadList()
+}
+
+// 每页条数变化后必须回到第 1 页：否则停留在旧页码可能越过新的总页数，出现空列表
+const onSizeChange = () => {
+  currentPage.value = 1
+  loadList()
+}
 
 const loadList = async () => {
   error.value = ''
@@ -213,11 +227,17 @@ const handleApprove = async (row) => {
 const handleReject = async (row) => {
   let note = ''
   try {
-    const { value } = await ElMessageBox.prompt(`驳回「${row.student_name}」的请假申请，可填写原因：`, '驳回请假', {
-      confirmButtonText: '确认驳回',
-      cancelButtonText: '取消',
-      inputPlaceholder: '驳回原因（选填）'
-    })
+    // 危险操作：确认框写清「对象 + 后果」，并把确认按钮染红，避免误点
+    const { value } = await ElMessageBox.prompt(
+      `确认驳回「${row.student_name}」在 ${row.date} ${row.start_time} 的请假申请？驳回后该次请假不生效，家长将收到驳回通知。`,
+      '驳回请假',
+      {
+        confirmButtonText: '确认驳回',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+        inputPlaceholder: '驳回原因（选填）'
+      }
+    )
     note = value || ''
   } catch (e) {
     return false // 用户取消确认框，不执行任何操作

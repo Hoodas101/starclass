@@ -372,3 +372,7 @@ router.put('/:id/approve', (req, res) => {
 });
 
 module.exports = router;
+// 教师点名标「请假」与家长审批共用同一扣课规则（否则同一「请假」两条路径两种资产结果）。
+// 单独挂到 router 上导出，既不改动既有的 `module.exports = router` 契约，
+// 又让 routes/checkin.js 能取到；leave.js 不 require checkin.js，故无循环依赖。
+module.exports.applyLeaveDeduction = applyLeaveDeduction;

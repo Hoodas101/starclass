@@ -10,8 +10,13 @@
       </el-radio-group>
     </PageHeader>
 
+    <!-- 看板主数据加载失败：用统一错误态替换统计卡与图表并提供重试。
+         此前只写 dashError 状态但模板从不渲染它 —— 接口失败时是一整屏空白，
+         用户既不知道发生了什么，也没有任何重试入口。 -->
+    <ListErrorState v-if="dashError" :error="dashError" @retry="reloadDashboard" />
+
     <!-- 统计卡片 -->
-    <div v-if="widgets.statCards !== false" class="stat-cards">
+    <div v-if="!dashError && widgets.statCards !== false" class="stat-cards">
       <div
         v-for="(stat, si) in stats"
         :key="stat.key"
@@ -27,8 +32,9 @@
         <!-- 右下角水印图标：低对比大图标，增加质感但不干扰内容
              （对标班主任工作台的 .stat .ghost） -->
         <el-icon class="stat-ghost"><component :is="STAT_ICONS[stat.icon]" /></el-icon>
-        <!-- 序号 01~08：给卡片清单感与秩序（对标 .stat .idx） -->
-        <span class="stat-idx">{{ String(si + 1).padStart(2, '0') }}</span>
+        <!-- 序号 01~08：给卡片清单感与秩序（对标 .stat .idx）。
+             纯装饰、对读屏无信息量，故对辅助技术隐藏。 -->
+        <span class="stat-idx" aria-hidden="true">{{ String(si + 1).padStart(2, '0') }}</span>
         <div class="stat-header">
           <span class="stat-label">{{ stat.label }}</span>
         </div>
@@ -54,8 +60,9 @@
       </div>
     </div>
 
-    <!-- 中部图表 -->
-    <div class="charts-row">
+    <!-- 中部图表。图表信息只存在于 canvas 像素里，容器补 role="img" + aria-label，
+         让读屏用户至少知道「这里是一张什么图」。 -->
+    <div v-if="!dashError" class="charts-row">
       <!-- 到场趋势 -->
       <div v-if="widgets.attendance !== false" class="chart-card">
         <div class="chart-header">
@@ -65,19 +72,32 @@
             <el-radio-button value="month">本月</el-radio-button>
           </el-radio-group>
         </div>
-        <div ref="attendanceChartRef" class="chart-body"></div>
+        <div
+          ref="attendanceChartRef"
+          class="chart-body"
+          role="img"
+          aria-label="到场趋势折线图：按所选周期展示每日到场率百分比"
+        ></div>
       </div>
 
       <!-- 营收趋势（本月 vs 上月，借鉴 trycompai/crm 的 AreaTrend） -->
       <div v-if="widgets.statCards !== false" class="chart-card">
         <div class="chart-header">
           <h3>营收趋势</h3>
+          <!-- 图例色点必须与 series 同源：本月=--t-accent，上月=--t-chart-2（chartPalette()[1]）。
+               此前「上月」用 --t-text-3 画点，与实线颜色（chartPalette()[1]）不一致，
+               用户会按图例颜色去找一条并不存在的灰线。 -->
           <span class="chart-legend">
             <i class="legend-dot current"></i>本月
             <i class="legend-dot prev"></i>上月
           </span>
         </div>
-        <div ref="revenueChartRef" class="chart-body"></div>
+        <div
+          ref="revenueChartRef"
+          class="chart-body"
+          role="img"
+          aria-label="营收趋势折线图：本月与上月每日营收对比"
+        ></div>
       </div>
 
       <!-- 产品占比（借鉴 trycompai/crm 的 DonutStat） -->
@@ -86,7 +106,19 @@
           <h3>产品占比</h3>
           <span class="chart-sub">本月共 {{ productOrderCount }} 单</span>
         </div>
-        <div ref="productDonutRef" class="chart-body"></div>
+        <!-- 空数据必须让出 canvas：ECharts 5 对空 data 的 pie 会画出一圈默认灰环，
+             视觉上等于「占满 100%」，与「本月 0 单」语义完全相反。
+             改为 DOM 层 el-empty 占位（与全站空态一致）。 -->
+        <div
+          v-if="productHasData"
+          ref="productDonutRef"
+          class="chart-body"
+          role="img"
+          :aria-label="productDonutAriaLabel"
+        ></div>
+        <div v-else class="chart-body chart-empty">
+          <el-empty description="本月暂无产品销售" :image-size="60" />
+        </div>
       </div>
     </div>
 
@@ -146,7 +178,7 @@
               size="small"
               @click="completeFu(item)"
             >完成</el-button>
-            <el-button v-else text type="primary" size="small" @click="goStudents">处理</el-button>
+            <el-button v-else text type="primary" size="small" @click="goPending(item)">处理</el-button>
           </div>
         </div>
     </div>
@@ -309,7 +341,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import * as echarts from 'echarts/core'
 import { LineChart, BarChart, PieChart } from 'echarts/charts'
 import {
@@ -336,6 +368,7 @@ import { getDashboard, getCharts, getCheckinRecords, getExpiringCards, getFollow
 import { relativeTime } from '@/utils/format'
 import StatusDot from '@/components/StatusDot.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import ListErrorState from '@/components/ListErrorState.vue'
 import { chartPalette } from '@/utils/theme-colors'
 import { useSettingsStore } from '@/store/settings'
 import { useUserStore } from '@/store/user'
@@ -383,6 +416,16 @@ const oneToOneCount = computed(() => salesData.value.oneToOne?.count || 0)
 const productOrderCount = computed(() =>
   (salesData.value.itemStats || []).reduce((s, i) => s + (i.count || 0), 0)
 )
+
+// 环形图是否有数据：决定渲染 canvas 还是 el-empty 占位
+const productHasData = computed(() => (salesData.value.itemStats || []).length > 0)
+// 图表的可读文本替代（canvas 内容读屏不可见，至少给出摘要）
+const productDonutAriaLabel = computed(() => {
+  const list = salesData.value.itemStats || []
+  if (!list.length) return '产品占比环形图：本月暂无产品销售'
+  const top = list.slice(0, 3).map((i) => `${i.itemName || '未命名产品'} ${i.count || 0} 单`).join('，')
+  return `产品占比环形图：本月共 ${productOrderCount.value} 单，主要产品 ${top}`
+})
 
 // 排名进度条宽度（借鉴 trycompai/crm 的 ValueMeter）
 const weekMax = computed(() => Math.max(1, ...(salesData.value.weekRanking || []).map((i) => Number(i.amount) || 0)))
@@ -706,19 +749,18 @@ const initRevenueChart = () => {
 
 // 产品占比环形图（借鉴 trycompai/crm 的 DonutStat）
 const initProductDonut = () => {
+  const list = salesData.value.itemStats || []
+  // 空数据：不画图（v-if 已换成 el-empty 占位），并把可能残留的实例清掉。
+  // 之前只设 title.text 而 series.data 仍是 []，ECharts 会给空 pie 画一圈默认灰环，
+  // 视觉上是「占满 100% 的灰圆环」，与「本月 0 单」完全相反。
+  if (!list.length) {
+    if (productDonut) { productDonut.dispose(); productDonut = null }
+    return
+  }
   if (!productDonutRef.value) return
   productDonut = echarts.init(productDonutRef.value)
-  const list = salesData.value.itemStats || []
   const palette = chartPalette()
   const option = {
-    ...(list.length ? {} : {
-      title: {
-        text: '暂无产品销售',
-        left: 'center',
-        top: 'center',
-        textStyle: { color: cssVar('--t-text-faint'), fontSize: 13, fontWeight: 400 }
-      }
-    }),
     tooltip: {
       trigger: 'item',
       backgroundColor: cssVar('--t-bg-overlay'),
@@ -730,13 +772,21 @@ const initProductDonut = () => {
     series: [
       {
         type: 'pie',
-        radius: ['58%', '82%'],
+        radius: ['52%', '76%'],
         center: ['50%', '50%'],
         avoidLabelOverlap: true,
         itemStyle: { borderColor: cssVar('--t-surface'), borderWidth: 3, borderRadius: 6 },
-        label: { show: false },
+        // 环图此前纯靠颜色编码且 label 关闭 —— 色觉障碍用户无法读出任何占比。
+        // 直接显示「名称 + 百分比」作为非颜色区分手段。
+        label: {
+          show: true,
+          color: cssVar('--t-text-2'),
+          fontSize: 11,
+          formatter: '{b} {d}%'
+        },
+        labelLine: { show: true, length: 8, length2: 8, lineStyle: { color: cssVar('--t-line-strong') } },
         emphasis: {
-          label: { show: true, fontSize: 13, fontWeight: 600, color: cssVar('--t-text-1') },
+          label: { show: true, fontSize: 12, fontWeight: 600, color: cssVar('--t-text-1') },
           scaleSize: 6
         },
         data: list.slice(0, 6).map((item, i) => ({
@@ -749,6 +799,19 @@ const initProductDonut = () => {
   }
   productDonut.setOption(option)
 }
+
+// 数据在「空 ↔ 非空」之间切换时，canvas 容器会被 v-if 插入/移除，
+// 必须在 nextTick 之后再 setOption，否则 ref 还是 null（图表一直不出现）。
+watch(productHasData, async (has) => {
+  if (has) {
+    await nextTick()
+    if (productDonut) { productDonut.dispose(); productDonut = null }
+    initProductDonut()
+  } else if (productDonut) {
+    productDonut.dispose()
+    productDonut = null
+  }
+})
 
 // ============================================
 // 近期签到动态（来自 /api/checkin/records）
@@ -904,8 +967,20 @@ const completeFu = async (item) => {
   }
 }
 
-const goStudents = () => {
-  router.push('/students')
+// 「处理」按钮按事项类型分发（此前一律跳学员页，请假/欠费等场景会跳到错误的地方）。
+// kind 取值来自 loadPendingItems：expiring（续期）/ leave（请假待审批）/
+// attention（连续缺勤）/ followup（跟进任务，另有独立「完成」按钮）。
+// arrears / refund 为雷达侧同类语义，一并登记以便复用。
+const PENDING_GO = {
+  expiring: '/students',
+  attention: '/students',
+  leave: '/operations?tab=leave',
+  arrears: '/sales?tab=orders',
+  refund: '/sales?tab=orders',
+}
+const goPending = (item) => {
+  // 未知 kind 兜底到成员列表，避免 router.push(undefined) 跳到空路径
+  router.push(PENDING_GO[item?.kind] || '/students')
 }
 
 // ============================================
@@ -925,6 +1000,12 @@ const loadDashboard = async () => {
   } finally {
     dashLoading.value = false
   }
+}
+
+// 错误态「重新加载」：主数据 + 待处理事项 + 图表一起重拉
+const reloadDashboard = () => {
+  loadDashboard().then(() => loadPendingItems())
+  loadCharts()
 }
 
 // ============================================
@@ -1098,7 +1179,11 @@ onUnmounted(() => {
   z-index: 0;
 }
 
-// 序号 01~08：右上角小字，给卡片清单感
+// 序号 01~08：右上角小字，给卡片清单感。
+// 对比度修复：原来用 --t-text-faint（浅色 #AEAEB2）压白底只有 2.21:1，
+// 远低于 WCAG AA 4.5:1，是本页唯一的硬性无障碍缺陷。
+// 原则是「需要弱化时降字号/字重，而不是降对比度」——这里改用 --t-text-2（约 5.1:1），
+// 序号对读屏无信息量，另在模板上加了 aria-hidden。
 .stat-idx {
   position: absolute;
   top: 14px;
@@ -1106,7 +1191,7 @@ onUnmounted(() => {
   font-size: var(--t-fs-2xs);
   font-weight: 800;
   letter-spacing: 0.06em;
-  color: var(--t-text-faint);
+  color: var(--t-text-2);
   font-variant-numeric: tabular-nums;
   z-index: 1;
 }
@@ -1228,8 +1313,11 @@ onUnmounted(() => {
   border-radius: 50%;
   margin-right: 3px;
 
+  // 图例色点与 series 同源：
+  // 「本月」series 用 --t-accent，「上月」series 用 chartPalette()[1] = --t-chart-2。
+  // 原来「上月」用 --t-text-3 画点，图例是灰点、实线却是绿色，属于误导判读。
   &.current { background: var(--t-accent); }
-  &.prev { background: var(--t-text-3); }
+  &.prev { background: var(--t-chart-2); }
 }
 
 .chart-sub {
@@ -1239,6 +1327,17 @@ onUnmounted(() => {
 
 .chart-body {
   height: 240px;
+}
+
+// 空态占位：与 canvas 同高，居中显示 el-empty（替代会画出灰环的空 pie）
+.chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  :deep(.el-empty) {
+    padding: 0;
+  }
 }
 
 // 列表行

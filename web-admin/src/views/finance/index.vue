@@ -15,7 +15,7 @@
           <el-radio-button value="year">本年</el-radio-button>
           <el-radio-button value="custom">自定义</el-radio-button>
         </el-radio-group>
-        <el-date-picker v-if="period === 'custom'" v-model="dateRange" type="daterange" range-separator="至" start-placeholder="开始" end-placeholder="结束" value-format="YYYY-MM-DD" style="width: 260px" @change="loadSummary" />
+        <el-date-picker v-if="period === 'custom'" v-model="dateRange" type="daterange" range-separator="至" start-placeholder="开始" end-placeholder="结束" value-format="YYYY-MM-DD" style="width: 260px" @change="loadAll" />
         <el-select v-if="activeMode === 'monthly'" v-model="reportYear" style="width: 100px" @change="loadMonthly">
           <el-option v-for="y in yearOptions" :key="y" :label="y + '年'" :value="y" />
         </el-select>
@@ -121,6 +121,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { getFinanceSummary, getFinanceMonthly, getFinanceByProduct, getFinanceBySales } from '@/api/modules'
+import { formatMoney } from '@/utils/format'
 import PageHeader from '@/components/PageHeader.vue'
 
 defineProps({ embedded: Boolean })
@@ -147,8 +148,11 @@ const loadingProduct = ref(false)
 const salesList = ref([])
 const loadingSales = ref(false)
 
+// 金额口径统一走 @/utils/format：全站整数元 + 千分位。
+// 此前本页强制 2 位小数（¥2,999.00），与订单页的 ¥2,999 不一致，用户会以为金额变了。
+// 保留无 ¥ 前缀的调用形态（模板已写 ¥{{ fmt(...) }}），故 symbol 关掉。
 function fmt(n) {
-  return Number(n || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return formatMoney(n, { symbol: false, fallback: '0' })
 }
 
 function getDateRange() {
@@ -178,7 +182,9 @@ function getDateRange() {
 }
 
 function onPeriodChange() {
-  if (period.value !== 'custom') loadSummary()
+  // 切换统计周期必须整页刷新：此前只调 loadSummary()，两张明细表滞留旧周期，
+  // 同屏出现汇总「本年」、明细「本月」的矛盾口径，可致错误决策。
+  if (period.value !== 'custom') loadAll()
 }
 
 async function loadSummary() {

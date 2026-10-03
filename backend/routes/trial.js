@@ -3,14 +3,25 @@
  *
  * 家长在小程序提交体验课预约 → 自动创建线索（stage=trial）→ 管理端增长中心可见
  *
- * POST /api/trial/apply   — 家长提交体验课预约
- * GET  /api/trial/list    — 管理端：体验课预约列表
- * PUT  /api/trial/:id     — 管理端：处理预约（安排排期/拒绝）
+ * POST /api/trial/apply        — 家长提交体验课预约
+ * GET  /api/trial/list         — 管理端：体验课预约列表
+ * GET  /api/trial/:id          — 管理端：体验课详情（含一键建学员的预填字段）
+ * POST /api/trial/:id/convert  — 管理端：体验课成交（回写学员绑定 + 线索成交）
+ * PUT  /api/trial/:id          — 管理端：处理预约（安排排期/拒绝）
+ *
+ * 转化主链路：预约（apply）只负责建/更新线索；成交（convert）在同一事务内把
+ * 「预约 → 学员 → 线索」三处串起来，避免用户手工在试听预约 / 增长中心 / 销售订单
+ * 三个页面搬运同一条信息。
  */
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, isStaffReq } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, now, isStaffReq, isAdminReq, hasPerm, getReqUser, getActor, recordAudit } = require('../utils');
+// 「学员是否在册」的唯一判据（已删除/已归档排除）；注意 SQL 中学员表别名必须为 s
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
+
+// trial_bookings.student_id 列由 migrations/028 统一创建（migrations 先于路由加载执行），
+// 此处不再做运行时补列 —— schema 变更统一归 migrations 拥有，避免启动时隐式改表结构。
 
 // 公开接口频控：同一手机号 1 小时内最多提交 5 次，防止体验课预约被刷
 const trialPhoneLimits = new Map();
@@ -154,6 +165,126 @@ router.get('/list', (req, res) => {
   } catch (err) {
     console.error('[trial list]', err);
     res.status(500).json(safeFail('获取预约列表失败'));
+  }
+});
+
+/**
+ * 体验课成交权限：管理员，或拥有「growth」权限的员工（销售默认拥有）。
+ * 与增长中心 canGrowth 同判据 —— 成交本质是线索转化，入口不同不应放宽。
+ */
+function canConvertTrial(req) {
+  return isAdminReq(req) || hasPerm(getReqUser(req), 'growth');
+}
+
+/**
+ * GET /api/trial/:id — 管理端：体验课详情
+ * 返回该预约的全部字段，外加前端一键建学员用的预填字段 studentPayload。
+ * 字段取自 trial_bookings 实际列：无 birthday（只有 student_age），故不返回该键
+ * （拿不到的字段一律省略，不写占位值 —— 否则前端会把空生日当真实值提交）。
+ */
+router.get('/:id', (req, res) => {
+  try {
+    if (!isStaffReq(req)) return res.status(403).json(safeFail('仅管理员/教练/销售可查看'));
+    const booking = db.prepare('SELECT * FROM trial_bookings WHERE id = ?').get(req.params.id);
+    if (!booking) return res.json(fail('预约不存在'));
+
+    const studentPayload = {
+      name: booking.student_name || '',
+      phone: booking.parent_phone || '',
+      gender: booking.student_gender || '',
+      remark: booking.note || '',
+      source: 'trial',
+    };
+    // 关联线索：成交后据此展示「已转成交」，也用于前端判断是否需要再次转化
+    const lead = booking.lead_id
+      ? db.prepare('SELECT id, name, stage, status, student_id FROM leads WHERE id = ?').get(booking.lead_id)
+      : null;
+
+    res.json(success({
+      ...booking,
+      studentId: booking.student_id || '',
+      leadId: booking.lead_id || '',
+      studentPayload,
+      lead: lead || null,
+    }));
+  } catch (err) {
+    console.error('[trial detail]', err);
+    res.status(500).json(safeFail('获取预约详情失败'));
+  }
+});
+
+/**
+ * POST /api/trial/:id/convert — 管理端：体验课成交
+ * Body: { studentId }（必填）
+ *
+ * 学员档案由前端复用 POST /api/students 创建（本端点不重复实现建档逻辑，避免与
+ * students.js 的事务化建档/编号重试逻辑分叉），本端点只负责把三处串起来：
+ *   预约（trial_bookings）→ 学员（students）→ 线索（leads）
+ * 幂等：预约已绑定学员时直接返回既有结果，不重复写。
+ */
+router.post('/:id/convert', (req, res) => {
+  try {
+    if (!canConvertTrial(req)) return res.status(403).json(safeFail('仅管理员/销售可办理体验课成交'));
+    const { studentId } = req.body || {};
+    if (!studentId) return res.json(fail('请先选择或创建学员'));
+
+    const booking = db.prepare('SELECT * FROM trial_bookings WHERE id = ?').get(req.params.id);
+    if (!booking) return res.json(fail('体验课预约不存在'));
+
+    // 学员必须在册：已删除/已归档的档案不得挂上成交（复用全站唯一判据，别名为 s）
+    const student = db.prepare(`SELECT s.id FROM students s WHERE s.id = ? AND ${ACTIVE_STUDENT_SQL}`).get(studentId);
+    if (!student) return res.json(fail('学员不存在或已归档/删除'));
+
+    const t = now();
+    const actor = getActor(req);
+    const result = db.transaction(() => {
+      // 幂等：已绑定过学员 → 返回既有结果，不重复写（也不重复记审计）
+      if (booking.student_id) {
+        return { studentId: booking.student_id, leadId: booking.lead_id || '', converted: true, alreadyConverted: true };
+      }
+
+      // 关联线索：优先用预约记录上的 lead_id；缺失时按手机号兜底匹配活跃线索
+      // （apply 阶段的线索创建是 best-effort，失败时不应阻断成交）
+      let lead = booking.lead_id
+        ? db.prepare('SELECT id, stage, status FROM leads WHERE id = ?').get(booking.lead_id)
+        : null;
+      if (!lead && booking.parent_phone) {
+        lead = db.prepare(
+          "SELECT id, stage, status FROM leads WHERE phone = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1"
+        ).get(booking.parent_phone);
+      }
+
+      // 回写预约：绑定学员 + 终态。status 取 'converted'（该列现取值 pending/assigned/rejected，
+      // 成交是独立于「安排/拒绝」的终态，语义上不与二者混用）。
+      db.prepare("UPDATE trial_bookings SET student_id = ?, status = 'converted', updated_at = ? WHERE id = ?")
+        .run(studentId, t, booking.id);
+
+      // 回写线索成交：stage 与 status 同时置位（全站统一判据，见 growth.js 的说明）
+      if (lead) {
+        db.prepare(`
+          UPDATE leads SET stage = 'deal', status = 'converted', student_id = ?,
+            converted_at = COALESCE(converted_at, ?), updated_at = ?
+          WHERE id = ?
+        `).run(studentId, t, t, lead.id);
+      }
+
+      recordAudit(db, {
+        entity: 'trial',
+        entityId: booking.id,
+        action: 'convert',
+        actorId: actor.id,
+        actorRole: actor.role,
+        before: { status: booking.status, student_id: booking.student_id || '', lead_id: booking.lead_id || '' },
+        after: { status: 'converted', studentId, leadId: lead ? lead.id : '' },
+      });
+
+      return { studentId, leadId: lead ? lead.id : '', converted: true };
+    })();
+
+    res.json(success(result));
+  } catch (err) {
+    console.error('[trial convert]', err);
+    res.status(500).json(safeFail('办理体验课成交失败'));
   }
 });
 

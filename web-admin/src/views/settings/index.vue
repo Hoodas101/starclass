@@ -6,18 +6,29 @@
     <div class="settings-layout">
       <!-- 左侧导航 -->
       <div class="settings-nav">
-        <div role="button" tabindex="0"
-          v-for="tab in visibleTabs"
-          :key="tab.key"
-          class="nav-item"
-          :class="{ active: activeTab === tab.key }"
-          @click="activeTab = tab.key" @keydown.enter="activeTab = tab.key" @keydown.space.prevent="activeTab = tab.key"
-        >
-          <el-icon :size="18">
-            <component :is="tab.icon" />
-          </el-icon>
-          <span>{{ tab.label }}</span>
+        <el-input
+          v-model="navKeyword"
+          placeholder="搜索设置项"
+          :prefix-icon="Search"
+          clearable
+          class="nav-search"
+        />
+        <div v-for="g in visibleGroups" :key="g.key" class="nav-group">
+          <div class="nav-group-title">{{ g.label }}</div>
+          <div role="button" tabindex="0"
+            v-for="tab in g.items"
+            :key="tab.key"
+            class="nav-item"
+            :class="{ active: activeTab === tab.key }"
+            @click="activeTab = tab.key" @keydown.enter="activeTab = tab.key" @keydown.space.prevent="activeTab = tab.key"
+          >
+            <el-icon :size="18">
+              <component :is="tab.icon" />
+            </el-icon>
+            <span>{{ tab.label }}</span>
+          </div>
         </div>
+        <div v-if="!visibleGroups.length" class="nav-empty">无匹配设置项</div>
       </div>
 
       <!-- 右侧内容 -->
@@ -139,6 +150,7 @@
                   </el-form-item>
                   <el-form-item label="通知内容">
                     <el-input v-model="rule.template" type="textarea" :rows="2" placeholder="通知内容模板" />
+                    <p class="form-hint" style="display: block; margin: 6px 0 0" v-pre>可用占位符：{{studentName}} {{courseName}} {{time}} 等业务变量；{{learner}} {{membership}} {{course}} {{instructor}} 等称呼占位符（发送时按机构称呼方案自动替换）。</p>
                   </el-form-item>
                 </el-form>
               </div>
@@ -215,14 +227,14 @@
             <el-form-item label="请假扣减方式">
               <el-radio-group v-model="leaveRules.deductMode">
                 <el-radio value="none">不扣减</el-radio>
-                <el-radio value="class">扣课时</el-radio>
+                <el-radio value="class">扣{{ $t('session') }}</el-radio>
                 <el-radio value="days">扣有效天数</el-radio>
               </el-radio-group>
-              <div class="form-hint">扣课时仅对按次计费会员生效；扣天数仅对时效制会员生效</div>
+              <div class="form-hint">扣{{ $t('session') }}仅对按次计费{{ $t('learner') }}生效；扣天数仅对时效制{{ $t('learner') }}生效</div>
             </el-form-item>
             <el-form-item v-if="leaveRules.deductMode !== 'none'" label="每次扣减数量">
               <el-input-number v-model="leaveRules.deductAmount" :min="1" :max="99" />
-              <span class="form-hint">{{ leaveRules.deductMode === 'class' ? '节课时' : '天有效期' }}（审批通过后自动扣减）</span>
+              <span class="form-hint">{{ leaveRules.deductMode === 'class' ? '节' + $t('session') : '天有效期' }}（审批通过后自动扣减）</span>
             </el-form-item>
             <el-form-item label="允许补课">
               <el-switch v-model="leaveRules.allowMakeup" />
@@ -606,7 +618,7 @@
               <h3 class="section-title">操作日志</h3>
               <p class="section-desc">
                 记录签到、报名、退款、薪资结算等关键操作的<strong>操作人、时间与变更前后</strong>。
-                发现课时或账目对不上时，可在此查到是谁在什么时候改的。仅管理员可见。
+                发现{{ $t('session') }}或账目对不上时，可在此查到是谁在什么时候改的。仅管理员可见。
               </p>
             </div>
           </div>
@@ -666,11 +678,13 @@
 
           <div style="margin-top: 12px; display: flex; justify-content: flex-end">
             <el-pagination
-              layout="total, prev, pager, next"
+              v-model:current-page="auditPage"
+              v-model:page-size="auditPageSize"
               :total="auditTotal"
-              :current-page="auditPage"
-              :page-size="auditPageSize"
+              :page-sizes="[10, 20, 50]"
+              layout="total, sizes, prev, pager, next, jumper"
               @current-change="onAuditPageChange"
+              @size-change="onAuditSizeChange"
             />
           </div>
         </div>
@@ -694,22 +708,55 @@ import PageHeader from '@/components/PageHeader.vue'
 // ============================================
 const activeTab = ref('org')
 
-const tabs = [
-  { key: 'org', label: '机构信息', icon: 'OfficeBuilding' },
-  { key: 'points', label: '积分规则', icon: 'Star' },
-  { key: 'notification', label: '推送规则', icon: 'Bell' },
-  { key: 'refund', label: '退费规则', icon: 'Money' },
-  { key: 'leave', label: '请假规则', icon: 'Calendar' },
-  { key: 'dashboard', label: '看板设置', icon: 'DataBoard' },
-  { key: 'terms', label: '称呼设置', icon: 'EditPen' },
-  { key: 'backup', label: '数据备份', icon: 'FolderOpened', adminOnly: true },
-  { key: 'audit', label: '操作日志', icon: 'Tickets', adminOnly: true }
+// 9 个二级分组此前平铺成一长串、无分隔无搜索，定位全靠记忆。
+// 这里按「基础信息 / 业务规则 / 显示与数据」三段分组，并提供关键词过滤。
+const tabGroups = [
+  {
+    key: 'basic',
+    label: '基础信息',
+    items: [
+      { key: 'org', label: '机构信息', icon: 'OfficeBuilding' },
+      { key: 'terms', label: '称呼设置', icon: 'EditPen' },
+    ],
+  },
+  {
+    key: 'rules',
+    label: '业务规则',
+    items: [
+      { key: 'points', label: '积分规则', icon: 'Star' },
+      { key: 'notification', label: '推送规则', icon: 'Bell' },
+      { key: 'refund', label: '退费规则', icon: 'Money' },
+      { key: 'leave', label: '请假规则', icon: 'Calendar' },
+    ],
+  },
+  {
+    key: 'data',
+    label: '显示与数据',
+    items: [
+      { key: 'dashboard', label: '看板设置', icon: 'DataBoard' },
+      { key: 'backup', label: '数据备份', icon: 'FolderOpened', adminOnly: true },
+      { key: 'audit', label: '操作日志', icon: 'Tickets', adminOnly: true },
+    ],
+  },
 ]
 
 // 数据备份等仅管理员可见（其操作接口均为 adminOnly，非管理员访问会 403）
 const userStore = useUserStore()
 const isAdmin = computed(() => userStore.userRole === 'admin')
-const visibleTabs = computed(() => tabs.filter((t) => !t.adminOnly || isAdmin.value))
+const navKeyword = ref('')
+// 组内同时按「管理员可见」与关键词过滤；整组为空则不渲染该分组标题
+const visibleGroups = computed(() => {
+  const kw = navKeyword.value.trim().toLowerCase()
+  return tabGroups
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((item) =>
+        (!item.adminOnly || isAdmin.value)
+        && (!kw || item.label.toLowerCase().includes(kw))
+      ),
+    }))
+    .filter((g) => g.items.length)
+})
 
 // ============================================
 // 数据看板模块开关（与首页看板共用 localStorage）
@@ -1207,6 +1254,8 @@ async function loadAuditLogs() {
 
 const onAuditSearch = () => { auditPage.value = 1; loadAuditLogs() }
 const onAuditPageChange = (p) => { auditPage.value = p; loadAuditLogs() }
+// 每页条数变化后回到第 1 页，避免停留在越界页码
+const onAuditSizeChange = () => { auditPage.value = 1; loadAuditLogs() }
 const onAuditReset = () => {
   auditFilter.entity = ''
   auditFilter.action = ''
@@ -1280,9 +1329,14 @@ const saveOrg = async () => {
 // ============================================
 // 积分规则
 // ============================================
+// 取词助手：设置页文案需跟随机构称呼方案（教培版/健身版）
+const term = (key) => settingsStore.t(key)
+
 const DEFAULT_POINTS_RULES = [
-  { name: '训练签到', enabled: true, points: 10, description: '参与活动训练由管理端/教练端点名签到，每次+10分' },
-  { name: '分享训练', enabled: true, points: 20, description: '分享训练至微信好友/群，每周1次+20分' },
+  // 默认文案接入称呼词典：此前硬编码「训练/教练/签到」，切到教培版后不跟随。
+  // 常量在 setup 阶段按当前称呼方案取值，仅作「无保存记录」时的默认值。
+  { name: `${term('course')}${term('checkin')}`, enabled: true, points: 10, description: `参与活动${term('course')}由管理端/${term('instructor')}端点名${term('checkin')}，每次+10分` },
+  { name: `分享${term('course')}`, enabled: true, points: 20, description: `分享${term('course')}至微信好友/群，每周1次+20分` },
   { name: '购买产品送积分', enabled: true, points: 120, description: '管理端销售登记收款时自动发放：体验10/月卡20/季卡50/年卡120' }
 ]
 const pointsRules = ref(DEFAULT_POINTS_RULES.map((r) => ({ ...r })))
@@ -1317,7 +1371,11 @@ const DEFAULT_NOTIFICATION_RULES = [
     enabled: true,
     trigger: '活动开始前',
     advanceTime: 2,
-    template: '您的孩子{{studentName}}今天有{{courseName}}活动，训练时间{{time}}，请准时到课。'
+    // 家长端实际收到的文案由后端 utils/reminders.js 渲染：
+    // 先替换 {{studentName}} 等业务变量，再把 {{conceptKey}} 占位符替换为机构称呼（applyTerms）。
+    // 因此称呼必须写成占位符（{{course}}/{{membership}}），不能写死「训练/会员卡」——
+    // 写死的话切换称呼方案后家长端不会跟随，前后台口径不一致。
+    template: '您的孩子{{studentName}}今天有{{courseName}}活动，{{course}}时间{{time}}，请准时到课。'
   },
   {
     name: '续期提醒',
@@ -1326,7 +1384,7 @@ const DEFAULT_NOTIFICATION_RULES = [
     trigger: '到期前15/7/1天',
     advanceTime: 0,
     reminderDays: [15, 7, 1],
-    template: '您的孩子{{studentName}}的会员卡即将到期，请及时续期。'
+    template: '您的孩子{{studentName}}的{{membership}}即将到期，请及时续期。'
   },
   {
     name: '缺席通知',
@@ -1496,6 +1554,30 @@ const loadSettings = async () => {
     color: var(--t-accent-text);
     font-weight: 600;
   }
+}
+
+// 分组标题 + 关键词过滤：9 个二级分组此前无分隔无搜索
+.nav-search {
+  margin-bottom: var(--t-spacing-sm);
+}
+
+.nav-group {
+  margin-bottom: var(--t-spacing-sm);
+}
+
+.nav-group-title {
+  font-size: var(--t-fs-xs);
+  font-weight: 600;
+  color: var(--t-text-3);
+  letter-spacing: 0.5px;
+  padding: 6px 16px 2px;
+}
+
+.nav-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: var(--t-fs-sm);
+  color: var(--t-text-3);
 }
 
 // 右侧内容

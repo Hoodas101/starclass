@@ -310,19 +310,35 @@ function openRecordDetail(row) {
 }
 async function cancelFromDetail() {
   if (!recordDetail.value) return
-  await handleCancel(recordDetail.value)
+  // 仅当接口真正成功才改本地状态并关闭弹窗：
+  // 旧实现无论用户点「取消」还是接口失败都会把记录标成「已取消」，制造假成功
+  const ok = await handleCancel(recordDetail.value)
+  if (!ok) return
   recordDetail.value.status = 'cancelled'
   recordDetailVisible.value = false
 }
 
+/**
+ * 取消补课安排。
+ * @returns {Promise<boolean>} 成功 true；用户取消确认框或接口失败均 false
+ */
 async function handleCancel(row) {
   try {
-    await ElMessageBox.confirm('确定取消该补课安排吗？', '提示', { type: 'warning', confirmButtonText: '确认取消', confirmButtonClass: 'el-button--danger' })
+    await ElMessageBox.confirm(
+      `确认取消「${row.student_name}」在 ${row.makeup_date || '所选日期'} 的补课安排？取消后该次补课需重新安排，家长端不再显示。`,
+      '取消补课',
+      { type: 'warning', confirmButtonText: '确认取消', cancelButtonText: '返回', confirmButtonClass: 'el-button--danger' }
+    )
+  } catch (e) {
+    return false // 用户主动取消确认框，不做任何状态变更
+  }
+  try {
     await cancelMakeup({ id: row.id })
     ElMessage.success('已取消')
     loadRecords()
+    return true
   } catch (e) {
-    if (e !== 'cancel') return
+    return false // 接口失败：拦截器已提示错误，不翻转本地状态
   }
 }
 

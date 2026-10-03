@@ -2,6 +2,12 @@
  * 星课 StarClass 后端 — Node.js + Express + SQLite
  * 私有化部署，本地运行
  */
+
+// D3 时区确定性：强制进程级时区为 Asia/Shanghai，无论裸机/容器/云函数，
+// Date 行为一致，消除「跨日统计错乱」。Docker 已通过环境变量设过，这里再兜底一次，
+// 使非容器部署（裸机 node server.js）同样确定。展示层统一走 utils/timezone.js。
+process.env.TZ = 'Asia/Shanghai';
+
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
@@ -12,6 +18,7 @@ const { verifyToken } = require('./utils');
 const { isForcePasswordChange } = require('./utils/security');
 const { generateClassReminders, generateLowClassReminders, generateRenewalReminders } = require('./utils/reminders');
 const { expireOverdueCards } = require('./utils/card-lifecycle');
+const { expirePoints } = require('./utils/points-expiry');
 const { startScheduledBackup } = require('./utils/backup');
 const queue = require('./utils/queue');
 const worker = require('./utils/worker');
@@ -44,6 +51,7 @@ const financeRoutes = require('./routes/finance');
 const attendanceRoutes = require('./routes/attendances');
 const trialRoutes = require('./routes/trial');
 const wxpayRoutes = require('./routes/wxpay');
+const physicalTestRoutes = require('./routes/physical-tests');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -255,6 +263,7 @@ app.use('/api/finance', financeRoutes);
 app.use('/api/attendances', attendanceRoutes);
 app.use('/api/trial', trialRoutes);
 app.use('/api/wxpay', wxpayRoutes);
+app.use('/api/physical-tests', physicalTestRoutes);
 
 // 顶层公开端点：机构称呼方案（小程序端 GET /api/terms，无需登录）
 app.get('/api/terms', settingsRoutes.termsHandler);
@@ -420,6 +429,44 @@ function runCardExpirySweep() {
 }
 runCardExpirySweep();
 setInterval(runCardExpirySweep, 24 * 3600 * 1000);
+
+// ============================================
+// 时效卡收入摊销结转（P1-A3）
+// 时效卡学员到课不产生 deduction_logs，扣课路径的「扣课即结转」够不到它们；
+// 若不在日任务里摊销，recognizedRevenue 永远缺时效卡部分、合同负债被系统性高估。
+// 本任务按「已过有效期比例 × 实付价」摊销结转收入（utils/revenue.js），与次数卡的
+// 到课结转（utils/attendance-revert.js / checkin.js）是两个独立台账、互不干扰 ——
+// 时间卡行的 schedule_id 固定为 `timecard:<cardId>`，不会被排期回滚误删。
+// 幂等：同卡只保留一行、delta ≤ 0 不写，重复调度与多实例安全。
+// 注意：ENABLE_JOB_WORKER=true 时 worker 启动流程也会调一次 —— 属冗余但幂等，可接受。
+// 该任务必须独立于 worker 调度：默认部署（不设 ENABLE_JOB_WORKER）下 worker 不启动，
+// 若不在此处挂日任务，时效卡收入将永远不摊销，P1-A3 的修复等于没生效。
+// ============================================
+function runRevenueRecognitionSweep() {
+  try {
+    const { recognized, amount } = worker.runDailyMaintenance();
+    if (recognized > 0) console.log(`[Revenue] 时效卡摊销结转 ${recognized} 张，本次新增确认收入 ${amount} 元`);
+  } catch (err) {
+    console.error('[Revenue] 时效卡摊销结转失败:', err.message);
+  }
+}
+runRevenueRecognitionSweep();                                   // 启动时先跑一次
+setInterval(runRevenueRecognitionSweep, 24 * 3600 * 1000);      // 此后每日一次
+
+// ============================================
+// 积分滚动过期（D1）
+// 获赠积分约 24 个月后到期，日调度将到期流水从余额扣减。幂等、多实例安全。
+// ============================================
+function runPointsExpirySweep() {
+  try {
+    const expired = expirePoints(db, Date.now());
+    if (expired > 0) console.log(`[PointsExpiry] 已过期回收积分 ${expired}`);
+  } catch (err) {
+    console.error('[PointsExpiry] 过期回收失败:', err.message);
+  }
+}
+runPointsExpirySweep();
+setInterval(runPointsExpirySweep, 24 * 3600 * 1000);
 
 scheduleReminder('renewal_reminder', 30 * 1000, 24 * 3600 * 1000);
 scheduleReminder('low_class_reminder', 45 * 1000, 24 * 3600 * 1000);

@@ -215,11 +215,44 @@ router.get('/data-modules', (req, res) => {
  * Query: modules=students,orders（可选，缺省导出全部）
  * 返回 application/json 并带 Content-Disposition 触发下载（仅管理员）
  */
+// D5 导出互斥锁：高开销导出串行化，防止并发拖垮服务。
+// 进程内单槽锁 + 30s 自动失效：即使未显式释放（崩溃/异常），超时后自动可再获取。
+const _exportLockUntil = { ts: 0 };
+const EXPORT_LOCK_MS = 30 * 1000;
+function tryAcquireExportLock() {
+  const nowTs = Date.now();
+  if (_exportLockUntil.ts > nowTs) return false;
+  _exportLockUntil.ts = nowTs + EXPORT_LOCK_MS;
+  return true;
+}
+function releaseExportLock() {
+  if (_exportLockUntil.ts <= Date.now()) _exportLockUntil.ts = 0;
+}
+
 router.get('/export', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json({ code: 403, data: null, message: '仅管理员可操作' });
-    const from = req.query.from ? Number(req.query.from) : null;
-    const to = req.query.to ? Number(req.query.to) : null;
+    // D5：同一时刻仅允许一个导出在跑，避免高开销导出并发拖垮服务。
+    if (!tryAcquireExportLock()) {
+      return res.status(429).json({ code: 429, data: null, message: '导出进行中，请稍后再试' });
+    }
+    try {
+    // 参数校验前置：utils/dataio.exportData 对缺失/非法的 from、to 会抛错（无范围的全库导出
+    // 已被刻意禁用），原先直接被 catch 成 500 —— 参数错误是客户端问题，应回 400 并说明必填。
+    // 注意：带参时的正常行为（导出内容、文件名、Content-Type）完全不变。
+    const fromRaw = req.query.from;
+    const toRaw = req.query.to;
+    if (fromRaw === undefined || fromRaw === '' || toRaw === undefined || toRaw === '') {
+      return res.status(400).json({ code: 400, data: null, message: '缺少必填参数 from / to（导出时间范围，epoch 毫秒）' });
+    }
+    const from = Number(fromRaw);
+    const to = Number(toRaw);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) {
+      return res.status(400).json({ code: 400, data: null, message: 'from / to 必须为数字（epoch 毫秒）' });
+    }
+    if (from > to) {
+      return res.status(400).json({ code: 400, data: null, message: 'from 不能晚于 to' });
+    }
     const payload = exportData(req.query.modules, { dateFrom: from, dateTo: to });
     const json = JSON.stringify(payload);
     const ts = new Date();
@@ -228,6 +261,9 @@ router.get('/export', (req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(json);
+    } finally {
+      releaseExportLock();
+    }
   } catch (err) {
     console.error('[export]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail('导出失败'));

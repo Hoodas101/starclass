@@ -49,7 +49,22 @@
           <el-table-column label="手机号" min-width="130">
             <template #default="{ row }">{{ row.phone || '-' }}</template>
           </el-table-column>
-          <el-table-column v-if="showCol('classes')" label="本月课次" min-width="100" align="right">
+          <el-table-column v-if="showCol('classes')" label="本月排课" min-width="104" align="right">
+            <template #header>
+              <el-tooltip content="已排课节数：本月被排入、且未取消的课次（含未开始/未签到）。" placement="top">
+                <span class="th-tip">本月排课</span>
+              </el-tooltip>
+            </template>
+            <template #default="{ row }">
+              <span class="num-strong">{{ statsMonthClasses[row.teacherId] || 0 }}</span> 节
+            </template>
+          </el-table-column>
+          <el-table-column v-if="showCol('classes')" label="计薪课次" min-width="104" align="right">
+            <template #header>
+              <el-tooltip content="计薪课次：按签到口径计入本月课酬的课次（无人签到不计薪），与「本月排课」口径不同。" placement="top">
+                <span class="th-tip">计薪课次</span>
+              </el-tooltip>
+            </template>
             <template #default="{ row }">
               <span class="num-strong">{{ row.classes }}</span> 节
             </template>
@@ -124,7 +139,12 @@
       </div>
 
       <!-- 各周期概览 -->
-      <div class="section-title">各周期概览</div>
+      <div class="section-title">
+        各周期概览
+        <el-tooltip content="「节」为已排课节数（含未开始/未签到、未取消）；与上方「计薪课次」口径不同，后者仅统计已签到。" placement="top">
+          <el-icon class="title-tip"><QuestionFilled /></el-icon>
+        </el-tooltip>
+      </div>
       <div class="card table-container">
         <el-table :data="rows" v-loading="loading" size="small">
           <el-table-column :label="$t('instructor')" min-width="100">
@@ -223,17 +243,6 @@
           <el-button @click="detailVisible = false">关闭</el-button>
         </template>
       </el-drawer>
-
-      <!-- 字段设置 -->
-      <ColumnSettingsDialog
-        ref="colDialogRef"
-        :title="$t('instructor') + '课时字段设置'"
-        :columns="coachColumnDefs"
-        v-model:settings="colSettings"
-        :defaults="DEFAULT_COLUMN_SETTINGS"
-        @save="saveColSettings"
-        no-button
-      />
     </template>
 
     <!-- 教练本人 -->
@@ -269,7 +278,7 @@
     <ExportDialog
       ref="exportDialogRef"
       title="导出数据"
-      description="选择时间范围后确认导出；未选择时默认导出本月。"
+      :description="exportDescription"
       default-shortcut="month"
       @confirm="doExport"
     />
@@ -280,7 +289,7 @@ const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
 import { ref, computed, onMounted } from 'vue'
-import { Download, ArrowRight, Money } from '@element-plus/icons-vue'
+import { Download, ArrowRight, Money, QuestionFilled } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { useUserStore } from '@/store/user'
 import { useSettingsStore } from '@/store/settings'
@@ -302,7 +311,6 @@ import ExportDialog from '@/components/ExportDialog.vue'
 import StatusDot from '@/components/StatusDot.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import PayRuleEditor from '@/components/PayRuleEditor.vue'
-import ColumnSettingsDialog from '@/components/ColumnSettingsDialog.vue'
 
 const userStore = useUserStore()
 const settingsStore = useSettingsStore()
@@ -345,6 +353,19 @@ const effectiveRange = (range) => (range && range.length === 2
   : monthRange())
 
 const totalAmount = computed(() => settlement.value.reduce((s, r) => s + (r.amount || 0), 0))
+
+// 「本月排课」取 coach-stats 的 scheduledClasses（排了且未取消，含未来/未签到）；
+// 「计薪课次」取 payroll 的 classes（有考勤、且不超过今天的实际授课）。
+// 二者是**两个不同的口径**，此前同一个字段被当作两种含义使用，导致同屏出现
+// 两个都叫「节」却不等的数字（实测同一教练 1 vs 5）而管理员无从解释。
+// 后端现已分别命名为 scheduledClasses / classes，此处各自取对应字段并分别标注口径。
+const statsMonthClasses = computed(() => {
+  const map = {}
+  // 兼容后端尚未返回 scheduledClasses 的旧版本：回退到 classes 而非显示 0，
+  // 避免升级瞬间整列数字归零被误读为「本月没排课」。
+  for (const c of rows.value) map[c.teacherId] = c.month?.scheduledClasses ?? c.month?.classes ?? 0
+  return map
+})
 
 const error = ref('')
 
@@ -517,28 +538,14 @@ const openDetailDrawer = async (row) => {
   }
 }
 
-// ============ 字段设置（本地持久化） ============
-const coachColumnDefs = [
-  { key: 'coach', label: t('instructor') },
-  { key: 'classes', label: '本月课次' },
-  { key: 'students', label: '本月人次' },
-  { key: 'amount', label: '本月应发' },
-  { key: 'fee', label: '课时费/节' },
-]
-const DEFAULT_COLUMN_SETTINGS = {
-  coach: true, classes: true, students: true, amount: true, fee: true,
-}
+// ============ 字段显示偏好（本地持久化） ============
+// 「字段设置」弹窗此前无任何打开入口（no-button 且 ref 从未 open），属死功能已删除；
+// 仅保留已保存的显示偏好读取，使历史配置继续生效。
 // localStorage 可能被旧版本写入损坏数据：解析失败时回退为空对象
 let savedCols = {}
 try { savedCols = JSON.parse(localStorage.getItem('edu_coach_cols') || '{}') } catch (e) { savedCols = {} }
 const colSettings = ref(savedCols)
 const showCol = (key) => colSettings.value[key] !== false
-const colDialogRef = ref(null)
-const saveColSettings = (settings) => {
-  colSettings.value = settings
-  localStorage.setItem('edu_coach_cols', JSON.stringify(settings))
-  ElMessage.success('字段设置已保存')
-}
 
 // ============ 导出 ============
 const buildRows = (list) => {
@@ -554,6 +561,21 @@ const buildRows = (list) => {
     r.lessonAmount || 0,
   ])
 }
+
+// 导出弹窗的范围口径必须与真实行为一致：
+// · 课时明细（detail）按所选时间范围过滤；
+// · 薪资结算（settlement）与单人明细（one）由后端按「月份」返回，时间范围不生效。
+// 此前弹窗统一写「选择时间范围后确认导出」，用户选了范围却没生效，属描述与行为不符。
+const exportDescription = computed(() => {
+  if (exportAction.value === 'settlement') {
+    return `导出当前所选月份（${monthLabel.value}）的薪资结算表；结算按整月生成，此处时间范围不生效。`
+  }
+  if (exportAction.value === 'one') {
+    const name = detailTarget.value?.name || ''
+    return `导出${name ? `「${name}」` : ''}在 ${monthLabel.value} 的课时明细；此处时间范围不生效。`
+  }
+  return '选择时间范围后确认导出；未选择时默认导出本月课时明细。'
+})
 
 const openExport = (action) => {
   exportAction.value = action
@@ -620,6 +642,19 @@ onMounted(() => {
 
 <style lang="scss" scoped>
 .coach-name { display: block; font-weight: 600; color: var(--t-text-1); }
+
+/* 表头口径提示：带虚线下划线的可悬浮说明，提示「节」的两套口径差异 */
+.th-tip {
+  border-bottom: 1px dashed var(--t-text-3);
+  cursor: help;
+}
+.title-tip {
+  font-size: var(--t-fs-sm);
+  color: var(--t-text-3);
+  vertical-align: middle;
+  margin-left: 6px;
+  cursor: help;
+}
 
 .table-container {
   margin-bottom: var(--t-spacing-lg);

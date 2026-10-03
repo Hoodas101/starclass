@@ -5,9 +5,11 @@
     <!-- 顶部操作栏 -->
     <div class="toolbar">
       <div class="toolbar-left">
+        <!-- aria-label：搜索框此前只有 placeholder，读屏下是「无名输入框」 -->
         <el-input
           v-model="searchKeyword"
           placeholder="搜索成员姓名/手机号"
+          aria-label="搜索成员姓名或手机号"
           :prefix-icon="Search"
           clearable
           style="width: 220px"
@@ -16,8 +18,14 @@
         />
       </div>
       <div class="toolbar-right">
+        <!-- 表格密度切换：1366px 下 14 列会被挤到表头截断，紧凑模式可多容纳内容 -->
+        <el-radio-group v-model="tableSize" size="small" class="density-switch" aria-label="表格密度">
+          <el-radio-button value="small">紧凑</el-radio-button>
+          <el-radio-button value="default">标准</el-radio-button>
+        </el-radio-group>
         <el-dropdown trigger="click">
-          <el-button :icon="ArrowDown" circle plain />
+          <!-- 纯图标圆钮，读屏下原本无任何名称 -->
+          <el-button :icon="ArrowDown" circle plain aria-label="更多操作（字段设置 / 导出 / 导入）" />
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item @click="colDialogRef?.open()">
@@ -72,7 +80,7 @@
       <el-table v-else
         v-loading="loading"
         :data="filteredStudents"
-        size="small"
+        :size="tableSize"
         row-key="id"
         empty-text="暂无成员"
         @row-click="openDetailDrawer"
@@ -80,7 +88,7 @@
         @selection-change="selectedRows = $event"
         row-class-name="clickable-row"
       >
-        <el-table-column v-if="selectMode" type="selection" width="40" />
+        <el-table-column v-if="selectMode" type="selection" width="40" fixed="left" />
         <el-table-column
           v-for="col in visibleCols"
           :key="col.key"
@@ -88,10 +96,17 @@
           :width="col.width"
           :min-width="col.minWidth"
           :align="col.align"
+          :fixed="col.fixed"
           :column-key="col.key"
           :filters="col.key === 'project' ? projectFilters : (col.key === 'status' ? STATUS_FILTERS : undefined)"
           :show-overflow-tooltip="col.tooltip"
         >
+          <!-- 表头全文兜底：Element Plus 的 show-overflow-tooltip 只作用于单元格
+               （表头渲染路径里没有 tooltip，已核对 table-column/render-helper.mjs），
+               所以用 header 插槽挂原生 title，鼠标悬停即可看到被 ellipsis 截断的完整列名。 -->
+          <template #header>
+            <span class="col-header" :title="col.label">{{ col.label }}</span>
+          </template>
           <template #default="{ row, $index }">
             <template v-if="col.key === 'seq'">{{ $index + 1 }}</template>
             <div v-else-if="col.key === 'info'" class="student-cell">
@@ -154,12 +169,15 @@
 
       <!-- 分页 -->
       <div class="pagination-wrap">
+        <!-- layout 补 sizes + jumper：此前只声明了 :page-sizes 却没渲染 sizes，
+             学员涨到 500 人后每页被锁死在 10 条，无法切换每页条数。
+             pageSize 变化仍走 onSearch（内部已把 currentPage 重置为 1）。 -->
         <el-pagination
           v-model:current-page="currentPage"
           v-model:page-size="pageSize"
           :total="totalStudents"
           :page-sizes="[10, 20, 50]"
-          layout="total, prev, pager, next"
+          layout="total, sizes, prev, pager, next, jumper"
           background
           @current-change="onPageChange"
           @size-change="onSearch"
@@ -609,7 +627,12 @@ const loadStats = async () => {
 
 const studentColumnDefs = [
   { key: 'seq', label: '序号', minWidth: 56, align: 'center' },
-  { key: 'info', label: '姓名', minWidth: 100, tooltip: true },
+  // fixed:'left' 只加在最左侧的「姓名」上。
+  // 需求原本希望固定「当前项目/剩余课时/到期日」，但 Element Plus 的固定列会被
+  // 抽到独立的左固定层、按 DOM 顺序排在非固定列之前 —— 固定中间列会直接改变列序
+  // （变成 当前项目|剩余课时|到期日|序号|姓名…），属于比截断更严重的回归。
+  // 因此只固定视觉锚点「姓名」，横向滚动时始终能定位到是哪一行。
+  { key: 'info', label: '姓名', minWidth: 100, tooltip: true, fixed: 'left' },
   { key: 'memberNo', label: t('learner') + '编号', minWidth: 90, align: 'left' },
   { key: 'phone', label: '联系方式', minWidth: 110, tooltip: true },
   { key: 'age', label: '年龄', minWidth: 56, align: 'right' },
@@ -639,10 +662,14 @@ const STATUS_FILTERS = [
 const projectFilters = computed(() => cardTypeOptions.value
   .filter((c) => c.is_active !== 0)
   .map((c) => ({ text: c.name, value: c.name })))
+// 默认显示列。1366px 下 14 列会把表头挤到截断，因此把低频列默认折叠进「字段设置」
+// （用户随时可在「字段设置」里打开，不影响已有自定义配置）：
+//   编号(memberNo) / 累计消费(spent) / 新购日期(latestPurchase) / 开始日期(startDate) / 出生日期(birthday)
+// 注：审计报告提到的「年级」在本表中并不存在对应列（年级只出现在新建成员表单里），故无从折叠。
 const DEFAULT_COLUMN_SETTINGS = {
-  seq: true, info: true, memberNo: true, phone: true, age: true, level: true, project: true, remaining: true,
+  seq: true, info: true, memberNo: false, phone: true, age: true, level: true, project: true, remaining: true,
   expires: true, startDate: false, latestPurchase: false, purchaseCount: true,
-  spent: true, join: true, lastActivity: true, status: true, birthday: false,
+  spent: false, join: true, lastActivity: true, status: true, birthday: false,
 }
 const columnSettings = ref({ ...DEFAULT_COLUMN_SETTINGS })
 const colDialogRef = ref(null)
@@ -727,6 +754,8 @@ const currentPage = ref(1)
 const pageSize = ref(10)
 const totalStudents = ref(0)
 const loading = ref(false)
+// 表格密度：small=紧凑（默认，1366px 下可多容纳一列左右），default=标准
+const tableSize = ref('small')
 
 const statusTypeMap = {
   active: 'success',
@@ -1137,8 +1166,13 @@ const toggleArchive = async (student) => {
 const batchArchive = async (archive) => {
   if (!selectedRows.value.length) return
   try {
+    // 危险操作确认文案统一含具体后果与影响范围：
+    // 归档类操作明确「影响 N 名成员 + 从列表隐藏 + 数据保留可随时恢复」，
+    // 与单条归档的文案口径一致（此前只说了「从列表隐藏」，没说是否可逆）。
     await ElMessageBox.confirm(
-      archive ? `确定归档选中的 ${selectedRows.value.length} 名成员吗？归档后将从列表隐藏。` : `确定恢复选中的 ${selectedRows.value.length} 名成员吗？`,
+      archive
+        ? `将归档选中的 ${selectedRows.value.length} 名成员，归档后他们从列表隐藏（数据保留，可随时恢复）。确定继续吗？`
+        : `将恢复选中的 ${selectedRows.value.length} 名成员，恢复后他们重新出现在列表中。确定继续吗？`,
       archive ? '批量归档' : '批量恢复',
       { confirmButtonText: archive ? '归档' : '恢复', type: archive ? 'warning' : 'success', confirmButtonClass: archive ? 'el-button--danger' : '' }
     )
@@ -1241,6 +1275,22 @@ onMounted(() => {
 </script>
 
 <style lang="scss" scoped>
+// 表头全文兜底：列宽不足时列名会被 ellipsis 截断，
+// 这里让截断稳定生效，并靠 header 插槽上的原生 title 提供全文提示。
+.col-header {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// 密度切换：与工具栏按钮同高，不抢视觉
+.density-switch {
+  :deep(.el-radio-button__inner) {
+    padding: 7px 12px;
+  }
+}
+
 .last-activity {
   color: var(--t-text-2);
   font-variant-numeric: tabular-nums;

@@ -30,4 +30,56 @@ function resolveConsumeClasses(scheduleId) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
 
-module.exports = { resolveConsumeClasses };
+/**
+ * 为一次扣课挑选「该扣哪张次数卡」。
+ *
+ * 背景：扣课选卡此前只 `ORDER BY expires_at ASC LIMIT 1`，完全不看卡种与课程的匹配
+ * 关系 —— 卡种上的 `course_scope`（卡适用课程范围）成了死字段，于是「1v1 私教次卡」
+ * 会被团课消耗，机构无法按课程隔离课时包。
+ *
+ * 课程范围判据（course_scope 目前是**自由文本**，库里实际值形如「全活动通用」「」）：
+ *   · 为空 / 含「通用」/ 含「全部」        → 匹配任意课程；
+ *   · 否则文本包含本场次的 course_id 或 course_name → 视为匹配。
+ * 未来应把 course_scope 结构化为「课程 id 多选」，届时只需替换本函数里的
+ * `scopeMatches` 判据，其余调用方无感。
+ *
+ * 排序：先「课程范围匹配」的卡，再按 expires_at ASC（优先扣即将过期的）。
+ * 兜底：若没有任何卡匹配课程范围，回退到「任意合格卡中 expires_at ASC 第一张」——
+ * 数据不规范（自由文本没写对）时也**绝不能拒绝扣课**，这是稳定性底线。
+ *
+ * @param {string} studentId
+ * @param {string} scheduleId
+ * @param {number} t 当前时间戳（毫秒）
+ * @param {number} per 本次要扣的课时数（remaining_classes >= per 才合格）
+ * @returns {object|null} member_cards 行（含 course_scope 便于调用方留痕），无合格卡时 null
+ */
+function pickCardForDeduction(studentId, scheduleId, t, per) {
+  // LEFT JOIN 卡种取 course_scope：member_cards 上只有 card_type_id，范围策略存在卡种（membership_cards）。
+  // mc.* 展开保证调用方拿到的仍是完整的 member_cards 行（order_id / card_type_name 等结转所需字段）。
+  const cards = db.prepare(`
+    SELECT mc.*, mct.course_scope AS course_scope
+    FROM member_cards mc
+    LEFT JOIN membership_cards mct ON mct.id = mc.card_type_id
+    WHERE mc.student_id = ? AND mc.status = 'active' AND mc.billing_mode = 'count'
+      AND mc.expires_at > ? AND mc.remaining_classes >= ?
+    ORDER BY mc.expires_at ASC
+  `).all(studentId, t, per);
+  if (!cards.length) return null;
+
+  const sch = db.prepare('SELECT course_id, course_name FROM schedules WHERE id = ?').get(scheduleId);
+  const scopeMatches = (card) => {
+    const scope = String(card.course_scope || '').trim();
+    if (!scope) return true;                                  // 空 = 不限
+    if (scope.includes('通用') || scope.includes('全部')) return true; // 自由文本的「通用」约定
+    if (sch && sch.course_id && scope.includes(sch.course_id)) return true;
+    if (sch && sch.course_name && scope.includes(sch.course_name)) return true;
+    return false;
+  };
+
+  const matched = cards.filter(scopeMatches);
+  // 已按 expires_at ASC，matched[0] 即「匹配范围内最先到期的卡」
+  if (matched.length) return matched[0];
+  return cards[0]; // 兜底：没有任何卡命中范围时不拒绝扣课
+}
+
+module.exports = { resolveConsumeClasses, pickCardForDeduction };

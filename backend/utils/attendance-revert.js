@@ -80,8 +80,15 @@ function revertRevenueRecognition(scheduleId, studentId) {
  * 每次「签到 → 改缺席/清除」都会让卡内课时凭空增减。
  * 迁移前的历史行 count 为 NULL，回退到旧的推导方式，行为与改动前一致。
  *
+ * 死卡保护（P3 回滚对称性）：仅当目标卡 `status = 'active'` 时才把课时加回。
+ * 若卡已被退款（refunded）/ 取消（cancelled）/ 过期（expired）等，课时资产已随卡
+ * 结算或失效，再加回就是给一张**已经不存在权益的死卡**虚增课时，账实不符且无法核销。
+ * 此时仍删除 deduction_logs 行 —— 该行代表「这次扣课已被撤销」，必须清掉才能保持
+ * 回滚的幂等（否则重复回滚会反复命中同一行）。取舍：宁可不退也不退到死卡；
+ * 未退的这部分由机构在退费结算时一并处理（退费金额按卡内课时计算，与流水无关）。
+ *
  * @param {{scheduleId:string, studentId:string, t?:number}} p
- * @returns {number} 实际退回的课时数（无扣课记录时为 0）
+ * @returns {number} 实际退回的课时数（无扣课记录、或卡非 active 时为 0）
  */
 function revertDeduction({ scheduleId, studentId, t }) {
   const ded = db.prepare(
@@ -89,6 +96,12 @@ function revertDeduction({ scheduleId, studentId, t }) {
   ).get(scheduleId, studentId);
   if (!ded) return 0;
   const back = ded.count != null ? ded.count : resolveConsumeClasses(scheduleId);
+  const card = db.prepare('SELECT id, status FROM member_cards WHERE id = ?').get(ded.card_id);
+  // 卡不存在（已删除）或非 active：不回加，只清流水（见上方「死卡保护」注释）
+  if (!card || card.status !== 'active') {
+    db.prepare('DELETE FROM deduction_logs WHERE id = ?').run(ded.id);
+    return 0;
+  }
   db.prepare(`
     UPDATE member_cards SET remaining_classes = remaining_classes + ?,
       used_classes = MAX(0, used_classes - ?), updated_at = ?
@@ -114,7 +127,7 @@ function revertDeduction({ scheduleId, studentId, t }) {
  * 必须由调用方置于事务内。
  *
  * @param {{scheduleId:string, actorId:string, actorRole:string, reason:string}} p
- * @returns {{reverted:number, revertedClasses:number, revertedPoints:number, cancelledMakeups:number}}
+ * @returns {{reverted:number, revertedClasses:number, revertedPoints:number, cancelledMakeups:number, revertedManual:number}}
  */
 function revertScheduleAttendances({ scheduleId, actorId, actorRole, reason }) {
   const rows = db.prepare('SELECT * FROM attendances WHERE schedule_id = ?').all(scheduleId);
@@ -152,6 +165,23 @@ function revertScheduleAttendances({ scheduleId, actorId, actorRole, reason }) {
     });
   }
 
+  // P1-A5：手工扣课（POST /membership/deduct）只写 deduction_logs、**不写 attendance 行**，
+  // 因此上面的考勤循环根本扫不到它 —— 取消排期后学员的课时资产永久丢失（账实不符）。
+  //
+  // 处理顺序是「先 attendances 分支、后统一扫剩余流水」，天然避免重复回滚：
+  // present/late 分支里的 revertDeduction 已经 DELETE 掉对应 deduction_logs 行，
+  // 循环结束后**本场次剩余的** deduction_logs 就必然是「没有考勤行 / 考勤行未被处理」的
+  // 手工扣课那些（含 absent 行——absent 不扣课，其扣课流水只可能来自手工扣课）。
+  // 逐条 revertDeduction 回滚课时，并同步冲销该学员的课时结转（schedule_id 为真排期 id，
+  // 不会误伤时效卡摊销行 'timecard:<cardId>'）。
+  const leftovers = db.prepare('SELECT * FROM deduction_logs WHERE schedule_id = ?').all(scheduleId);
+  let revertedManual = 0;
+  for (const ded of leftovers) {
+    revertedClasses += revertDeduction({ scheduleId, studentId: ded.student_id, t });
+    revertRevenueRecognition(scheduleId, ded.student_id);
+    revertedManual++;
+  }
+
   // 取消排期必须连带作废「指向本场次」的待补课记录。
   // 不回退的后果：那条 makeup_records 仍停在 pending，而 routes/makeup.js 的
   // GET /eligible 以 `status != 'cancelled'` 判定「该缺席是否已安排过补课」——
@@ -168,7 +198,7 @@ function revertScheduleAttendances({ scheduleId, actorId, actorRole, reason }) {
     WHERE makeup_schedule_id = ? AND status = 'pending'
   `).run(t, scheduleId).changes;
 
-  return { reverted, revertedClasses, revertedPoints, cancelledMakeups };
+  return { reverted, revertedClasses, revertedPoints, cancelledMakeups, revertedManual };
 }
 
 module.exports = {

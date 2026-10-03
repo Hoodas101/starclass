@@ -34,7 +34,9 @@ function unitTests() {
   const r3 = normalizeRule({ type: 'per_head', perHeadRate: 5 });
   ok('per_head：12 人 = 60 元', calcLessonPay(r3, 12) === 60);
   ok('per_head：0 人 = 0 元', calcLessonPay(r3, 0) === 0);
-  ok('per_head 摘要', ruleSummary(r3) === '5 元/人');
+  // 断言改为包含匹配：ruleSummary 会追加口径注记（请假人头是否计入、consume_classes 是否乘），
+  // 全等断言会与产品意图冲突（「口径必须写清楚」正是本次修复目标）。
+  ok('per_head 摘要', ruleSummary(r3).includes('5 元/人'));
   ok('per_head 说明', calcText(r3, 12) === '5 元/人 × 12 人');
 
   const r4 = normalizeRule({ type: 'hybrid', baseRate: 60, freeHeadCount: 6, extraPerHead: 5 });
@@ -110,7 +112,9 @@ async function apiTests() {
     method: 'PUT',
     body: JSON.stringify({ payRule: { type: 'per_head', perHeadRate: 6 } }),
   });
-  ok('保存 per_head 规则', perHead.body.code === 0 && perHead.body.data.summary === '6 元/人');
+  // 断言改为包含匹配：ruleSummary 会追加口径注记（请假人头是否计入、consume_classes 是否乘），
+  // 全等断言会与产品意图冲突（「口径必须写清楚」正是本次修复目标）。
+  ok('保存 per_head 规则', perHead.body.code === 0 && perHead.body.data.summary.includes('6 元/人'));
 
   const hybrid = await j(`/payroll/coach/${teacher.teacherId}/rule`, {
     method: 'PUT',

@@ -190,3 +190,45 @@ export const deleteBackup = (filename) => request.delete(`/settings/backups/${fi
 export const getDataModules = () => request.get('/settings/data-modules')
 export const exportData = (params) => request.get('/settings/export', { params, responseType: 'blob' })
 export const importData = (payload, params) => request.post('/settings/import', payload, { params })
+
+// ============================================================================
+// 2026-10 审计修复新增封装
+// 说明：本区段由「审计修复」统一维护。新增接口一律追加在此处，
+//       不要散落到上方既有分组里，便于日后回溯「哪些是修复引入的」。
+// ============================================================================
+
+// 排课录名（P0-1）：管理员代录名 / 代取消报名
+export const enrollScheduleStudent = (id, data) => request.post(`/schedules/${id}/enroll`, data)
+export const unenrollScheduleStudent = (id, data) => request.delete(`/schedules/${id}/enroll`, { data })
+
+// 体验课转正式学员（P0-2）：一步完成「建学员 → 线索成交 → 返回可开卡信息」
+export const convertTrial = (id, data) => request.post(`/trial/${id}/convert`, data)
+export const getTrialDetail = (id) => request.get(`/trial/${id}`)
+
+// 个人资料（P1-D3）：后端 updateProfile 已完整支持改手机号，前端此前零调用
+export const updateProfile = (data) => request.post('/auth/updateProfile', data)
+
+// 体测记录（P1-D4）：学员训练效果沉淀 + 趋势
+export const getPhysicalTests = (params) => request.get('/physical-tests', { params })
+export const addPhysicalTest = (data) => request.post('/physical-tests', data)
+export const updatePhysicalTest = (id, data) => request.put(`/physical-tests/${id}`, data)
+export const deletePhysicalTest = (id) => request.delete(`/physical-tests/${id}`)
+
+// 场地管理（增量 P1-6）：此前只有 GET，场地是只读孤儿
+export const addClassroom = (data) => request.post('/admin/classrooms', data)
+export const updateClassroom = (id, data) => request.put(`/admin/classrooms/${id}`, data)
+export const deleteClassroom = (id, data) => request.delete(`/admin/classrooms/${id}`, { data })
+
+// 周期排课规则（增量 P1-7）：此前只增不减，无法编辑/删除
+export const getScheduleRules = (params) => request.get('/schedules/rules', { params })
+export const updateScheduleRule = (id, data) => request.put(`/schedules/rules/${id}`, data)
+export const deleteScheduleRule = (id, data) => request.delete(`/schedules/rules/${id}`, { data })
+
+// 会员卡转让（增量 P1-8）：卡种已在售 transferable=1，转让能力此前完全缺失
+export const transferCard = (cardId, data) => request.post(`/membership/card/${cardId}/transfer`, data)
+
+// 请假 → 批量补课（P1-D7）：批准请假后一键为本批学员安排补课
+export const batchArrangeMakeup = (data) => request.post('/makeup/batch-assign', data)
+
+// 会员卡明细（到店限次展示 / 卡列表）
+export const getMemberCards = (params) => request.get('/membership/cards', { params })

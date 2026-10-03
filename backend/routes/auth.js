@@ -566,8 +566,11 @@ router.post('/bindStudent', (req, res) => {
       if (studentId && targetAtt) throttleFail(bindTargetAttempts, studentId, targetAtt);
     };
 
-    // 每位家长最多绑定 3 位成员
-    const bindCount = db.prepare('SELECT COUNT(*) as count FROM parent_bindings WHERE parent_openid = ?').get(openid).count;
+    // 每位家长最多绑定 3 位成员。按**不同学员数**计数（COUNT(DISTINCT student_id)）：
+    // 此前用 COUNT(*) 计总行数，同一学员的重复绑定会白白挤占名额（3 个名额可能全绑同一个孩子）。
+    // 与 migration 025 的唯一索引 idx_parent_bindings_openid_student 配合，重复绑定已从源头阻断，
+    // 此处再按去重口径计数，形成纵深防御。
+    const bindCount = db.prepare('SELECT COUNT(DISTINCT student_id) as count FROM parent_bindings WHERE parent_openid = ?').get(openid).count;
     if (bindCount >= 3) return res.status(400).json(safeFail('最多只能绑定 3 位成员'));
 
     // 按姓名匹配；重名时需用学员编号（memberNo）进一步区分，避免误绑陌生人孩子
@@ -596,10 +599,19 @@ router.post('/bindStudent', (req, res) => {
     const alreadyBound = db.prepare(`SELECT 1 FROM parent_bindings WHERE student_id = ? AND parent_openid = ?`).get(student.id, openid);
     if (alreadyBound) return res.status(400).json(safeFail('已绑定该成员'));
 
-    db.prepare(`
-      INSERT INTO parent_bindings (student_id, student_name, parent_name, parent_openid, parent_phone, relation, is_main, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-    `).run(student.id, student.name, parentName || '家长', openid, existingBinding.parent_phone, relation, now());
+    try {
+      db.prepare(`
+        INSERT INTO parent_bindings (student_id, student_name, parent_name, parent_openid, parent_phone, relation, is_main, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+      `).run(student.id, student.name, parentName || '家长', openid, existingBinding.parent_phone, relation, now());
+    } catch (e) {
+      // 唯一索引 idx_parent_bindings_openid_student 兜底：并发/重放导致同一
+      // (parent_openid, student_id) 重复插入时，返回明确业务失败而非把 500 抛给家长。
+      if (String((e && e.code) || '').includes('SQLITE_CONSTRAINT')) {
+        return res.status(400).json(safeFail('已绑定该成员'));
+      }
+      throw e;
+    }
 
     // 绑定成功，重置本次相关维度的失败计数
     bindAttempts.delete(openid);
@@ -626,12 +638,39 @@ router.post('/unbindStudent', (req, res) => {
     const { studentId } = req.body;
     if (!studentId) return res.status(400).json(safeFail('缺少成员ID'));
 
-    const result = db.prepare(
-      'DELETE FROM parent_bindings WHERE parent_openid = ? AND student_id = ?'
-    ).run(openid, studentId);
-    if (result.changes === 0) return res.json(fail('未找到该成员的绑定关系'));
+    // 解绑与订单归属清理必须在同一事务内：只删绑定不清理订单会留下「绑定已删、
+    // 订单仍归属该家长」的越权残留；只清订单不删绑定则解绑未生效。
+    const result = db.transaction(() => {
+      const del = db.prepare(
+        'DELETE FROM parent_bindings WHERE parent_openid = ? AND student_id = ?'
+      ).run(openid, studentId);
+      if (del.changes === 0) return { removed: 0, clearedOrders: 0 };
 
-    res.json(success({ studentId }));
+      // 隐私优先取舍：orders.user_id 是「下单人」快照（记的是下单时的 openid）。
+      // 学生数据经 canViewStudentData 实时查库在解绑后已正确 403，但 GET /orders/my
+      // 的 `user_id = ?` 判据（以及 POST /orders/:id/pay 的归属校验）不受解绑影响 ——
+      // 已解绑家长仍能看到自己作为下单人的全部历史订单（金额、学员名），解绑等于没解。
+      // 故清空「该 openid 名下、且 student_id 等于被解绑学员」的订单归属，使两条判据
+      // 都不再命中。只动该学员的订单，其他学员名下订单不受影响。
+      // **绝不删除订单**：订单是资金凭证，必须完整保留；这里只把归属快照置空。
+      const upd = db.prepare("UPDATE orders SET user_id = '', updated_at = ? WHERE user_id = ? AND student_id = ?")
+        .run(now(), openid, studentId);
+      return { removed: del.changes, clearedOrders: upd.changes };
+    })();
+    if (result.removed === 0) return res.json(fail('未找到该成员的绑定关系'));
+
+    // 解绑会同时撤销该家长对学员订单的可见性，属隐私相关的状态变更，必须留痕
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'parent_binding',
+      entityId: `${openid}:${studentId}`,
+      action: 'unbind',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { student_id: studentId, cleared_orders: result.clearedOrders },
+    });
+
+    res.json(success({ studentId, clearedOrders: result.clearedOrders }));
   } catch (err) {
     console.error('[unbindStudent]', err);
     res.status(500).json(safeFail('解绑失败，请稍后重试'));

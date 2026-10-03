@@ -31,7 +31,8 @@
         <el-table-column label="#" min-width="56">
           <template #default="{ $index }">{{ $index + 1 }}</template>
         </el-table-column>
-        <el-table-column :label="t('learner') + '姓名'" min-width="130" sortable>
+        <!-- sortable 必须配 prop：无 prop 时 Element Plus 无法定位排序字段，点表头不排序 -->
+        <el-table-column :label="t('learner') + '姓名'" prop="name" min-width="130" sortable>
           <template #default="{ row }">
             <span class="member-name">{{ row.name }}</span>
           </template>

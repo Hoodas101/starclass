@@ -34,22 +34,33 @@ const routes = [
         meta: { title: '{learner}档案', icon: 'User', roles: ['admin', 'coach', 'sales'], perm: 'students' }
       },
       {
+        // 教练也纳入 roles：守卫改为 AND 语义后，若 roles 里没有 coach，
+        // 管理员在「团队管理」给教练勾选「销售/增长」权限键也无法生效（角色这一关先被拦掉）。
+        // 注意：仅放开「角色」这一半，另一半仍需该账号实际持有 sales/growth 权限键，
+        // 所以默认教练不会平白多出销售入口。
         path: 'sales',
         name: 'Sales',
         component: () => import('@/views/hubs/SalesHub.vue'),
-        meta: { title: '销售增长', icon: 'ShoppingBag', roles: ['admin', 'sales'], perm: 'sales' }
+        meta: { title: '销售增长', icon: 'ShoppingBag', roles: ['admin', 'sales', 'coach'], perms: ['sales', 'growth'] }
       },
       {
+        // 同上：教练可见「家校沟通」（数据范围由后端限定为自己名下学员）。
+        // ⚠️ 后端 feedback.js / messages.js 目前是 isAdminReq 硬校验（仅管理员），
+        // 即使给教练勾了 parents 权限键，接口仍会 403 —— 需后端配合，前端不擅自改。
         path: 'parents',
         name: 'Parents',
         component: () => import('@/views/hubs/ParentsHub.vue'),
-        meta: { title: '家校沟通', icon: 'ChatDotRound', roles: ['admin'], perm: 'parents' }
+        meta: { title: '家校沟通', icon: 'ChatDotRound', roles: ['admin', 'coach'], perm: 'parents' }
       },
       {
+        // perm 由 'staff' 改为 'coachstats'：守卫改 AND 后，教练默认权限里没有 'staff'，
+        // 会被整页拦掉，连带丢失「教练课时」这个教练真实可用的标签页。
+        // StaffHub 内部的页签权限（员工=staff 仅 admin / 课时=coachstats）不受影响，
+        // 这里只决定「整页是否可进」。
         path: 'staff',
         name: 'Staff',
         component: () => import('@/views/hubs/StaffHub.vue'),
-        meta: { title: '团队管理', icon: 'Avatar', roles: ['admin', 'coach'], perm: 'staff' }
+        meta: { title: '团队管理', icon: 'Avatar', roles: ['admin', 'coach'], perm: 'coachstats' }
       },
       {
         // 个人设置：全员工角色（管理员/教练/销售）可访问的自助改密入口。

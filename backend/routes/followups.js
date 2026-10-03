@@ -15,6 +15,8 @@ const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser } = require('../utils');
 const {
   generateRenewalNotifications,
+  EXPIRY_WINDOWS,
+  buildExpiringWhere,
   RENEWAL_WARN_DAYS,
   LOW_CLASS_THRESHOLD,
   EXPIRED_WINDOW_DAYS,
@@ -84,24 +86,28 @@ router.post('/generate', (req, res) => {
       console.error('[followups generate] 家长续费提醒同步失败:', e && e.message ? e.message : e);
     }
 
-    // 1) 续费跟进：到期前 RENEWAL_WARN_DAYS(15) / 7 / 1 天
+    // 1) 续费跟进：到期前 EXPIRY_WINDOWS(15/7/1) 天
     // 说明：原 SQL 写的是 status IN ('active','valid')，其中 'valid' 是历史遗留的死值——
     // member_cards.status 实际只有 active / paused / expired / refunded，'valid' 从未被写入过，故删除。
-    // 这里也不纳入 'paused'：请假暂停中的卡 expires_at 是暂停前的日期，纳入会误触发续费提醒。
+    // 状态过滤统一引用 utils/renewal 的 EXPIRING_STATUSES（只认 active）：请假暂停中的卡
+    // expires_at 是暂停前的日期，纳入会误触发续费提醒。此前 growth 续费清单纳入 paused/expired
+    // 而本处不纳入，导致「预警清单列出、提醒却从不发出」——growth 侧应同样引用本常量。
     const expiring = db.prepare(`
       SELECT mc.id, mc.student_id, s.name as student_name, mc.card_type_name, mc.expires_at,
              pb.parent_phone
       FROM member_cards mc
       LEFT JOIN students s ON s.id = mc.student_id
       LEFT JOIN parent_bindings pb ON pb.student_id = mc.student_id AND pb.is_main = 1
-      WHERE mc.status = 'active' AND mc.expires_at > ?
+      WHERE ${buildExpiringWhere()} AND mc.expires_at > ?
         AND mc.expires_at <= ? + ?
         AND ${ACTIVE_STUDENT_SQL}
     `).all(t - RENEWAL_WARN_DAYS * DAY, t, (RENEWAL_WARN_DAYS + 1) * DAY);
     for (const c of expiring) {
       const daysLeft = Math.ceil((c.expires_at - t) / DAY);
       if (daysLeft <= 0 || daysLeft > RENEWAL_WARN_DAYS) continue;
-      const key = [1, 7, RENEWAL_WARN_DAYS].filter((d) => daysLeft <= d).sort((a, b) => a - b)[0];
+      // 命中「最近的下一档」：档位集合与提醒扫描同源（EXPIRY_WINDOWS），避免跟进与提醒两套档位。
+      // RENEWAL_WARN_DAYS === max(EXPIRY_WINDOWS)，故 daysLeft ≤ 15 时必有一档命中。
+      const key = EXPIRY_WINDOWS.slice().sort((a, b) => a - b).find((d) => daysLeft <= d);
       if (daysLeft > key) continue;
       const id = insertTask({
         targetType: 'student',

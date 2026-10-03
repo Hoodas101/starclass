@@ -101,13 +101,21 @@ const ROUTES = [
   ['POST', '/api/schedules/ID1/enroll'], ['DELETE', '/api/schedules/ID1/enroll'],
   ['GET', '/api/schedules/ID1'], ['PUT', '/api/schedules/ID1'], ['DELETE', '/api/schedules/ID1'],
   ['POST', '/api/schedules/conflict-check'],
+  // 周期排课规则 CRUD（routes/schedules.js）：此前规则只增不减，本轮补全后必须同步本清单。
+  ['GET', '/api/schedules/rules'], ['PUT', '/api/schedules/rules/ID1'], ['DELETE', '/api/schedules/rules/ID1'],
   ['POST', '/api/checkin/teacher'], ['POST', '/api/checkin/parent'], ['GET', '/api/checkin/records'],
   ['GET', '/api/checkin/today'], ['POST', '/api/checkin/auto-absent'],
   ['GET', '/api/attendances'], ['GET', '/api/attendances/student/STU1'], ['GET', '/api/attendances/summary'],
+  // 体测模块（migrations/024 + routes/physical-tests.js）：新增受保护路由必须同步本清单，
+  // 否则 A3-scan-coverage 的源码交叉校验会立刻报「未覆盖」。
+  ['GET', '/api/physical-tests'], ['POST', '/api/physical-tests'],
+  ['PUT', '/api/physical-tests/ID1'], ['DELETE', '/api/physical-tests/ID1'],
   ['POST', '/api/membership/pause'], ['POST', '/api/membership/resume'], ['POST', '/api/membership/card-type'],
   ['PUT', '/api/membership/card-type/ID1'], ['DELETE', '/api/membership/card-type/ID1'],
   ['POST', '/api/membership/activate'], ['GET', '/api/membership/my'], ['POST', '/api/membership/deduct'],
   ['POST', '/api/membership/refund'], ['GET', '/api/membership/deductions'], ['GET', '/api/membership/expiring'],
+  // 会员卡实例列表 + 卡转让（migrations/026 + routes/membership.js）
+  ['GET', '/api/membership/cards'], ['POST', '/api/membership/card/ID1/transfer'],
   ['POST', '/api/points/add'], ['POST', '/api/points/consume'], ['GET', '/api/points/balance'],
   ['GET', '/api/points/logs'], ['GET', '/api/points/ranking'], ['POST', '/api/points/share'], ['GET', '/api/points/rules'],
   ['POST', '/api/orders'], ['POST', '/api/orders/import'], ['GET', '/api/orders/my'],
@@ -120,10 +128,17 @@ const ROUTES = [
   ['GET', '/api/messages/admin/list'], ['DELETE', '/api/messages/ID1'],
   ['GET', '/api/admin/dashboard'], ['GET', '/api/admin/charts'], ['GET', '/api/admin/export'],
   ['GET', '/api/admin/audit-logs'],
+  // 关注雷达聚合（dashboard 侧栏）
+  ['GET', '/api/admin/attention'],
   ['GET', '/api/admin/suppressions'], ['POST', '/api/admin/suppressions'], ['DELETE', '/api/admin/suppressions/ID1'],
   ['GET', '/api/admin/teachers'], ['GET', '/api/admin/parents'], ['GET', '/api/admin/staff-options'],
+  // 教师轻量选项（上课记录页教师筛选此前 404，本轮补别名路由）
+  ['GET', '/api/admin/teachers/options'],
   ['POST', '/api/admin/teachers'], ['PUT', '/api/admin/teachers/ID1'], ['DELETE', '/api/admin/teachers/ID1'],
-  ['GET', '/api/admin/classrooms'], ['GET', '/api/admin/courses'], ['GET', '/api/admin/courses/options'], ['POST', '/api/admin/courses'],
+  // 场地管理（此前只有 GET，本轮补 POST/PUT/DELETE）
+  ['GET', '/api/admin/classrooms'], ['POST', '/api/admin/classrooms'],
+  ['PUT', '/api/admin/classrooms/ID1'], ['DELETE', '/api/admin/classrooms/ID1'],
+  ['GET', '/api/admin/courses'], ['GET', '/api/admin/courses/options'], ['POST', '/api/admin/courses'],
   ['PUT', '/api/admin/courses/ID1'], ['DELETE', '/api/admin/courses/ID1'],
   ['GET', '/api/admin/courses/ID1/members'], ['POST', '/api/admin/courses/ID1/members'],
   ['DELETE', '/api/admin/courses/ID1/members/STU1'], ['GET', '/api/admin/backup'],
@@ -146,7 +161,7 @@ const ROUTES = [
   ['GET', '/api/makeup/eligible'], ['POST', '/api/makeup/assign'], ['POST', '/api/makeup/cancel'],
   ['GET', '/api/makeup/records'], ['POST', '/api/makeup/reschedule'],
   ['GET', '/api/finance/summary'], ['GET', '/api/finance/monthly'], ['GET', '/api/finance/by-product'], ['GET', '/api/finance/by-sales'],
-  ['GET', '/api/trial/list'], ['PUT', '/api/trial/ID1'],
+  ['GET', '/api/trial/list'], ['GET', '/api/trial/ID1'], ['POST', '/api/trial/ID1/convert'], ['PUT', '/api/trial/ID1'],
   ['GET', '/api/wxpay/status'], ['POST', '/api/wxpay/create'],
 
   // ---- C7 补扫：以下 42 条此前完全不在扫描清单内，等于鉴权闸门对它们零覆盖 ----
@@ -328,6 +343,7 @@ async function main() {
       ['/api/followups', 'followups.js'], ['/api/payroll', 'payroll.js'], ['/api/comments', 'comments.js'],
       ['/api/makeup', 'makeup.js'], ['/api/finance', 'finance.js'], ['/api/attendances', 'attendances.js'],
       ['/api/trial', 'trial.js'], ['/api/wxpay', 'wxpay.js'],
+      ['/api/physical-tests', 'physical-tests.js'],
     ];
     const PLACEHOLDER = /^(?::.+|ID\d*|STU\d*|SCH\d*|REQ\d*|NO_SUCH_ID|NO_SUCH_STU|SCHED\d*)$/i;
     const norm = (p) => p.split('/').map((s) => (PLACEHOLDER.test(s) ? ':x' : s)).join('/').replace(/\/+$/, '') || '/';

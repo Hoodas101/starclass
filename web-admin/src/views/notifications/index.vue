@@ -14,10 +14,10 @@
           :prefix-icon="Search"
           clearable
           style="width: 220px"
-          @change="loadList"
-          @clear="loadList"
+          @change="onFilterChange"
+          @clear="onFilterChange"
         />
-        <el-select v-model="priority" placeholder="全部优先级" clearable style="width: 130px" @change="loadList">
+        <el-select v-model="priority" placeholder="全部优先级" clearable style="width: 130px" @change="onFilterChange">
           <el-option label="紧急" value="urgent" />
           <el-option label="重要" value="important" />
           <el-option label="提醒" value="normal" />
@@ -59,22 +59,24 @@
       <div class="pagination-wrap">
         <el-pagination
           v-model:current-page="page"
-          :page-size="pageSize"
+          v-model:page-size="pageSize"
           :total="total"
-          layout="total, prev, pager, next"
+          :page-sizes="[10, 20, 50]"
+          layout="total, sizes, prev, pager, next, jumper"
           background
           @current-change="loadList"
+          @size-change="onSizeChange"
         />
       </div>
     </div>
 
     <!-- 发布通知弹窗 -->
     <el-dialog v-model="dialogOpen" title="发布通知" class="dlg-lg">
-      <el-form label-position="top">
-        <el-form-item label="通知标题" required>
+      <el-form ref="publishFormRef" :model="form" :rules="publishRules" label-position="top">
+        <el-form-item label="通知标题" prop="title">
           <el-input v-model="form.title" placeholder="输入通知标题" maxlength="50" show-word-limit />
         </el-form-item>
-        <el-form-item label="通知内容" required>
+        <el-form-item label="通知内容" prop="content">
           <el-input v-model="form.content" type="textarea" :rows="4" placeholder="输入通知详情内容" maxlength="500" show-word-limit />
         </el-form-item>
         <el-form-item label="优先级">
@@ -156,7 +158,7 @@
 const props = defineProps({
   embedded: { type: Boolean, default: false },
 })
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { Search, Plus, Download } from '@element-plus/icons-vue'
 import { getNoticeAdminList, publishNotice, deleteNotice, getCourses } from '@/api/modules'
 import dayjs from 'dayjs'
@@ -170,7 +172,7 @@ const loading = ref(false)
 const list = ref([])
 const total = ref(0)
 const page = ref(1)
-const pageSize = 10
+const pageSize = ref(10)
 const keyword = ref('')
 const priority = ref('')
 const exportDialogRef = ref(null)
@@ -179,6 +181,21 @@ const dialogOpen = ref(false)
 const publishing = ref(false)
 const form = ref({ title: '', content: '', priority: 'normal', groupName: '' })
 const showPreview = ref(false)
+const publishFormRef = ref(null)
+
+// 表单校验：把「必填」落到具体字段（此前用裸 required，只在提交时弹一条笼统 toast，
+// 标题填了内容没填时用户只能逐个试）。trim 后为空同样视为未填，避免全空格标题发布出去。
+const trimRequired = (message) => ({
+  validator: (_rule, value, callback) => {
+    if (String(value ?? '').trim()) callback()
+    else callback(new Error(message))
+  },
+  trigger: 'blur',
+})
+const publishRules = {
+  title: [trimRequired('请输入通知标题')],
+  content: [trimRequired('请输入通知内容')],
+}
 
 // 正文排版预览：空行分段、`# ` 小标题、`- `/`• ` 要点（与小程序发布预览同规则）
 const previewBlocks = computed(() => {
@@ -210,7 +227,11 @@ const previewBlocks = computed(() => {
 
 const openPublish = () => {
   showPreview.value = false
+  // 重置草稿：此前取消弹窗后残留上一次内容，下次打开会误发旧草稿
+  form.value = { title: '', content: '', priority: 'normal', groupName: '' }
   dialogOpen.value = true
+  // 弹窗未 destroy-on-close，表单常驻：清空上一次遗留的校验红字
+  nextTick(() => publishFormRef.value?.clearValidate())
 }
 
 const detailOpen = ref(false)
@@ -232,13 +253,23 @@ const loadGroups = async () => {
 
 const error = ref('')
 
+// 筛选/分页条件变化时回到第 1 页：否则在第 3 页改关键词可能落在新的空页上
+const onFilterChange = () => {
+  page.value = 1
+  loadList()
+}
+const onSizeChange = () => {
+  page.value = 1
+  loadList()
+}
+
 const loadList = async () => {
   error.value = ''
   loading.value = true
   try {
     const res = await getNoticeAdminList({
       page: page.value,
-      pageSize,
+      pageSize: pageSize.value,
       keyword: keyword.value || undefined,
       priority: priority.value || undefined,
     })
@@ -286,15 +317,14 @@ const doExport = async (range) => {
 }
 
 const publish = async () => {
-  if (!form.value.title || !form.value.content) {
-    ElMessage.warning('标题和内容不能为空')
-    return
-  }
+  if (!publishFormRef.value) return
+  const valid = await publishFormRef.value.validate().catch(() => false)
+  if (!valid) return
   publishing.value = true
   try {
     await publishNotice({
-      title: form.value.title,
-      content: form.value.content,
+      title: form.value.title.trim(),
+      content: form.value.content.trim(),
       priority: form.value.priority,
       category: 'system',
       groupName: form.value.groupName,

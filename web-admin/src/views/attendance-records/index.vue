@@ -31,7 +31,7 @@
         </el-select>
         <el-select
           v-model="filters.teacherId"
-          placeholder="教练"
+          :placeholder="teacherOptionsError ? '教练列表加载失败' : '教练'"
           clearable
           filterable
           remote
@@ -132,9 +132,9 @@
           v-model:page-size="pageSize"
           :total="total"
           :page-sizes="[10, 20, 50, 100]"
-          layout="total, sizes, prev, pager, next"
+          layout="total, sizes, prev, pager, next, jumper"
           @current-change="loadData"
-          @size-change="loadData"
+          @size-change="onSizeChange"
         />
       </div>
     </div>
@@ -195,12 +195,18 @@ const dateRange = ref([])
 const studentOptions = ref([])
 const courseOptions = ref([])
 const teacherOptions = ref([])
+// 教师下拉加载失败标记：后端 /admin/teachers/options 缺失（或网络异常）时不能静默，
+// 否则用户会把「加载失败」当成「机构没有教师」。置位后下拉 placeholder 会给出提示。
+const teacherOptionsError = ref(false)
 
 const records = ref([])
 const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
+// 列表错误态。此前模板引用 error、catch 里写 error.value，但从未声明该 ref，
+// 接口失败时 catch 直接抛 ReferenceError → 错误态永远显示不出来，页面空白无提示。
+const error = ref('')
 const summary = reactive({
   totalSessions: 0,
   attendedSessions: 0,
@@ -230,6 +236,7 @@ function buildParams(extra = {}) {
 }
 
 async function loadData() {
+  error.value = ''
   loading.value = true
   try {
     const [listRes, sumRes] = await Promise.all([
@@ -257,6 +264,11 @@ function onFilterChange() {
   loadData()
 }
 function onDateChange() {
+  page.value = 1
+  loadData()
+}
+// 每页条数变化后回到第 1 页，避免停留在越界页码出现空列表
+function onSizeChange() {
   page.value = 1
   loadData()
 }
@@ -401,7 +413,15 @@ async function loadTeacherOptions(query = '') {
   try {
     const res = await getTeacherOptions({ q: query })
     teacherOptions.value = res.list || []
-  } catch (e) { /* 跳过 */ }
+    teacherOptionsError.value = false
+  } catch (e) {
+    // 不再静默：接口 404（后端缺 /admin/teachers/options）或网络异常时留下线索，
+    // 并在下拉 placeholder 提示「教练列表加载失败」，避免被误认为「机构没有教练」。
+    // 该失败仅影响教师筛选，不阻断页面其余部分（列表/汇总/趋势独立加载）。
+    console.warn('[attendance-records] 教练下拉加载失败：', e?.message || e)
+    teacherOptions.value = []
+    teacherOptionsError.value = true
+  }
 }
 
 onMounted(() => {

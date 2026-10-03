@@ -15,12 +15,29 @@
       <!-- 账号信息 -->
       <div class="profile-section">
         <h3 class="section-title">账号信息</h3>
-        <p class="section-desc">当前登录账号。姓名与手机号如需变更，请联系管理员。</p>
+        <p class="section-desc">手机号可在此自行修改，保存后立即生效（同时用于登录，请确保号码可正常使用）。</p>
         <el-descriptions :column="1" border class="profile-desc">
           <el-descriptions-item label="姓名">{{ userStore.userName }}</el-descriptions-item>
           <el-descriptions-item label="角色">{{ roleLabel }}</el-descriptions-item>
-          <el-descriptions-item label="手机号">{{ phone || '—' }}</el-descriptions-item>
         </el-descriptions>
+
+        <!-- 手机号此前只读、页面要求「联系管理员」：但后端 /auth/updateProfile 已完整支持改号
+             （格式校验、双重占用检查、openid 跨表迁移），前端零调用。此处接入。 -->
+        <el-form
+          ref="phoneFormRef"
+          :model="phoneForm"
+          :rules="phoneRules"
+          label-width="auto"
+          label-position="left"
+          style="max-width: 480px; margin-top: var(--t-spacing-lg)"
+        >
+          <el-form-item label="手机号" prop="phone">
+            <el-input v-model="phoneForm.phone" maxlength="11" placeholder="请输入11位手机号" />
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" :loading="phoneSaving" @click="submitPhone">保存手机号</el-button>
+          </el-form-item>
+        </el-form>
       </div>
 
       <!-- 修改密码 -->
@@ -77,7 +94,7 @@
 <script setup>
 import { ref, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { changePassword } from '@/api/modules'
+import { changePassword, updateProfile } from '@/api/modules'
 import { useUserStore } from '@/store/user'
 import { useSettingsStore } from '@/store/settings'
 import PageHeader from '@/components/PageHeader.vue'
@@ -87,7 +104,42 @@ const settingsStore = useSettingsStore()
 
 // 角色徽标称呼跟随机构术语方案（教培版显示「老师」、健身版显示「教练」等），与全站统一；未知角色回退原值
 const roleLabel = computed(() => settingsStore.roleLabel(userStore.userRole) || userStore.userRole || '—')
-const phone = computed(() => userStore.userInfo.phone || '')
+
+// 手机号自助修改
+const phoneFormRef = ref(null)
+const phoneSaving = ref(false)
+const phoneForm = reactive({ phone: userStore.userInfo.phone || '' })
+// 仅做基础格式提示（与后端一致）；占用冲突/跨表迁移等以后端为准，不在前端重复实现
+const phoneRules = {
+  phone: [
+    { required: true, message: '请输入手机号', trigger: 'blur' },
+    { pattern: /^1\d{10}$/, message: '请输入正确的11位手机号', trigger: 'blur' }
+  ]
+}
+
+const submitPhone = async () => {
+  if (!phoneFormRef.value) return
+  const valid = await phoneFormRef.value.validate().catch(() => false)
+  if (!valid) return
+  const next = phoneForm.phone.trim()
+  if (next === (userStore.userInfo.phone || '')) {
+    ElMessage.info('手机号未变化')
+    return
+  }
+  phoneSaving.value = true
+  try {
+    const data = await updateProfile({ phone: next })
+    // 后端改号会重签 Token（openid 可能随手机号变化）：必须立即替换，否则下一次请求 401 被登出
+    userStore.setToken(data?.token)
+    await userStore.getUserInfo()
+    phoneForm.phone = userStore.userInfo.phone || next
+    ElMessage.success('手机号已更新')
+  } catch (e) {
+    // 失败保留已填内容；拦截器已展示后端返回的具体原因（如「该手机号已被其他账号使用」）
+  } finally {
+    phoneSaving.value = false
+  }
+}
 
 const passwordFormRef = ref(null)
 const passwordSaving = ref(false)

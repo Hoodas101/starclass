@@ -4,7 +4,7 @@
 <PageHeader v-if="!embedded" title="意见反馈" />
     <div class="toolbar">
       <div class="toolbar-left">
-                <el-radio-group v-model="filterStatus" size="default">
+                <el-radio-group v-model="filterStatus" size="default" @change="onFilterChange">
           <el-radio-button value="">全部</el-radio-button>
           <el-radio-button value="pending">待处理</el-radio-button>
           <el-radio-button value="done">已处理</el-radio-button>
@@ -42,10 +42,13 @@
       <div class="pagination-wrap">
         <el-pagination
           v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
           :total="total"
-          layout="total, prev, pager, next"
+          :page-sizes="[10, 20, 50]"
+          layout="total, sizes, prev, pager, next, jumper"
           background
           @current-change="loadList"
+          @size-change="onSizeChange"
         />
       </div>
     </div>
@@ -128,6 +131,19 @@ const exportDialogRef = ref(null)
 const formatDate = (v) => (v ? dayjs(Number(v)).format('YYYY-MM-DD HH:mm') : '-')
 
 const error = ref('')
+
+// 状态筛选此前没有 @change/ watch，点击「待处理/已处理」列表不刷新；
+// 而导出按 filterStatus 过滤 —— 屏幕与导出口径不一致。此处补齐联动。
+const onFilterChange = () => {
+  currentPage.value = 1
+  loadList()
+}
+
+// 每页条数变化后回到第 1 页，避免停留在越界页码导致空列表
+const onSizeChange = () => {
+  currentPage.value = 1
+  loadList()
+}
 
 const loadList = async () => {
   error.value = ''

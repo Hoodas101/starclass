@@ -250,6 +250,34 @@ function exportData(modulesInput, opts = {}) {
 }
 
 /**
+ * 重算指定排期的 enrolled_count（报名人数缓存列）。
+ *
+ * 导入 enrollments 不经过任何报名接口，也就不会触发 schedules.enrolled_count 的 +1/-1 维护，
+ * 缓存列会停留在导入前的旧值 → 容量闸（routes/schedules.js 的 enrolled_count >= max_students）
+ * 随之漂移：后续报名可能被误判「已满」而拒绝，或超员放行。
+ * 口径与报名写入（routes/schedules.js）一致：只计 status='active' 的报名行。
+ * @param {Iterable<string>} scheduleIds 受影响的排期 id
+ * @returns {number} 实际重算的排期数
+ */
+function recomputeScheduleEnrolledCounts(scheduleIds) {
+  const upd = db.prepare(`
+    UPDATE schedules
+    SET enrolled_count = (
+      SELECT COUNT(*) FROM enrollments e
+      WHERE e.schedule_id = schedules.id AND e.status = 'active'
+    )
+    WHERE id = ?
+  `);
+  let n = 0;
+  for (const sid of scheduleIds) {
+    if (!sid) continue;
+    upd.run(sid);
+    n++;
+  }
+  return n;
+}
+
+/**
  * 导入数据
  *
  * FORBIDDEN_TABLES 中的受保护表（users / settings / sqlite_sequence）一律跳过，
@@ -292,6 +320,9 @@ function importData(payload, opts = {}) {
   const errors = [];
   const replace = !!opts.replace;
 
+  // 导入 enrollments 后需要重算 enrolled_count 的排期集合（同事务内处理，见下方收集与重算）
+  const affectedSchedules = new Set();
+
   const run = db.transaction(() => {
     for (const key of targetKeys) {
       const mod = MODULE_MAP[key];
@@ -316,6 +347,23 @@ function importData(payload, opts = {}) {
         if (replace) {
           db.prepare(`DELETE FROM ${t}`).run();
         }
+        // 收集本次导入会影响的排期，供写库后重算 enrolled_count。
+        // 放在 INSERT 之前：INSERT OR REPLACE 可能把一条报名从旧排期改到新排期，
+        // 旧排期的计数同样要回落，故先把被覆盖行的旧 schedule_id 也记下来。
+        if (t === 'enrollments') {
+          if (replace) {
+            // 覆盖模式已清空整表，所有排期的计数都需重算
+            db.prepare('SELECT id FROM schedules').all().forEach((r) => affectedSchedules.add(r.id));
+          }
+          const importedIds = rows.map((r) => r.id).filter((v) => v != null);
+          if (importedIds.length) {
+            const ph = importedIds.map(() => '?').join(',');
+            db.prepare(`SELECT DISTINCT schedule_id FROM enrollments WHERE id IN (${ph})`)
+              .all(...importedIds)
+              .forEach((r) => { if (r.schedule_id) affectedSchedules.add(r.schedule_id); });
+          }
+          rows.forEach((r) => { if (r.schedule_id) affectedSchedules.add(r.schedule_id); });
+        }
         if (rows.length === 0) {
           tableSummary[t] = 0;
           continue;
@@ -339,6 +387,8 @@ function importData(payload, opts = {}) {
         total: Object.values(tableSummary).reduce((a, b) => a + b, 0),
       };
     }
+    // 重算放最后：确保 enrollments 全部写完后再统一更新，且与导入同事务（要么全成要么全滚）
+    if (affectedSchedules.size) recomputeScheduleEnrolledCounts(affectedSchedules);
   });
 
   // 覆盖模式需要在清空父表前关闭外键约束。注意：foreign_keys 不能在事务内切换，

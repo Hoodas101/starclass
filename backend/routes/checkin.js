@@ -11,20 +11,38 @@ const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, formatDate, isCoachReq, isAdminReq, isStaffReq, canViewStudentData } = require('../utils');
 const { requireStaffPerm } = require('../middleware/authz');
-// 每次课消耗的课时数（courses.consume_classes）：与手工扣课路径共用同一实现
-const { resolveConsumeClasses } = require('../utils/deduction');
+// 每次课消耗的课时数（courses.consume_classes）与扣课选卡：与手工扣课路径共用同一实现
+const { resolveConsumeClasses, pickCardForDeduction } = require('../utils/deduction');
 // 考勤回滚共享原语（积分 / 扣课 / 收入结转的唯一实现）：
 // 「取消排期」路径（routes/schedules.js）也回滚同一批副作用，必须共用同一份代码，
 // 否则两条回滚路径会各写一份、口径日久漂移。
 const { reversePoints, hasRevenueRecognitionTable, revertRevenueRecognition, revertDeduction } = require('../utils/attendance-revert');
-// 订单明细（orders.items）解析：全后端唯一实现，兼容「数组元素为 JSON 字符串」的双重编码形态。
-// 收入结转需要从订单明细里取行小计推导单位课时价，禁止在本文件自行 JSON.parse。
-const { parseItems, itemLineTotal, itemQuantity } = require('../utils/items');
+// 单价推导（计次卡元/课时）：从卡的关联订单反推实付价，与时效卡摊销共用同一实现。
+// 禁止在本文件自行 JSON.parse 订单明细（parseItems 等已收口到 utils/items / utils/revenue）。
+const { deriveUnitPrice } = require('../utils/revenue');
+// 请假扣课规则（扣课时 / 扣有效天数）：教师点名标 leave 与家长审批走同一实现，
+// 否则同一「请假」两条路径两种资产结果。leave.js 不 require 本文件，无循环依赖。
+const { applyLeaveDeduction } = require('../routes/leave');
 // 「推送规则 → 缺席通知」的读取与文案渲染：与续费/训练提醒共用同一实现（utils/reminders.js）
-const { getNotificationRule, resolveRuleTemplate, renderNotificationTemplate } = require('../utils/reminders');
+// 收件人解析与通知 ID 后缀：**必须**复用 utils/reminders 的同一份实现。
+// 缺席通知与续费/低课时/训练提醒是同一类需求（通知该学员的家长），若各写一套
+// 收件人逻辑，改一处漏两处就会让「双家长家庭的另一方收不到通知」这类缺陷反复复发。
+const { getNotificationRule, resolveRuleTemplate, renderNotificationTemplate, listParentOpenids, recipientIdSuffix } = require('../utils/reminders');
 const { getTerms } = require('../utils/terms');
 // 已删除 / 已归档学员的排除条件（自动缺席与 growth 预警共用同一判据）
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
+
+/**
+ * 考勤状态白名单 —— 点名入口的唯一合法状态集。
+ *
+ * 此前 `POST /api/checkin/teacher` 的 `status` 传任意字符串（实测 `"hacked"`）都会
+ * **直接落库**。而出勤率（`utils/index.js` 的 attendanceRate）、扣课、积分、薪资计薪
+ * 判据（`utils/payroll.js` 的 PAYABLE_SCHEDULE_SQL）全部按 status 分支取值 ——
+ * 一条既不是 present/late 也不是 absent/leave 的行，在这些统计里会被**静默排除**，
+ * 于是「人算进去了但课时没扣 / 课算进去了但不计薪」这类账实不符无法被发现。
+ * 故在入口就拒绝，宁可让脏数据进不来，也不要让它在账里潜伏。
+ */
+const ATTENDANCE_STATUSES = ['present', 'late', 'absent', 'leave', 'clear'];
 
 /**
  * 读取积分规则 —— 签到积分的唯一取值入口（替代原先散落在两处的硬编码 10 / 5）。
@@ -119,8 +137,22 @@ router.post('/teacher', (req, res) => {
     // 单学员点名处理（由下方批次事务逐个调用；事务边界提升到整批一层）
     const processOne = (att) => {
       const { studentId, status, checkinMethod = 'manual' } = att;
-      const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
+      // 状态白名单校验（见文件顶部 ATTENDANCE_STATUSES 的注释）。
+      // 只拒这一名学员、不中断整批：同批其他学员的合法点名不该被一条脏数据连带回滚。
+      if (!ATTENDANCE_STATUSES.includes(status)) {
+        results.push({ studentId, status: 'rejected', message: '无效的签到状态' });
+        return;
+      }
+      const student = db.prepare('SELECT name, archived, status FROM students WHERE id = ?').get(studentId);
       if (!student) return;
+      // 增量 P1-4：已归档 / 已删除（status='refunded'）学员不得被点名扣课，也不得发积分。
+      // 判据与 utils/student-state 的 ACTIVE_STUDENT_SQL 同口径（该常量要求 SQL 中学员表
+      // 别名为 s，这里是单行查询故内联展开）。students.js 归档只置 students 表、不动
+      // member_cards/points —— 不拦的话已退费学员仍会被扣课并照发积分。
+      if (Number(student.archived || 0) !== 0 || String(student.status || '') === 'refunded') {
+        results.push({ studentId, status: 'rejected', message: '该学员已归档或已删除，无法点名' });
+        return;
+      }
       const beforeAtt = db.prepare('SELECT status, points_earned FROM attendances WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
 
       // 清除记录：删除签到并回滚积分与扣课（供教练纠正误签到/误点名）
@@ -185,9 +217,26 @@ router.post('/teacher', (req, res) => {
         return;
       }
 
+      // P1-D1：时效卡「每周/每月到店次数上限」拦截。present/late 且命中上限时拒绝本次签到，
+      // 返回明确文案由前端提示家长联系机构；不写考勤、不扣课、不发积分。
+      // 校验在整批 immediate 事务内进行（本函数由 runBatch 调用），保证「计数 + 写入」原子。
+      if (status === 'present' || status === 'late') {
+        const limitMsg = checkTimeCardVisitLimit(studentId, now());
+        if (limitMsg) {
+          results.push({ studentId, status: 'rejected', message: limitMsg });
+          return;
+        }
+      }
+
       // 积分取值改为读设置项 points_rules（原先硬编码 10 / 5，管理员在设置页改了不生效）
       const pointsRule = getPointsRule();
-      const pointsEarned = status === 'present' ? pointsRule.present : (status === 'late' ? pointsRule.late : 0);
+      let pointsEarned = status === 'present' ? pointsRule.present : (status === 'late' ? pointsRule.late : 0);
+      // P2 语义收口：学员**仅有暂停卡**（无任何其他可用次数卡/时效卡）时，签到成功但不扣课、
+      // 不发积分，响应 results 带 warning 供前端提示。此前暂停卡不会被扣课，积分却照发（白拿）。
+      // 仅当「有暂停卡且无任何可用卡」才置 0；非会员（压根没卡）不受影响，保持既有行为。
+      const onlyPaused = (status === 'present' || status === 'late')
+        && hasNoUsableCardButPaused(studentId, now());
+      if (onlyPaused) pointsEarned = 0;
 
       // 单学员「upsert + 积分 + 扣课」逻辑：状态变更时的积分/课时补偿原子化，避免数据虚高或漏发。
       // 事务边界在整批一层（见下方 runBatch），此处不再单独开事务。
@@ -271,7 +320,20 @@ router.post('/teacher', (req, res) => {
           }
         }
 
-        results.push({ studentId, status, pointsEarned });
+        // P1-D7：教师点名直接标「请假」此前完全绕过请假扣课规则 —— 不产生
+        // leave_deduction_logs、不扣任何课时/天数，于是同一「请假」在家长审批路径扣、
+        // 在教师点名路径不扣，规则形同虚设。这里复用 leave.js 的 applyLeaveDeduction
+        // （内部以 leave_deduction_logs 幂等，重复调用不会重复扣），仅对「非签到 → 请假」
+        // 的转换生效（新建 leave / absent→leave），与审批路径口径一致；
+        // present/late→leave 走的是上面的回滚分支（已退还该次课时），不再叠加请假扣课。
+        if (status === 'leave'
+          && !(existing && (existing.status === 'present' || existing.status === 'late'))) {
+          applyLeaveDeduction(studentId, scheduleId, now());
+        }
+
+        results.push(onlyPaused
+          ? { studentId, status, pointsEarned, warning: '会员卡已暂停，本次未扣课未计积分' }
+          : { studentId, status, pointsEarned });
       }
 
       recordAudit(db, {
@@ -291,6 +353,16 @@ router.post('/teacher', (req, res) => {
       for (const att of attendances) processOne(att);
     });
     runBatch.immediate();
+
+    // P1-D1 / 增量 P1-4：被拦截的学员（到店超上限 / 已归档）在 processOne 里 return、
+    // 未写任何数据，但结果记在 results 里。只要有拦截即整体返回业务失败并给出明确原因，
+    // 前端据此提示家长联系机构。
+    // 注意：同一批中**未被拦截**学员的点名已在上面的 immediate 事务内正常提交 ——
+    // 每个学员的写入相互独立（各自的考勤/积分/扣课），被拦者未写、通过者已写，不存在半截账目。
+    const rejected = results.filter((r) => r.status === 'rejected');
+    if (rejected.length) {
+      return res.json(fail(rejected.map((r) => r.message).join('；'), 2));
+    }
 
     res.json(success({ count: results.length, results }));
   } catch (err) {
@@ -316,10 +388,15 @@ router.post('/teacher', (req, res) => {
 function applyArrivalDeduction(studentId, scheduleId, t) {
   const dedup = db.prepare('SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
   if (dedup) return;
-  // T7：同一排期+学员若已按请假规则扣过课，则签到侧不得再次扣课。
+  // T7：同一排期+学员若已按请假规则**扣过课时**，则签到侧不得再次扣课。
   // 「先请假获批扣课 → 后改为签到」曾会扣两次课时；两套账本交叉校验后只扣一次。
   // leave_deduction_logs 的记录保留不动（请假路径的幂等依赖该行），此处仅跳过签到侧扣课。
-  const leaveDed = db.prepare('SELECT 1 FROM leave_deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
+  // 必须过滤 mode='class'：mode='days' 扣的是时效卡**有效天数**（并未消课），
+  // 若不过滤，签到侧会把「只扣了有效期」误当成「已扣课时」而跳过 → 学员免费上一次课。
+  // 口径与 membership.js 手工扣课的交叉校验一致。
+  const leaveDed = db.prepare(
+    "SELECT 1 FROM leave_deduction_logs WHERE schedule_id = ? AND student_id = ? AND mode = 'class'"
+  ).get(scheduleId, studentId);
   if (leaveDed) return;
   // 只有 makeup（补课）才跳过扣课，reschedule（调课）必须走正常扣课路径：
   //   · makeup：学员缺席时课时已被扣过一次，补课是把这次消耗补偿回来，再扣一次就是重复扣课；
@@ -339,17 +416,19 @@ function applyArrivalDeduction(studentId, scheduleId, t) {
   }
   // 每次课消耗的课时数：courses.consume_classes，缺省 1（course_temp 的 0 也归一到 1）
   const per = resolveConsumeClasses(scheduleId);
-  const card = db.prepare(`
-    SELECT * FROM member_cards
-    WHERE student_id = ? AND status = 'active' AND billing_mode = 'count'
-      AND expires_at > ? AND remaining_classes >= ?
-    ORDER BY expires_at ASC LIMIT 1
-  `).get(studentId, t, per);
+  // 选卡收口到 utils/deduction.pickCardForDeduction：按卡种 course_scope 匹配本课程，
+  // 匹配者优先、其次 expires_at ASC，且无匹配时兜底（绝不因范围数据不规范而拒绝扣课）。
+  const card = pickCardForDeduction(studentId, scheduleId, t, per);
   if (!card) return;
-  db.prepare(`
+  // 余额条件必须写进 UPDATE 的 WHERE：此前「先 SELECT 校验余额、再按 id 无条件 UPDATE」，
+  // 不同排期并发扣同一张卡时两请求会各自读到同一余额、各自扣减 → 余额变负。
+  // 加上 remaining_classes >= per 后，UPDATE 由 SQLite 在写锁内原子判定，
+  // changes === 0 即代表「并发下已被抢先扣走」，放弃本次扣课（不写流水、不写结转）。
+  const upd = db.prepare(`
     UPDATE member_cards SET remaining_classes = remaining_classes - ?, used_classes = used_classes + ?, updated_at = ?
-    WHERE id = ?
-  `).run(per, per, t, card.id);
+    WHERE id = ? AND remaining_classes >= ?
+  `).run(per, per, t, card.id, per);
+  if (upd.changes === 0) return;
   // 一次扣课一行流水：deduction_logs 上有 UNIQUE(schedule_id, student_id)，
   // 消耗 N 课时不写成 N 行，而是记在 count 列（迁移 019）。回滚路径读该列还原 N，
   // 不再依赖「回滚时重新推导」，也就不会因中途改过课程配置而多还或少还。
@@ -362,6 +441,95 @@ function applyArrivalDeduction(studentId, scheduleId, t) {
   // 位置紧贴 deduction_logs 写入之后：上面任一 early return（无卡 / 补课调课 / 已扣过）
   // 都代表「本次没有真实消课」，此时不得结转，否则会凭空虚增已确认收入。
   recordRevenueRecognition({ card, scheduleId, classes: per, t });
+}
+
+/**
+ * 计算 t 时刻所在的自然周（周一为起点）与自然月边界。
+ * 周界口径与项目既有实现对齐（admin.js 看板「本周收入」、schedules.js 教练课时统计、
+ * points.js 排行榜均以周一为一周起点）：周日（getDay()===0）回退 6 天，否则回退 wd-1 天。
+ * @returns {{weekStart:string, weekEnd:string, month:string}} 均为 YYYY-MM-DD / YYYY-MM
+ */
+function periodBounds(t) {
+  const d = new Date(t);
+  const wd = d.getDay(); // 0=周日
+  const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - (wd === 0 ? 6 : wd - 1));
+  const sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6);
+  return {
+    weekStart: formatDate(monday.getTime()),
+    weekEnd: formatDate(sunday.getTime()),
+    month: formatDate(t).slice(0, 7),
+  };
+}
+
+/**
+ * 时效卡「每周/每月到店次数上限」校验（P1-D1）。
+ *
+ * 字段：member_cards.visit_limit_per_week / visit_limit_per_month（0/NULL = 不限次，
+ * 向后兼容存量数据）。到店次数按 attendances.status IN ('present','late') 统计。
+ *
+ * 多张时效卡时取「限制最严」的那张：对每个周期分别取各卡上限中的**最小值**（忽略 0/不限）。
+ * 理由：到店上限是机构对学员频次的约束，取最严的一档才能保证任何一张卡的限制都不被突破；
+ * 若取最松的，等于让宽松卡「洗掉」严格卡的限制。
+ *
+ * @returns {string|null} 命中上限时返回明确文案，否则 null
+ */
+function checkTimeCardVisitLimit(studentId, t) {
+  const cards = db.prepare(`
+    SELECT visit_limit_per_week, visit_limit_per_month FROM member_cards
+    WHERE student_id = ? AND status = 'active' AND billing_mode = 'time' AND expires_at > ?
+  `).all(studentId, t);
+  if (!cards.length) return null;
+
+  const pos = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  };
+  let weekLimit = 0;
+  let monthLimit = 0;
+  for (const c of cards) {
+    const w = pos(c.visit_limit_per_week);
+    if (w && (!weekLimit || w < weekLimit)) weekLimit = w;
+    const m = pos(c.visit_limit_per_month);
+    if (m && (!monthLimit || m < monthLimit)) monthLimit = m;
+  }
+  if (!weekLimit && !monthLimit) return null; // 全部不限次
+
+  const { weekStart, weekEnd, month } = periodBounds(t);
+  if (weekLimit) {
+    const c = db.prepare(`
+      SELECT COUNT(*) c FROM attendances
+      WHERE student_id = ? AND status IN ('present','late') AND date >= ? AND date <= ?
+    `).get(studentId, weekStart, weekEnd).c;
+    if (c >= weekLimit) return `本周到店已达上限（${weekLimit} 次），如需加课请联系机构`;
+  }
+  if (monthLimit) {
+    const c = db.prepare(`
+      SELECT COUNT(*) c FROM attendances
+      WHERE student_id = ? AND status IN ('present','late') AND date LIKE ?
+    `).get(studentId, month + '%').c;
+    if (c >= monthLimit) return `本月到店已达上限（${monthLimit} 次），如需加课请联系机构`;
+  }
+  return null;
+}
+
+/**
+ * 学员是否「仅有暂停卡」：存在暂停卡，且没有任何可用的次数卡/时效卡。
+ * 用于 P2 语义收口 —— 仅暂停卡学员签到成功但不扣课、不发积分（响应带 warning）。
+ * 「可用」判据与扣课选卡一致：active + 次数卡有余量 / 时效卡未过期。
+ */
+function hasNoUsableCardButPaused(studentId, t) {
+  const usable = db.prepare(`
+    SELECT 1 FROM member_cards
+    WHERE student_id = ? AND status = 'active'
+      AND ((billing_mode = 'count' AND remaining_classes > 0)
+        OR (billing_mode = 'time' AND expires_at > ?))
+    LIMIT 1
+  `).get(studentId, t);
+  if (usable) return false;
+  const paused = db.prepare(
+    "SELECT 1 FROM member_cards WHERE student_id = ? AND status = 'paused' LIMIT 1"
+  ).get(studentId);
+  return !!paused;
 }
 
 /**
@@ -390,8 +558,12 @@ router.post('/parent', (req, res) => {
     const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(scheduleId);
     if (!schedule) return res.json(fail('排期不存在'));
 
-    const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
+    const student = db.prepare('SELECT name, archived, status FROM students WHERE id = ?').get(studentId);
     if (!student) return res.json(fail('成员不存在'));
+    // 增量 P1-4：已归档 / 已删除学员不得扫码签到（判据同 utils/student-state 的 ACTIVE_STUDENT_SQL）
+    if (Number(student.archived || 0) !== 0 || String(student.status || '') === 'refunded') {
+      return res.json(fail('该成员已归档或已删除，无法签到'));
+    }
 
     // 报名校验：家长只能为已报名该排期的成员签到（补课/调课登记同样视为已报名）
     const enrolled = db.prepare(
@@ -425,15 +597,23 @@ router.post('/parent', (req, res) => {
       ).get(scheduleId, studentId);
       if (existing) return { err: '已签到，无需重复签到' };
 
+      // P1-D1：时效卡周期到店上限校验，在写入前于同一事务内判定，命中即拒绝签到
+      const limitMsg = checkTimeCardVisitLimit(studentId, t);
+      if (limitMsg) return { err: limitMsg };
+
+      // P2：仅有暂停卡（无任何可用卡）时签到成功但不发积分（扣课本就不会发生），响应带 warning
+      const onlyPaused = hasNoUsableCardButPaused(studentId, t);
+      const earned = onlyPaused ? 0 : pointsEarned;
+
       const id = generateId('att_');
       db.prepare(`
         INSERT INTO attendances (id, schedule_id, student_id, student_name, course_id, course_name,
           status, checkin_method, checkin_time, checkin_by, points_earned, date, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 'present', 'qrcode', ?, 'parent', ?, ?, ?, ?)
       `).run(id, scheduleId, studentId, student.name, schedule.course_id, schedule.course_name,
-        t, pointsEarned, schedule.date, t, t);
+        t, earned, schedule.date, t, t);
 
-      addPoints(studentId, student.name, pointsEarned, 'checkin', scheduleId, '家长扫码签到获得积分');
+      addPoints(studentId, student.name, earned, 'checkin', scheduleId, '家长扫码签到获得积分');
       // 次数卡扣课（与教练点名同一规则，幂等）
       try {
         applyArrivalDeduction(studentId, scheduleId, t);
@@ -445,7 +625,7 @@ router.post('/parent', (req, res) => {
         }
       }
 
-      return { attendanceId: id };
+      return { attendanceId: id, pointsEarned: earned, onlyPaused };
     }).immediate();
     if (outcome.err) return res.json(fail(outcome.err));
 
@@ -456,10 +636,14 @@ router.post('/parent', (req, res) => {
       actorId: actor.id,
       actorRole: actor.role,
       before: null,
-      after: { status: 'present', points_earned: pointsEarned },
+      after: { status: 'present', points_earned: outcome.pointsEarned },
     });
 
-    res.json(success({ attendanceId: outcome.attendanceId, pointsEarned }));
+    res.json(success({
+      attendanceId: outcome.attendanceId,
+      pointsEarned: outcome.pointsEarned,
+      ...(outcome.onlyPaused ? { warning: '会员卡已暂停，本次未扣课未计积分' } : {}),
+    }));
   } catch (err) {
     console.error('[checkin parent]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail("操作失败，请稍后重试"));
@@ -600,11 +784,19 @@ function runAutoAbsent(dateStr) {
       JOIN students s ON s.id = e.student_id
       LEFT JOIN attendances a ON a.schedule_id = e.schedule_id AND a.student_id = e.student_id
       WHERE e.schedule_id = ? AND e.status = 'active' AND a.id IS NULL
+        AND COALESCE(e.enroll_type, '') <> 'makeup'
         AND ${ACTIVE_STUDENT_SQL}
     `).all(schedule.id);
     // 上面这条排除不可删：删除学员只置 students.status='refunded'、不清理 enrollments，
     // 漏掉它的话定时任务会**每天**为已删学员插一条 absent 并给家长推送缺席通知，
     // 考勤统计与出勤率也随之失真（家长还会收到早已退学孩子的训练提醒）。
+    //
+    // enroll_type='makeup' 的排除（补课链修复）：补课排期上的学员是**为补一次已缺席的课**
+    // 而来，若他没到场，把他再标成缺席，/makeup/eligible 就会认为他又产生了一次可补课的缺席
+    // → 被安排「补课的补课」，链条无限延伸。补课未到场应视为该次补课作废，而非新缺席。
+    // 判据用 COALESCE 兜底 NULL：enroll_type 为 NULL 时 `NULL <> 'makeup'` 在 SQL 三值逻辑下
+    // 不为真，会误伤历史数据里的普通报名。
+    // 只排除 makeup、不排除 reschedule：调课是把学员换到另一场次上正课，缺席照常标记。
 
     for (const stu of missingStudents) {
       const id = generateId('att_');
@@ -629,12 +821,22 @@ function runAutoAbsent(dateStr) {
       // 「缺席通知」规则被禁用时只记录缺席、不发通知（考勤记录不受开关影响）
       if (absentNotifyEnabled) {
         try {
-          const parent = db.prepare(`
-            SELECT parent_openid FROM parent_bindings
-            WHERE student_id = ? AND is_main = 1 LIMIT 1
-          `).get(stu.student_id);
-          if (parent && parent.parent_openid) {
-            const noticeId = generateId('NTF');
+          // 收件人 = 该学员的**全部有效家长**（去重去空），而不是「is_main=1 单家长」：
+          // 双家长家庭里非主家长同样需要知情（接送/请假/续费决策）；且历史数据
+          // 存在 is_main 全为 0 的学员，只取主家长会导致一条通知都发不出去。
+          const recipients = listParentOpenids(stu.student_id);
+          if (recipients.length === 0) {
+            // 无法送达必须留下可排查的痕迹，不能静默丢弃 —— 运营需要知道哪些学员
+            // 的相关通知是发不出去的（往往是建档时漏绑家长）。
+            console.warn(
+              `[checkin auto-absent] 学员 ${stu.student_id}（${stu.student_name || '未命名'}）` +
+              `排期 ${schedule.id} 缺席通知无法送达：无任何有效家长绑定`
+            );
+          }
+          for (const openid of recipients) {
+            // ID 必须带收件人后缀：同一条缺席提醒给多个家长各插一行，
+            // 若共用同一个 ID 会撞 notifications 主键，只建得出第一条。
+            const noticeId = `${generateId('NTF')}_${recipientIdSuffix(openid)}`;
             const title = '出勤提醒：未参加今日训练';
             // 文案来自「缺席通知」规则的 template（设置页可改），
             // 可用占位符：{{studentName}}/{{courseName}}/{{date}}/{{time}} + 机构称呼占位符
@@ -647,7 +849,7 @@ function runAutoAbsent(dateStr) {
             db.prepare(`
               INSERT INTO notifications (id, user_id, title, content, priority, category, summary, channel, status, sent_at, created_at)
               VALUES (?, ?, ?, ?, 'important', 'attendance', ?, 'inapp', 'sent', ?, ?)
-            `).run(noticeId, parent.parent_openid, title, content, content.slice(0, 60), now(), now());
+            `).run(noticeId, openid, title, content, content.slice(0, 60), now(), now());
           }
         } catch (e) {
           console.error('[checkin auto-absent notify]', e && e.stack ? e.stack : e);
@@ -731,43 +933,9 @@ function isUniqueViolation(e) {
 // ============ 收入结转（合同负债）辅助函数 ============
 // hasRevenueRecognitionTable / revertRevenueRecognition 已迁至 utils/attendance-revert.js
 // （取消排期路径同样需要冲销结转，必须共用同一实现）。
-
-/**
- * 从卡的**关联订单**推导单位课时价（元/课时）。
- * 关联关系取 member_cards.order_id —— 由 orders.js / membership.js 建卡时写入，
- * 是唯一能确定「这张卡到底是按哪笔钱买的」的凭据。
- * 刻意**不**跨订单模糊匹配（例如按 student_id + card_type_id 去别的订单里找）：
- * 同一学员可能以不同价格买过同类卡，那样推导出的单价是猜的。
- *
- * @returns {{unit:number, lineTotal:number, totalClasses:number, orderId:string}|null}
- *          null 表示无法可靠推导 —— 调用方必须写 amount=0 / basis='unresolved'
- */
-function deriveUnitPrice(card) {
-  if (!card || !card.order_id) return null;
-  const order = db.prepare('SELECT id, items, total_amount, payable_amount FROM orders WHERE id = ?').get(card.order_id);
-  if (!order) return null;
-  // 整单折扣比例（实付 / 标价）。与退卡（membership.js）同一口径：
-  // 结转基数是**实际收到的钱**，不是标价。若按标价结转，折扣单的累计结转额
-  // 会超过订单实付，合同负债（已收未结转）因此出现负数。
-  const orderTotal = Number(order.total_amount) || 0;
-  const orderPayable = Number(order.payable_amount) || 0;
-  const discountRatio = (orderTotal > 0 && orderPayable > 0 && orderPayable < orderTotal)
-    ? orderPayable / orderTotal : 1;
-  // 必须走 utils/items：双重编码（数组元素本身是 JSON 字符串）时直接取字段恒为 undefined
-  const items = parseItems(order.items);
-  if (!items.length) return null;
-  // 精确匹配本卡商品：优先 itemId（orders.js 写入字段），历史脏数据缺 itemId 时按卡类型名匹配。
-  // 不退回 items[0] —— 多明细订单会把别的商品价格算到本卡头上。
-  const item = items.find((i) => i.itemId && String(i.itemId) === String(card.card_type_id))
-    || items.find((i) => i.itemName && card.card_type_name && i.itemName === card.card_type_name);
-  if (!item) return null;
-  const rawLine = itemLineTotal(item);
-  const lineTotal = discountRatio < 1 ? Math.round(rawLine * discountRatio) : rawLine;
-  // 总课时数优先取卡上登记值（售出时的真实课时数），取不到才回退订单项数量
-  const totalClasses = Number(card.total_classes) > 0 ? Number(card.total_classes) : itemQuantity(item);
-  if (!(lineTotal > 0) || !(totalClasses > 0)) return null;
-  return { unit: lineTotal / totalClasses, lineTotal, totalClasses, orderId: order.id };
-}
+// deriveUnitPrice 已迁至 utils/revenue.js —— 时效卡按时间摊销结转同样需要它，
+// 且本文件是 routes/ 下的，若由 utils/revenue.js 反过来 require 本文件会成环，
+// 故按「单向依赖：routes/checkin.js → utils/revenue.js」组织。
 
 /**
  * 写一条收入结转记录。**必须由调用方置于「扣课成功」的同一事务内**，
