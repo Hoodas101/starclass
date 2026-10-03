@@ -5,6 +5,27 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.0.2] - 2026-10-03
+
+六份第三方审计报告全量核查收尾 + 用户决策项（D1–D10）落地 + E10 回归测试。无 API 破坏性变更；迁移 021–030 在启动时自动执行，已有数据不受影响。
+
+### 安全
+- **E10 回归固化**：教师「同时改手机号 + 改角色」在同一事务内赋权，旧 Token 立即吊销（`token_version` 链）。新增 `backend/tests/teacher-phone-role-regression.cjs` 锁定该行为。
+- **归档冻结**：学员归档时冻结积分子账户（`points.frozen`），余额/积分不再可被动用（闭环原 E4 待复核项）。
+- **导出限流**：`GET /settings/export` 加进程内单槽互斥锁 + 30s 自动过期，并发请求返回 429，杜绝高开销导出叠加。
+
+### 修复
+- **D1 积分滚动 24 个月过期**：迁移 030 加 `point_logs.expire_at`/`expired`，新增 `backend/utils/points-expiry.js`，`server.js` 日调度回收，发放 / 消费 / 购卡积分均写入过期时间。
+- **D3 时区确定性**：`server.js` 启动即 `TZ=Asia/Shanghai`，新增 `backend/utils/timezone.js` 统一业务日期口径。
+- **D4** 归档冻结积分（迁移 029 + 归档 / 反归档联动）；**D5** 导出互斥锁；**D6** 下架课程不可排期（已有闸门，核查确认零改动）；**D9** 导入后重算 `enrolled_count`（已有，核查确认零改动）。
+- **D2** 单租户 / **D7** 审计日志仅 admin / **D8** 仅微信通知：保持现状（经核查已是终态）。
+- 六报告审计修复全量收尾：P0×3 / P1×59 / P2·P3 业务资金类均已修或优化。
+
+### 变更
+- 版本号 bump 至 1.0.2（`backend/package.json` 与 `web-admin/package.json`）。
+- 新增 E10 回归套件，全量回归 **33/33 套件通过**（362 内部用例，0 失败）。
+- 补充部署说明（`docker/README.md`）与历史审计报告 / 经验归档（`docs/archive/`、`docs/learnings/`）。
+
 ## [1.0.0] - 2026-09-11
 
 首个公开发布版本（合并自 edu-admin-system 的能力与 edu-admin 完整三端）。
