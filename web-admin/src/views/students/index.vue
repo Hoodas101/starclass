@@ -1859,7 +1859,9 @@ onMounted(() => {
 
 .timeline-type-tag {
   font-size: var(--t-fs-2xs);
-  transform: scale(0.9);
+  // 移除 transform: scale(0.9)：它让声明 11px 的标签视觉缩到 9.9px（跌出字阶、中文笔画粘连），
+  // 且 transform 不触发布局重排 → 标签仍占 44px 只画 39.6px，右侧留 4.4px 空洞、与文字间距也失真。
+  // 保留 11px（字阶下限），如需更紧凑用 letter-spacing，不缩放字号。
 }
 
 .timeline-detail {

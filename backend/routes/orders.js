@@ -28,6 +28,28 @@ function canSales(req) {
   return isAdminReq(req) || hasPerm(getReqUser(req), 'sales');
 }
 
+/**
+ * 订单归属断言（写操作统一入口）。
+ *
+ * 非管理员只能操作「自己创建（orders.user_id = 本人 openid）」或「本人名下
+ * （orders.salesperson = 本人昵称）」的订单。此前 PUT /:id 与 POST /:id/cancel 只校验
+ * 角色（canSales），导致销售 A 可把销售 B 名下订单的金额改掉、状态改为 cancelled ——
+ * 横向越权且直接篡改他人业绩/提成基数。pay 早已有归属校验，此处对齐消除同语义三处写法不一。
+ */
+function canOperateOrder(req, order) {
+  if (isAdminReq(req)) return true;
+  const openid = getOpenId(req);
+  if (!openid) return false;
+  if (order.user_id && order.user_id === openid) return true;
+  const sp = order.salesperson ? String(order.salesperson).trim() : '';
+  if (sp) {
+    const me = db.prepare('SELECT nickname FROM users WHERE openid = ?').get(openid);
+    const myName = me && me.nickname ? String(me.nickname).trim() : '';
+    if (myName && sp === myName) return true;
+  }
+  return false;
+}
+
 // E3：把 date(paid_at/1000,'unixepoch','localtime') 这类表达式谓词改写为 paid_at 的毫秒区间比较。
 // 函数包裹的列用不上索引 → 每次 /stats 与订单列表筛选都对 orders 全表扫描；
 // 016 迁移建的 idx_orders_paid_at 只在裸列比较下才会被选中。
@@ -70,13 +92,21 @@ function isPurchasePointsEnabled() {
   }
 }
 
+// 收款渠道白名单：此前 payments.channel 恒为 'wechat'，现金/转账收款被记成微信，
+// 月底对账必然打架。允许前端传入并在白名单内归一，其余一律回退 'wechat'。
+const PAY_CHANNELS = ['wechat', 'cash', 'alipay', 'bank', 'other'];
+function normalizeChannel(ch) {
+  const v = String(ch == null ? '' : ch).trim().toLowerCase();
+  return PAY_CHANNELS.includes(v) ? v : 'wechat';
+}
+
 // 支付并激活会员卡（供直接录入已收款订单复用）
-function settleOrder(order, paidAt) {
+function settleOrder(order, paidAt, channel) {
   const currentTime = paidAt || now();
   db.prepare('UPDATE orders SET status = ?, paid_at = ?, updated_at = ? WHERE id = ?')
     .run('paid', currentTime, currentTime, order.id);
   db.prepare('INSERT INTO payments (id, order_id, order_no, user_id, amount, channel, status, paid_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(generateId('PAY'), order.id, order.order_no, order.user_id, order.payable_amount, 'wechat', 'success', currentTime, currentTime);
+    .run(generateId('PAY'), order.id, order.order_no, order.user_id, order.payable_amount, normalizeChannel(channel), 'success', currentTime, currentTime);
   grantOrderBenefits(order, currentTime);
 }
 
@@ -178,7 +208,7 @@ router.post('/', (req, res) => {
   try {
     // 创建销售单属于管理操作（家长购买走联系客服渠道）
     if (!canSales(req)) return res.status(403).json(safeFail('无销售录入权限'));
-    const { studentId, cardTypeId, items, discountAmount = 0, orderType = 'membership', salesperson = '', remark = '', status = 'pending', paidAt, is1v1 = 0, payableAmount: overrideAmount } = req.body;
+    const { studentId, cardTypeId, items, discountAmount = 0, orderType = 'membership', salesperson = '', remark = '', status = 'pending', paidAt, is1v1 = 0, revenueExcluded = 0, channel, payableAmount: overrideAmount } = req.body;
     const openid = getOpenId(req);
     if (!studentId) return res.json(fail('缺少成员ID'));
 
@@ -239,14 +269,14 @@ router.post('/', (req, res) => {
     // INSERT 与（若已付）结算同处一个事务：任一环节失败整体回滚，避免"已付订单无支付流水/未激活卡"
     db.transaction(() => {
       db.prepare(`
-        INSERT INTO orders (id, order_no, user_id, student_id, student_name, order_type, items, total_amount, discount_amount, payable_amount, status, salesperson, remark, is_1v1, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, orderNo, openid, studentId, student.name, orderType, JSON.stringify(orderItems), totalAmount, discountAmount, payableAmount, status, salespersonNorm, remark, is1v1 ? 1 : 0, currentTime, currentTime);
+        INSERT INTO orders (id, order_no, user_id, student_id, student_name, order_type, items, total_amount, discount_amount, payable_amount, status, salesperson, remark, is_1v1, revenue_excluded, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, orderNo, openid, studentId, student.name, orderType, JSON.stringify(orderItems), totalAmount, discountAmount, payableAmount, status, salespersonNorm, remark, is1v1 ? 1 : 0, revenueExcluded ? 1 : 0, currentTime, currentTime);
 
       // 直接录入已收款订单：立即结算并激活会员卡（settleOrder/grantOrderBenefits 内部按 reference_id 幂等去重）
       if (status === 'paid') {
         const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
-        settleOrder(order, paidAt || currentTime);
+        settleOrder(order, paidAt || currentTime, channel);
       }
 
       // 建单即确定应收金额，status='paid' 时还会立即结算建卡发积分；
@@ -703,9 +733,11 @@ router.put('/:id', (req, res) => {
   try {
     if (!canSales(req)) return res.status(403).json(safeFail('无订单修改权限'));
     const { id } = req.params;
-    const { payableAmount, salesperson, remark } = req.body;
+    const { payableAmount, salesperson, remark, revenueExcluded } = req.body;
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
     if (!order) return res.json(fail('订单不存在'));
+    // 归属校验：非管理员仅可修改自己名下订单（与 pay/cancel 同构，堵住销售篡改他人订单金额）
+    if (!canOperateOrder(req, order)) return res.status(403).json(safeFail('仅可操作自己名下的订单'));
     if (order.status === 'refunded' || order.status === 'cancelled') {
       return res.json(fail('已取消或已退款的订单不可修改'));
     }
@@ -725,6 +757,8 @@ router.put('/:id', (req, res) => {
     }
     if (salesperson !== undefined) { fields.push('salesperson = ?'); params.push(String(salesperson).trim()); }
     if (remark !== undefined) { fields.push('remark = ?'); params.push(String(remark)); }
+    // 核销/赠卡类订单不计入营收统计（财务各口径统一排除）
+    if (revenueExcluded !== undefined) { fields.push('revenue_excluded = ?'); params.push(revenueExcluded ? 1 : 0); }
     if (fields.length === 0) return res.json(fail('没有需要修改的内容'));
 
     const prevPayable = Number(order.payable_amount) || 0;
@@ -775,17 +809,21 @@ router.post('/:id/cancel', (req, res) => {
       return res.json(fail('订单已取消或已退款'));
     }
 
-    // 权限：管理员/销售可取消任意订单；家长只能取消自己的待支付订单
-    if (!canSales(req)) {
-      const openid = getOpenId(req);
-      const isOwner = openid && db.prepare(`
-        SELECT 1 FROM orders o
-        JOIN parent_bindings pb ON pb.student_id = o.student_id
-        WHERE o.id = ? AND pb.parent_openid = ?
-        LIMIT 1
-      `).get(id, openid);
-      if (!isOwner || order.status !== 'pending') {
-        return res.status(403).json(safeFail('仅可取消自己的待支付订单'));
+    // 权限：管理员可取消任意订单；销售仅可取消自己名下的订单；家长仅可取消自己的待支付订单
+    if (!isAdminReq(req)) {
+      if (canSales(req)) {
+        if (!canOperateOrder(req, order)) return res.status(403).json(safeFail('仅可取消自己名下的订单'));
+      } else {
+        const openid = getOpenId(req);
+        const isOwner = openid && db.prepare(`
+          SELECT 1 FROM orders o
+          JOIN parent_bindings pb ON pb.student_id = o.student_id
+          WHERE o.id = ? AND pb.parent_openid = ?
+          LIMIT 1
+        `).get(id, openid);
+        if (!isOwner || order.status !== 'pending') {
+          return res.status(403).json(safeFail('仅可取消自己的待支付订单'));
+        }
       }
     }
 
@@ -867,6 +905,17 @@ router.post('/:id/cancel', (req, res) => {
           before: { status: 'paid', payable_amount: fresh.payable_amount },
           after: { status: 'cancelled' },
         });
+      } else {
+        // 取消未支付订单：无资金回滚，但仍是状态变更，留痕以便追溯「谁取消了谁的单」
+        recordAudit(db, {
+          entity: 'order',
+          entityId: id,
+          action: 'cancel',
+          actorId: getOpenId(req),
+          actorRole: req.userRole || '',
+          before: { status: fresh.status },
+          after: { status: 'cancelled' },
+        });
       }
     })();
     if (!cancelled) return res.json(fail(dupReason || '订单无法取消'));
@@ -920,6 +969,16 @@ router.get('/', (req, res) => {
     // E3：日期筛选改为 paid_at 毫秒区间（半开），命中 idx_orders_paid_at，避免全表扫描
     if (startDate) { where += ' AND paid_at >= ?'; params.push(dayStartMs(startDate)); }
     if (endDate) { where += ' AND paid_at < ?'; params.push(dayEndMs(endDate)); }
+    // 业绩隔离：非管理员销售仅见自己名下订单（user_id=本人 openid 或 salesperson=本人昵称）。
+    // 需要「销售主管看全团队」时，为其显式授予 sales_all 权限键（默认不开），
+    // 避免用「看不见」代替角色区分。
+    if (!isAdminReq(req) && canSales(req) && !hasPerm(getReqUser(req), 'sales_all')) {
+      const openid = getOpenId(req);
+      const me = openid ? db.prepare('SELECT nickname FROM users WHERE openid = ?').get(openid) : null;
+      const myName = me && me.nickname ? String(me.nickname).trim() : '';
+      where += ' AND (user_id = ? OR salesperson = ?)';
+      params.push(openid || '', myName);
+    }
 
     const total = db.prepare(`SELECT COUNT(*) as count FROM orders o ${where.replace('WHERE', 'WHERE')}`).get(...params).count;
     const list = db.prepare(`

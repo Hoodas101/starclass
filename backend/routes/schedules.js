@@ -190,6 +190,17 @@ function checkConflict({ teacherId, classroomId, date, startTime, endTime, exclu
  * @param {{date?:*, startTime?:*, endTime?:*}} p 待校验字段；undefined/null/'' 表示「本字段不校验」
  * @returns {string|null} 不合法时返回**具体字段**的错误文案；合法返回 null
  */
+/**
+ * 把 HH:mm 归一化为两位补零（"8:00" → "08:00"）；不可解析时原样返回。
+ * 用于「存储/比较前归一化」，避免非补零写法（"8:00"）落库后与 "10:00" 做字符串比较
+ * 得出错误先后（"8" > "1"）。undefined/null/'' 原样透传，不影响「不传即不改」的语义。
+ */
+function padTime(v) {
+  if (v === undefined || v === null || v === '') return v;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(v));
+  return m ? `${String(Number(m[1])).padStart(2, '0')}:${m[2]}` : v;
+}
+
 function validateScheduleTime({ date, startTime, endTime }) {
   const has = (v) => v !== undefined && v !== null && v !== '';
   if (has(date)) {
@@ -202,11 +213,27 @@ function validateScheduleTime({ date, startTime, endTime }) {
       return '日期不存在，请检查（例如 2 月没有 30 日）';
     }
   }
-  const timeRe = /^\d{2}:\d{2}$/;
-  if (has(startTime) && !timeRe.test(String(startTime))) return '开始时间格式应为 HH:mm';
-  if (has(endTime) && !timeRe.test(String(endTime))) return '结束时间格式应为 HH:mm';
-  // HH:mm 两位补零，字符串比较与时间先后一致；相等也拒绝（零时长排期无意义且会干扰区间重叠判定）
-  if (has(startTime) && has(endTime) && String(startTime) >= String(endTime)) {
+  // 时间：格式 + 范围双重校验。旧实现只用 /^\d{2}:\d{2}$/ 校验格式、不校验范围，
+  // 于是 "25:00" / "00:99" 这类非法时间会落库（脏时间进课表 → 按时间窗筛选漏课、
+  // 字符串比较判先后出错）。此处同时：① 容忍非补零写法（"8:00"，收紧性改动的兼容缺口）；
+  // ② 强制小时 00-23、分钟 00-59。该函数被 POST /、POST /recursive、PUT /:id、
+  // PUT /rules/:id 共用，改一处即全覆盖。
+  const timeRe = /^\d{1,2}:\d{2}$/;
+  const inRange = (v) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(v));
+    if (!m) return false;
+    const h = Number(m[1]);
+    const mi = Number(m[2]);
+    return h >= 0 && h <= 23 && mi >= 0 && mi <= 59;
+  };
+  if (has(startTime) && (!timeRe.test(String(startTime)) || !inRange(startTime))) {
+    return '开始时间格式应为 HH:mm（小时 00-23，分钟 00-59）';
+  }
+  if (has(endTime) && (!timeRe.test(String(endTime)) || !inRange(endTime))) {
+    return '结束时间格式应为 HH:mm（小时 00-23，分钟 00-59）';
+  }
+  // 比较前先补零归一化，字符串比较才与时间先后一致；相等也拒绝（零时长排期无意义且干扰区间重叠判定）
+  if (has(startTime) && has(endTime) && padTime(startTime) >= padTime(endTime)) {
     return '结束时间必须晚于开始时间';
   }
   return null;
@@ -255,13 +282,21 @@ function ensureTempCourse() {
   try {
     if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可创建排期'));
     if (!requireStaffPerm(req, res, 'schedule', '排课')) return;
-    const { courseId, courseName, teacherId, teacherName, classroomId, date, startTime, endTime, maxStudents, remark, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, confirmOverride } = req.body;
+    let { courseId, courseName, teacherId, teacherName, classroomId, date, startTime, endTime, maxStudents, remark, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, confirmOverride } = req.body;
     if ((!courseId && !courseName) || !date || !startTime || !endTime) {
       return res.json(fail('活动名称、日期、开始时间、结束时间为必填'));
     }
     // 日期 / 时间合法性（格式 + 真实存在 + 先后顺序），非法直接拒绝，不写库
     const timeErr = validateScheduleTime({ date, startTime, endTime });
     if (timeErr) return res.json(fail(timeErr));
+    // 存储前补零归一化，保证库内 HH:mm 规范一致（"8:00" → "08:00"），避免字符串比较判先后出错
+    startTime = padTime(startTime);
+    endTime = padTime(endTime);
+    // maxStudents 类型/范围校验：此前传 "abc" / 999999 / 对象都会原样落库，导致满员判断与名额统计失效
+    if (maxStudents !== undefined && maxStudents !== null && maxStudents !== '') {
+      const ms = Number(maxStudents);
+      if (!Number.isInteger(ms) || ms < 0 || ms > 500) return res.json(fail('人数上限必须是 0-500 的整数'));
+    }
 
     // 冲突检测（教师 / 场地 / 学员）。
     // confirmOverride 仅**管理员**可用：本接口对教练也开放（isCoachReq），
@@ -321,7 +356,7 @@ function ensureTempCourse() {
 router.post('/recursive', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可创建排期'));
-    const { courseId, courseName, teacherId, teacherName, classroomId, repeatType = 'weekly', weekDays = [], intervalDays = 1, startTime, endTime, startDate, endDate, maxStudents, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, confirmOverride } = req.body;
+    let { courseId, courseName, teacherId, teacherName, classroomId, repeatType = 'weekly', weekDays = [], intervalDays = 1, startTime, endTime, startDate, endDate, maxStudents, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, confirmOverride } = req.body;
     if ((!courseId && !courseName) || !startTime || !endTime || !startDate || !endDate) {
       return res.json(fail('缺少必要参数'));
     }
@@ -340,6 +375,13 @@ router.post('/recursive', (req, res) => {
     if (startErr) return res.json(fail(startErr));
     const endErr = validateScheduleTime({ date: endDate });
     if (endErr) return res.json(fail(`结束${endErr}`));
+    // 存储前补零归一化 + maxStudents 类型/范围校验（与 POST / 同口径）
+    startTime = padTime(startTime);
+    endTime = padTime(endTime);
+    if (maxStudents !== undefined && maxStudents !== null && maxStudents !== '') {
+      const ms = Number(maxStudents);
+      if (!Number.isInteger(ms) || ms < 0 || ms > 500) return res.json(fail('人数上限必须是 0-500 的整数'));
+    }
     // 周期跨度上限 180 天：误填年份（如 2027）会一次生成上千条排期，难删且污染课表
     {
       const spanDays = (new Date(endDate) - new Date(startDate)) / 86400000;
@@ -476,6 +518,10 @@ function parentVisibleClassIds(req) {
  */
 router.get('/', (req, res) => {
   try {
+    // 读权限收口：排课列表含全机构课表与教练安排，属教学数据。销售默认无 schedule 权限键，
+    // 此前无守卫导致销售可见全部排期（业务信息边界失守）。仅对**员工**按 schedule 权限键判定：
+    // 家长等非员工（含无 role 的模拟请求）不受员工权限清单约束，仍走下方可见性过滤。
+    if (isStaffReq(req) && !requireStaffPerm(req, res, 'schedule', '排课')) return;
     const { startDate, endDate, teacherId, classroomId, classId, studentId } = req.query;
     const { page, pageSize, offset } = parsePagination(req.query);
 
@@ -1136,6 +1182,7 @@ router.post('/:id/enroll', (req, res) => {
       return res.json(fail('成员ID不合法'));
     }
     let bind;
+    let staffEnroll = false;
     if (isAdmin) {
       // 管理员代报名：无需家长绑定，直接按成员 ID 操作（用于新学员入班/纠错）
       if (!studentId) return res.json(fail('管理员代报名请指定成员ID'));
@@ -1148,6 +1195,18 @@ router.post('/:id/enroll', (req, res) => {
         return res.json(fail(any ? '该学员非在册状态，无法报名' : '成员不存在'));
       }
       bind = { student_id: stu.id, student_name: stu.name, parent_name: '管理员' };
+    } else if (isStaffReq(req)) {
+      // 员工代录名（教练/销售等有排课权限的员工账号）。员工账号在数据结构上不存在
+      // parent_bindings 记录，若落入下方家长分支必然 100% 失败（「该成员未绑定到当前账号」），
+      // 导致教练「排课→录名→点名」闭环断裂。此处走独立分支，不复用家长路径。
+      if (!studentId) return res.json(fail('代录名请指定成员ID'));
+      const stu = db.prepare(`SELECT s.id, s.name FROM students s WHERE s.id = ? AND ${ACTIVE_STUDENT_SQL}`).get(studentId);
+      if (!stu) {
+        const any = db.prepare('SELECT id FROM students WHERE id = ?').get(studentId);
+        return res.json(fail(any ? '该学员非在册状态，无法报名' : '成员不存在'));
+      }
+      bind = { student_id: stu.id, student_name: stu.name, parent_name: '员工代录' };
+      staffEnroll = true;
     } else if (studentId) {
       bind = db.prepare('SELECT * FROM parent_bindings WHERE parent_openid = ? AND student_id = ?').get(openid, studentId);
       if (!bind) return res.json(fail('该成员未绑定到当前账号，无法为其报名'));
@@ -1222,7 +1281,7 @@ router.post('/:id/enroll', (req, res) => {
       recordAudit(db, {
         entity: 'enrollment',
         entityId: `${s2.id}:${bind.student_id}`,
-        action: 'enroll',
+        action: staffEnroll ? 'staff_enroll' : 'enroll',
         actorId: actor.id,
         actorRole: actor.role,
         before: null,
@@ -1415,7 +1474,7 @@ router.get('/:id', (req, res) => {
     if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可修改排期'));
     if (!requireStaffPerm(req, res, 'schedule', '排课')) return;
     const { id } = req.params;
-    const { courseId, teacherId, classroomId, date, startTime, endTime, maxStudents, status, remark, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, confirmOverride } = req.body;
+    let { courseId, teacherId, classroomId, date, startTime, endTime, maxStudents, status, remark, groupCourseId, groupName, classId, class_name, duration_minutes, allow_self_booking, student_ids, class_count, price_per_class, confirmOverride } = req.body;
 
     const existing = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
     if (!existing) return res.json(fail('排期不存在'));
@@ -1441,10 +1500,18 @@ router.get('/:id', (req, res) => {
       endTime: endTime !== undefined ? endTime : null,
     });
     if (timeErr) return res.json(fail(timeErr));
+    // 存储前补零归一化（仅本次显式提供的字段；undefined 透传表示沿用原值）
+    startTime = padTime(startTime);
+    endTime = padTime(endTime);
+    // maxStudents 类型/范围校验（与创建侧同口径）
+    if (maxStudents !== undefined && maxStudents !== null && maxStudents !== '') {
+      const ms = Number(maxStudents);
+      if (!Number.isInteger(ms) || ms < 0 || ms > 500) return res.json(fail('人数上限必须是 0-500 的整数'));
+    }
     // 先后顺序用「生效值」判定：只改开始时间（晚于原结束时间）也必须拦下
     if (startTime !== undefined || endTime !== undefined) {
-      const effStart = startTime !== undefined ? startTime : existing.start_time;
-      const effEnd = endTime !== undefined ? endTime : existing.end_time;
+      const effStart = padTime(startTime !== undefined ? startTime : existing.start_time);
+      const effEnd = padTime(endTime !== undefined ? endTime : existing.end_time);
       if (effStart && effEnd && String(effStart) >= String(effEnd)) {
         return res.json(fail('结束时间必须晚于开始时间'));
       }

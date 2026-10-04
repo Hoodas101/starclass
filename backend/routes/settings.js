@@ -184,10 +184,23 @@ router.put('/', (req, res) => {
       churn_rules: '流失与召回规则',
     };
 
+    const actor = getActor(req);
     for (const key of KEYS) {
       if (body[key] !== undefined) {
         const value = typeof body[key] === 'string' ? body[key] : JSON.stringify(body[key]);
+        const prev = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
         upsert.run(key, labels[key] || key, value, '', currentTime);
+        // 系统设置变更（退费/积分/推送/称呼等规则）直接改变经营口径，属高危写操作。
+        // 此前 PUT /settings 全无留痕，改规则、改称呼方案事后无从追责，此处逐键记录前后值。
+        recordAudit(db, {
+          entity: 'settings',
+          entityId: key,
+          action: 'update_setting',
+          actorId: actor.id,
+          actorRole: actor.role,
+          before: { [key]: prev ? prev.value : null },
+          after: { [key]: value },
+        });
       }
     }
     res.json(success({ saved: true }));
@@ -226,19 +239,18 @@ function tryAcquireExportLock() {
   return true;
 }
 function releaseExportLock() {
-  if (_exportLockUntil.ts <= Date.now()) _exportLockUntil.ts = 0;
+  // 无条件清零。获取时写入的是「未来时刻」(now+30s)，若沿用 ts<=now 判据则恒为假，
+  // 锁只能等 30s 自然过期 —— 一次导出失败后 30 秒内所有人都被 429，提示却写「导出进行中」，
+  // 让人误以为真有任务在跑。超时自愈仍由 tryAcquireExportLock 兜底（防崩溃后死锁）。
+  _exportLockUntil.ts = 0;
 }
 
 router.get('/export', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json({ code: 403, data: null, message: '仅管理员可操作' });
-    // D5：同一时刻仅允许一个导出在跑，避免高开销导出并发拖垮服务。
-    if (!tryAcquireExportLock()) {
-      return res.status(429).json({ code: 429, data: null, message: '导出进行中，请稍后再试' });
-    }
-    try {
-    // 参数校验前置：utils/dataio.exportData 对缺失/非法的 from、to 会抛错（无范围的全库导出
-    // 已被刻意禁用），原先直接被 catch 成 500 —— 参数错误是客户端问题，应回 400 并说明必填。
+    // 参数校验先于抢锁：缺参/非法范围属客户端错误，不应占用导出锁（否则一个 400 请求
+    // 会让后续 30 秒内所有人都拿到 429）。utils/dataio.exportData 对缺失/非法的 from、to
+    // 会抛错（无范围的全库导出已被刻意禁用），原先直接被 catch 成 500 —— 参数错误应回 400。
     // 注意：带参时的正常行为（导出内容、文件名、Content-Type）完全不变。
     const fromRaw = req.query.from;
     const toRaw = req.query.to;
@@ -253,6 +265,11 @@ router.get('/export', (req, res) => {
     if (from > to) {
       return res.status(400).json({ code: 400, data: null, message: 'from 不能晚于 to' });
     }
+    // D5：同一时刻仅允许一个导出在跑，避免高开销导出并发拖垮服务（校验通过后才抢锁）。
+    if (!tryAcquireExportLock()) {
+      return res.status(429).json({ code: 429, data: null, message: '导出进行中，请稍后再试' });
+    }
+    try {
     const payload = exportData(req.query.modules, { dateFrom: from, dateTo: to });
     const json = JSON.stringify(payload);
     const ts = new Date();
@@ -373,8 +390,18 @@ router.post('/db-restore', rawUpload, async (req, res) => {
           ).get(t);
           if (!exists) { result[t] = 'skip(目标库无此表)'; continue; }
           if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(t)) { result[t] = 'skip(非法表名)'; continue; }
+          // 按「目标列 ∩ 源列」显式映射复制：旧版本备份的列数与当前库不一致时（如 students
+          // 由 5 列演进到 21 列），`INSERT INTO t SELECT * FROM src.t` 会因列数不匹配整体报错，
+          // 导致「升级后想回滚」这一灾备场景 100% 失败。缺列走默认值/NULL、多余列忽略，
+          // 保证结构演进后仍可恢复。t 已过上方标识符白名单校验，可安全内联。
+          const dstCols = db.prepare(`PRAGMA table_info("${t}")`).all().map((c) => c.name);
+          const srcCols = db.prepare(`PRAGMA src.table_info("${t}")`).all().map((c) => c.name);
+          const common = dstCols.filter((c) => srcCols.includes(c));
           db.prepare(`DELETE FROM "${t}"`).run();
-          db.prepare(`INSERT INTO "${t}" SELECT * FROM src."${t}"`).run();
+          if (common.length) {
+            const colList = common.map((c) => `"${c}"`).join(', ');
+            db.prepare(`INSERT INTO "${t}" (${colList}) SELECT ${colList} FROM src."${t}"`).run();
+          }
           result[t] = db.prepare(`SELECT COUNT(*) c FROM "${t}"`).get().c;
         }
         return result;
@@ -392,6 +419,17 @@ router.post('/db-restore', rawUpload, async (req, res) => {
       return res.status(500).json(safeFail('恢复过程中出错，已中止'));
     }
     try { fs.unlinkSync(tmp); } catch (_) {}
+    // 整库覆盖是最高危操作，必须留痕（谁、何时、恢复了哪些表、安全备份文件名），
+    // 否则「谁恢复了旧库」事后无从追责。
+    const restoreActor = getActor(req);
+    recordAudit(db, {
+      entity: 'data_restore',
+      entityId: safetyName,
+      action: 'db_restore',
+      actorId: restoreActor.id,
+      actorRole: restoreActor.role,
+      after: { summary, safetyBackup: safetyName },
+    });
     res.json(success({ summary, safetyBackup: safetyName }));
   } catch (err) {
     console.error('[db-restore]', err && err.stack ? err.stack : err);

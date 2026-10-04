@@ -44,14 +44,17 @@ function resolveConsumeClasses(scheduleId) {
  * `scopeMatches` 判据，其余调用方无感。
  *
  * 排序：先「课程范围匹配」的卡，再按 expires_at ASC（优先扣即将过期的）。
- * 兜底：若没有任何卡匹配课程范围，回退到「任意合格卡中 expires_at ASC 第一张」——
- * 数据不规范（自由文本没写对）时也**绝不能拒绝扣课**，这是稳定性底线。
+ * 无卡可扣的两种情形区分处理：
+ *   · 学员没有任何合格卡（余额/有效期不足）→ 返回 null（调用方维持「不扣课」原行为）；
+ *   · 有合格卡但全部课程范围不匹配 → 返回 { scopeMismatch: true }，由调用方拒绝扣课并提示，
+ *     绝不静默扣错卡（否则 1v1 私教卡会被团课消耗，造成营收错误）。
  *
  * @param {string} studentId
  * @param {string} scheduleId
  * @param {number} t 当前时间戳（毫秒）
  * @param {number} per 本次要扣的课时数（remaining_classes >= per 才合格）
- * @returns {object|null} member_cards 行（含 course_scope 便于调用方留痕），无合格卡时 null
+ * @returns {object|null} member_cards 行（含 course_scope 便于调用方留痕）；
+ *                        无合格卡时 null；有卡但范围不匹配时 { scopeMismatch: true }
  */
 function pickCardForDeduction(studentId, scheduleId, t, per) {
   // LEFT JOIN 卡种取 course_scope：member_cards 上只有 card_type_id，范围策略存在卡种（membership_cards）。
@@ -79,7 +82,15 @@ function pickCardForDeduction(studentId, scheduleId, t, per) {
   const matched = cards.filter(scopeMatches);
   // 已按 expires_at ASC，matched[0] 即「匹配范围内最先到期的卡」
   if (matched.length) return matched[0];
-  return cards[0]; // 兜底：没有任何卡命中范围时不拒绝扣课
+  // 有合格卡（余额/有效期都够）但全部课程范围不匹配：
+  //   · 排期绑定的是**真实课程**（course_id 存在且非内置「临时活动」占位）→ 返回显式标记，
+  //     由调用方拒绝扣课，避免把 1v1 私教卡静默扣到团课上（1v1 单价数倍于团课，误扣即营收错误）。
+  //     此前直接 `return cards[0]` 兜底，正是「私教卡被团课消耗」的根因。
+  //   · 临时活动 / 无课程（course_temp）→ 课程范围无从判定，沿用兜底扣任意合格卡，
+  //     保持既有语义（自定义活动名不参与范围匹配）。
+  const isRealCourse = sch && sch.course_id && sch.course_id !== 'course_temp';
+  if (isRealCourse) return { scopeMismatch: true };
+  return cards[0];
 }
 
 module.exports = { resolveConsumeClasses, pickCardForDeduction };

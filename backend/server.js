@@ -538,6 +538,10 @@ function scheduleAutoAbsent() {
 }
 
 scheduleAutoAbsent();
+// 开机补跑：该任务 23:30 已过时顺延次日、targetDate 恒为当天；若服务在 23:30 宕机或重启，
+// 当天缺席将永久漏标（其余定时任务都有「启动即跑」兜底，仅此一处例外）。
+// runAutoAbsent 幂等（attendances 唯一索引兜底），重复执行安全；只标记「已结束且未签到」的场次。
+runAutoAbsentDaily();
 
 // ============================================
 // 自动定时数据库备份

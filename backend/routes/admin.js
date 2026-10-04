@@ -82,8 +82,10 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
   try {
     const today = formatDate(now());
     const currentTime = now();
-    // 数据范围：all=全机构 / me=仅当前用户（CRM OverviewScopeToggle 思想）
-    const scope = req.query.scope === 'me' ? 'me' : 'all';
+    // 数据范围：all=全机构 / me=仅当前用户（CRM OverviewScopeToggle 思想）。
+    // 非管理员强制 me：销售/教练默认持有 dashboard 权限键，若缺省为 all，会看到
+    // 全机构营收与他人业绩榜（业绩保密性失效）。管理员可显式切 all。
+    const scope = isAdminReq(req) ? (req.query.scope === 'me' ? 'me' : 'all') : 'me';
     const u = getReqUser(req);
     let spName = '';
     if (scope === 'me' && u) {
@@ -881,7 +883,7 @@ router.get('/teachers', staffRead, (req, res) => {
  * 注册位置：必须早于任何 /teachers/:id 动态路由，否则会被其吞掉（本文件动态路由是
  * PUT/DELETE /teachers/:id，方法不同不会冲突，但仍按约定就近放置以防日后新增 GET）。
  */
-router.get('/teachers/options', (req, res) => {
+router.get('/teachers/options', staffRead, (req, res) => {
   try {
     const list = db.prepare(`
       SELECT id, name FROM teachers WHERE status = 'active' ORDER BY created_at ASC

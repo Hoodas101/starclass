@@ -61,7 +61,7 @@
               </template>
               <!-- 已安排的试听：可一键转正式学员，打通「试听 → 学员 → 开卡」主链路 -->
               <el-button
-                v-else-if="row.status === 'assigned' && isAdmin"
+                v-else-if="row.status === 'assigned'"
                 type="primary"
                 link
                 size="small"

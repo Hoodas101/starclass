@@ -484,10 +484,11 @@ router.get('/', (req, res) => {
     }
     if (keyword) {
       where += ` AND (s.name LIKE ? ESCAPE '\\' OR s.school LIKE ? ESCAPE '\\' OR s.grade LIKE ? ESCAPE '\\'
+        OR s.remark LIKE ? ESCAPE '\\'
         OR EXISTS (SELECT 1 FROM parent_bindings pb2 WHERE pb2.student_id = s.id AND pb2.parent_phone LIKE ? ESCAPE '\\')
         OR EXISTS (SELECT 1 FROM parent_bindings pb3 WHERE pb3.student_id = s.id AND pb3.parent_name LIKE ? ESCAPE '\\'))`;
       const kw = `%${escapeLike(keyword)}%`;
-      params.push(kw, kw, kw, kw, kw);
+      params.push(kw, kw, kw, kw, kw, kw);
     }
     if (startDate) { where += ' AND s.join_date >= ?'; params.push(startDate); }
     if (endDate) { where += ' AND s.join_date <= ?'; params.push(endDate); }
@@ -500,8 +501,8 @@ router.get('/', (req, res) => {
             WHERE mc4.student_id = s.id AND mc4.status = 'active') IS NULL THEN 1 ELSE 0 END ASC,
           (SELECT MIN(mc4.expires_at) FROM member_cards mc4
             WHERE mc4.student_id = s.id AND mc4.status = 'active') ASC,
-          s.created_at DESC`
-      : 'ORDER BY s.created_at DESC';
+          s.created_at DESC, s.id DESC`
+      : 'ORDER BY s.created_at DESC, s.id DESC';
     const list = db.prepare(`
       SELECT s.id, s.member_no, s.archived, s.name, s.gender, s.birthday, s.school, s.grade, s.hobby, s.level, s.remark,
         s.status, s.join_date, s.created_at, s.updated_at,
@@ -897,6 +898,13 @@ router.put('/:id', requireAuth, (req, res) => {
       return res.json(fail(`生日「${birthdayVal}」不是有效日期（格式 YYYY-MM-DD）`));
     }
 
+    // 状态枚举白名单：此前后端无校验，非法值（如 inactive）会静默入库 → 列表标签空白、
+    // 按状态筛选失效、报表口径失真，且系统不报错、排查成本高。此处与前端可选值对齐。
+    const VALID_STATUS = ['active', 'paused', 'refunded', 'churn', 'graduated'];
+    if (status !== undefined && status !== null && status !== '' && !VALID_STATUS.includes(status)) {
+      return res.json(fail('状态取值不合法'));
+    }
+
     // 家长（非管理员）仅可修改成员基础信息字段，禁止修改 status / archived / member_no 等管理字段
     if (bind && !isAdmin) {
       db.prepare(`
@@ -1086,6 +1094,9 @@ router.delete('/:id', requireAuth, (req, res) => {
       // 已删学员仍留在列表里（且因会员卡仍有效而被派生状态覆盖成「在读」），删除等于没删。
       db.prepare("UPDATE students SET status = 'refunded', archived = 1, updated_at = ? WHERE id = ?").run(now(), id);
       db.prepare('DELETE FROM parent_bindings WHERE student_id = ?').run(id);
+      // 一并清理积分流水：此前只清了 parent_bindings，point_logs 残留成孤儿记录
+      //（由系统产生，非导入遗留），对账时会出现无法归属的积分明细。
+      db.prepare('DELETE FROM point_logs WHERE student_id = ?').run(id);
 
       // 冻结该学员名下仍有效的会员卡：归档后卡仍为 active，不仅会让派生状态把已删学员
       // 显示成「在读」，扣课/续费/到期提醒也会继续把这张卡当作有效卡使用。

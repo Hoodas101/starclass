@@ -23,6 +23,14 @@ const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 // trial_bookings.student_id 列由 migrations/028 统一创建（migrations 先于路由加载执行），
 // 此处不再做运行时补列 —— schema 变更统一归 migrations 拥有，避免启动时隐式改表结构。
 
+// 手机号脱敏：保留前 3 位与后 4 位，中间打码（无值/过短原样返回）。
+// 用于体验课列表对非授权角色的 PII 裁剪（家长手机号属个人信息）。
+function maskPhone(p) {
+  const s = p == null ? '' : String(p);
+  if (s.length < 7) return s;
+  return s.slice(0, 3) + '****' + s.slice(-4);
+}
+
 // 公开接口频控：同一手机号 1 小时内最多提交 5 次，防止体验课预约被刷
 const trialPhoneLimits = new Map();
 const TRIAL_LIMIT_WINDOW = 60 * 60 * 1000;
@@ -161,7 +169,17 @@ router.get('/list', (req, res) => {
       SELECT * FROM trial_bookings ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?
     `).all(...params, pageSize, offset);
 
-    res.json(success({ list, total, page, pageSize }));
+    // 读侧 PII 收口：家长手机号 / 微信 openid 属个人信息，仅管理员与拥有 growth 权限
+    // （可办理成交）的员工可见；教练等其余角色按域裁剪，避免招生线索 PII 外泄。
+    // 与写侧 canConvertTrial 判据一致（此前读写判据不一致：写侧收紧、读侧全量返回）。
+    const canSeePII = canConvertTrial(req);
+    const safeList = canSeePII ? list : list.map((r) => ({
+      ...r,
+      parent_phone: maskPhone(r.parent_phone),
+      parent_openid: '',
+    }));
+
+    res.json(success({ list: safeList, total, page, pageSize }));
   } catch (err) {
     console.error('[trial list]', err);
     res.status(500).json(safeFail('获取预约列表失败'));

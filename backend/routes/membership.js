@@ -11,7 +11,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, isAdminReq, isCoachReq, canViewStudentData, calcCardExpiresAt, parsePagination } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, isAdminReq, isCoachReq, hasPerm, getReqUser, canViewStudentData, calcCardExpiresAt, parsePagination } = require('../utils');
 // 订单明细解析 / 每次课消耗课时数：与签到扣课、导出报表共用同一实现
 const { parseItems, itemLineTotal } = require('../utils/items');
 const { resolveConsumeClasses } = require('../utils/deduction');
@@ -229,6 +229,12 @@ router.post('/card-type', (req, res) => {
  */
 router.get('/card-types', (req, res) => {
   try {
+    // 读侧与写侧对齐：卡种含定价（price），属销售/管理数据。此前读侧无任何守卫，
+    // 教练可读全部卡种价格；写侧（POST/PUT/DELETE）早已 adminOnly —— 读写判据不一致。
+    // 管理员与销售（需按卡种下单）可读，其余角色拒绝。
+    if (!isAdminReq(req) && !hasPerm(getReqUser(req), 'sales')) {
+      return res.status(403).json(safeFail('无权查看产品价格'));
+    }
     const { type } = req.query;
     // 带上到店限次字段：管理端产品页需要展示/回填，否则「已设置限次」在列表里看不见
     let sql = `SELECT id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, transferable, refundable, is_active, product_type, unit, description, visit_limit_per_week, visit_limit_per_month

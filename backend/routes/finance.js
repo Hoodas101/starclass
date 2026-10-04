@@ -25,31 +25,61 @@ router.use((req, res, next) => {
   next();
 });
 
+// 统一时间范围解析：兼容 startDate/endDate（YYYY-MM-DD）与 from/to（epoch 毫秒 或 YYYY-MM-DD）。
+// 此前各接口只认 startDate/endDate，而 /settings/export 用的是 from/to —— 集成方按 from/to 调用
+// 财务接口会被静默忽略、回退到默认区间（「少了 30 万」却无任何报错）。现在：
+//   · 显式传入但非法 → 返回 { error }，调用方回 400（不再静默回退）；
+//   · 未传任何区间 → 返回 { none: true }，由调用方套用各自默认（本月 / 本年）。
+function toDayStart(v) {
+  if (v == null || v === '') return NaN;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(v))) {
+    const t = new Date(String(v) + 'T00:00:00').getTime();
+    return Number.isFinite(t) ? t : NaN;
+  }
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+}
+function toDayEnd(v) {
+  if (v == null || v === '') return NaN;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(v))) {
+    const t = new Date(String(v) + 'T23:59:59.999').getTime();
+    return Number.isFinite(t) ? t : NaN;
+  }
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+}
+function resolveRange(q) {
+  const rawStart = q.startDate !== undefined ? q.startDate : q.from;
+  const rawEnd = q.endDate !== undefined ? q.endDate : q.to;
+  const hasStart = rawStart !== undefined && rawStart !== '';
+  const hasEnd = rawEnd !== undefined && rawEnd !== '';
+  if (!hasStart && !hasEnd) return { none: true };
+  const start = toDayStart(rawStart);
+  const end = toDayEnd(rawEnd);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    return { error: '时间参数格式应为 YYYY-MM-DD 或 epoch 毫秒（startDate/endDate 或 from/to）' };
+  }
+  if (start > end) return { error: '开始时间不能晚于结束时间' };
+  return { start, end };
+}
+
 /**
  * GET /api/finance/summary — 收支汇总
- * Query: { startDate?, endDate? } 默认本月
+ * Query: { startDate?, endDate? } 或 { from?, to? }，默认本月
  */
-// 校验并转换 YYYY-MM-DD 日期；非法值返回 NaN，由调用方回退默认区间
-function parseDateParam(v) {
-  if (typeof v !== 'string') return NaN;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return NaN;
-  const t = new Date(v + 'T00:00:00').getTime();
-  return Number.isFinite(t) ? t : NaN;
-}
 
 router.get('/summary', (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const range = resolveRange(req.query);
+    if (range.error) return res.status(400).json(safeFail(range.error));
     let start, end;
-    const startT = startDate ? parseDateParam(startDate) : NaN;
-    const endT = endDate ? parseDateParam(endDate) : NaN;
-    if (Number.isFinite(startT) && Number.isFinite(endT)) {
-      start = startT;
-      end = new Date(endDate + 'T23:59:59.999').getTime();
-    } else {
+    if (range.none) {
       const now = new Date();
       start = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
       end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999).getTime();
+    } else {
+      start = range.start;
+      end = range.end;
     }
 
     // 收入口径含 status IN ('paid','refunded')：订单退完会把 status 翻转为 refunded，
@@ -61,7 +91,7 @@ router.get('/summary', (req, res) => {
              COALESCE(SUM(discount_amount), 0) as total_discount,
              COALESCE(SUM(refunded_amount), 0) as total_refunded
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at <= ?
     `).get(start, end);
 
     // 退款总额（与收入同一行集合：paid 的部分退 + refunded 的全额退，避免跨口径双扣）。
@@ -70,7 +100,7 @@ router.get('/summary', (req, res) => {
       SELECT COUNT(*) as refund_count,
              COALESCE(SUM(refunded_amount), 0) as refund_amount
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND COALESCE(refunded_amount, 0) > 0
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND COALESCE(refunded_amount, 0) > 0
         AND ${REFUND_TS_SQL} >= ? AND ${REFUND_TS_SQL} <= ?
     `).get(start, end);
 
@@ -81,7 +111,7 @@ router.get('/summary', (req, res) => {
              COALESCE(SUM(payable_amount), 0) as revenue,
              COALESCE(SUM(refunded_amount), 0) as refunded
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at <= ?
       GROUP BY order_type
     `).all(start, end);
 
@@ -135,7 +165,7 @@ router.get('/summary', (req, res) => {
       const collectedAllTime = db.prepare(`
         SELECT COALESCE(SUM(payable_amount - refunded_amount), 0) AS v
         FROM orders
-        WHERE status IN ('paid', 'refunded') AND order_type != 'refund'
+        WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0
       `).get().v || 0;
       contractLiability = collectedAllTime - recognizedAllTime;
     } catch (e) {
@@ -204,7 +234,7 @@ router.get('/monthly', (req, res) => {
         COALESCE(SUM(payable_amount), 0) as revenue,
         COALESCE(SUM(discount_amount), 0) as discount
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at <= ?
       GROUP BY month
       ORDER BY month
     `).all(startMs, endMs);
@@ -217,7 +247,7 @@ router.get('/monthly', (req, res) => {
         strftime('%m', datetime(${REFUND_TS_SQL}/1000, 'unixepoch', 'localtime')) as month,
         COALESCE(SUM(refunded_amount), 0) as refunded
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND COALESCE(refunded_amount, 0) > 0
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND COALESCE(refunded_amount, 0) > 0
         AND ${REFUND_TS_SQL} >= ? AND ${REFUND_TS_SQL} <= ?
       GROUP BY month
       ORDER BY month
@@ -286,17 +316,16 @@ router.get('/monthly', (req, res) => {
  */
 router.get('/by-product', (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const range = resolveRange(req.query);
+    if (range.error) return res.status(400).json(safeFail(range.error));
     let start, end;
-    const startT = startDate ? parseDateParam(startDate) : NaN;
-    const endT = endDate ? parseDateParam(endDate) : NaN;
-    if (Number.isFinite(startT) && Number.isFinite(endT)) {
-      start = startT;
-      end = new Date(endDate + 'T23:59:59.999').getTime();
-    } else {
+    if (range.none) {
       const now = new Date();
       start = new Date(now.getFullYear(), 0, 1).getTime();
       end = now.getTime();
+    } else {
+      start = range.start;
+      end = range.end;
     }
 
     // E16：原实现把区间内每张订单的 items 整行读进 JS、逐条 JSON.parse 再在 JS 里做加权分摊，
@@ -336,7 +365,7 @@ router.get('/by-product', (req, res) => {
                CASE WHEN json_valid(o.items) AND json_type(o.items) = 'array'
                     THEN o.items ELSE '[]' END AS items_json
         FROM orders o
-        WHERE o.status IN ('paid', 'refunded') AND o.order_type != 'refund'
+        WHERE o.status IN ('paid', 'refunded') AND o.order_type != 'refund' AND o.revenue_excluded = 0
           AND (
             (o.paid_at >= ? AND o.paid_at <= ?)
             OR (COALESCE(o.refunded_amount, 0) > 0 AND ${REFUND_TS_SQL} >= ? AND ${REFUND_TS_SQL} <= ?)
@@ -405,17 +434,16 @@ router.get('/by-product', (req, res) => {
  */
 router.get('/by-sales', (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const range = resolveRange(req.query);
+    if (range.error) return res.status(400).json(safeFail(range.error));
     let start, end;
-    const startT = startDate ? parseDateParam(startDate) : NaN;
-    const endT = endDate ? parseDateParam(endDate) : NaN;
-    if (Number.isFinite(startT) && Number.isFinite(endT)) {
-      start = startT;
-      end = new Date(endDate + 'T23:59:59.999').getTime();
-    } else {
+    if (range.none) {
       const now = new Date();
       start = new Date(now.getFullYear(), 0, 1).getTime();
       end = now.getTime();
+    } else {
+      start = range.start;
+      end = range.end;
     }
 
     // 收入/单量/1v1 按「订单支付月份」（paid_at）归属。
@@ -429,7 +457,7 @@ router.get('/by-sales', (req, res) => {
         COALESCE(SUM(payable_amount), 0) as revenue,
         COALESCE(SUM(CASE WHEN is_1v1 = 1 THEN 1 ELSE 0 END), 0) as vip_count
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at <= ?
       GROUP BY COALESCE(TRIM(salesperson), '')
     `).all(start, end);
 
@@ -439,7 +467,7 @@ router.get('/by-sales', (req, res) => {
     const refundList = db.prepare(`
       SELECT COALESCE(TRIM(salesperson), '') AS salesperson, COALESCE(SUM(refunded_amount), 0) as refunded
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND COALESCE(refunded_amount, 0) > 0
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND COALESCE(refunded_amount, 0) > 0
         AND ${REFUND_TS_SQL} >= ? AND ${REFUND_TS_SQL} <= ?
       GROUP BY COALESCE(TRIM(salesperson), '')
     `).all(start, end);

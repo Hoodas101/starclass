@@ -757,6 +757,10 @@ router.get('/points/logs', (req, res) => {
 router.post('/points/adjust', (req, res) => {
   try {
     if (!canGrowth(req)) return res.status(403).json(safeFail('无增长中心权限'));
+    // 收紧为仅管理员：积分可影响学员权益与促销，此前任意持有 growth 权限的销售
+    // 都能对【任意学员】（非自己名下）发放积分（上限 9999、无审批），属资损风险。
+    // 若确有销售赠送场景，应改为「申请 → 管理员审批」。
+    if (!isAdminReq(req)) return res.status(403).json(safeFail('积分调整仅管理员可操作'));
     const { studentId, type, amount, reason = '' } = req.body;
     if (!studentId || !type || !amount || amount <= 0) return res.json(fail('参数不完整'));
     if (!['earn', 'consume'].includes(type)) return res.json(fail('类型无效'));

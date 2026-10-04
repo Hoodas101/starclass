@@ -35,7 +35,7 @@ const DEFAULT_NOTIFICATION_RULES = [
     trigger: '到期前15/7/1天',
     advanceTime: 0,
     reminderDays: [15, 7, 1],
-    template: '您的孩子{{studentName}}的会员卡即将到期，请及时续期。',
+    template: '您的孩子{{studentName}}的{{cardType}}即将到期，请及时续期。',
   },
   {
     name: '缺席通知',
@@ -440,7 +440,7 @@ function generateRenewalReminders(nowMs = Date.now()) {
     // 以及 {{learner}}/{{course}}/{{org}} 等机构称呼占位符
     const content = renderNotificationTemplate(template, {
       studentName: card.student_name || '孩子',
-      cardType: card.card_type_name || '会员卡',
+      cardType: card.card_type_name || applyTerms('会员卡', terms),
       days: String(daysLeft),
       expireDate,
     }, terms);

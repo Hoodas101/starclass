@@ -23,10 +23,10 @@
 
     <!-- 今日活动列表 -->
     <div class="today-courses">
-      <h3 class="section-title">今日活动</h3>
+      <h3 class="section-title">{{ dateLabel }}活动</h3>
       <div v-if="!loading && todayCourses.length === 0 && !error" class="no-courses-tip">
         <el-icon :size="18"><Calendar /></el-icon>
-        <span>今日暂无{{ $t('course') }}安排，可在「排期管理」创建{{ $t('course') }}</span>
+        <span>{{ dateLabel }}暂无{{ $t('course') }}安排，可在「排期管理」创建{{ $t('course') }}</span>
       </div>
       <ListErrorState v-if="!loading && error" :error="error" @retry="loadTodayCourses" />
       <div class="course-cards">
@@ -197,6 +197,9 @@ import { useSettingsStore } from '@/store/settings'
 // ============================================
 const selectedDate = ref(dayjs().format('YYYY-MM-DD'))
 const selectedCourse = ref(null)
+// 标题/空状态随所选日期动态化：本页有日期选择器，此前文案写死「今日」，
+// 切到明天/昨天后仍显示「今日暂无课程安排」，教练会误以为系统没加载出来而反复刷新。
+const dateLabel = computed(() => (selectedDate.value === dayjs().format('YYYY-MM-DD') ? '今日' : selectedDate.value))
 
 const statusTextMap = {
   pending: '待签到',

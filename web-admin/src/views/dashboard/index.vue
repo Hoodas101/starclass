@@ -378,8 +378,11 @@ const t = settingsStore.t
 const userStore = useUserStore()
 
 const router = useRouter()
-// 范围切换状态记忆（CRM OverviewScopeToggle 一致体验）
-const dashboardScope = ref(localStorage.getItem('edu_dash_scope') || 'all')
+// 范围切换状态记忆（CRM OverviewScopeToggle 一致体验）。
+// 缺省按角色区分：销售/教练默认 'me'（只看本人业绩），管理员保持 'all'。
+// 此前缺省恒为 'all'，销售登录即看到全机构营收与他人业绩榜（业绩保密性失效）。
+// 后端亦对非管理员强制 scope=me 兜底，此处仅对齐默认值避免首屏闪烁。
+const dashboardScope = ref(localStorage.getItem('edu_dash_scope') || (userStore.userRole === 'admin' ? 'all' : 'me'))
 
 const onScopeChange = () => {
   localStorage.setItem('edu_dash_scope', dashboardScope.value)

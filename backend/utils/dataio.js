@@ -22,7 +22,7 @@ const FORMAT_VERSION = 1;
 // 表名、列名全部来自此处受控常量，导入导出时使用 PRAGMA 读取列，避免手写漂移。
 // desc：用于导出/导入确认弹窗中向管理员说明该模块具体包含哪些数据。
 const MODULES = [
-  { key: 'students',      label: '成员',       tables: ['students', 'parent_bindings'], desc: '成员档案：姓名、性别、生日、学校、年级、联系方式、入会日期、状态，以及家长绑定关系' },
+  { key: 'students',      label: '成员',       tables: ['students', 'parent_bindings', 'physical_tests'], desc: '成员档案：姓名、性别、生日、学校、年级、联系方式、入会日期、状态，家长绑定关系，以及体测记录' },
   { key: 'staff',         label: '员工与场地', tables: ['teachers', 'classrooms', 'payroll_logs'], desc: '员工与场地：教练/老师资料、教室场地信息、工资发放记录' },
   { key: 'courses',       label: '课程与活动', tables: ['courses', 'schedule_rules'], desc: '课程与活动：课程信息、自动排课规则' },
   { key: 'classes',       label: '班级',       tables: ['classes', 'class_members', 'student_class'], desc: '班级：班级定义、班级成员与学员班级归属' },
@@ -30,9 +30,9 @@ const MODULES = [
   { key: 'enrollments',   label: '报名',       tables: ['enrollments'], desc: '报名：成员报名记录' },
   { key: 'attendances',   label: '签到记录',   tables: ['attendances', 'deduction_logs'], desc: '签到记录：考勤明细与扣课记录' },
   { key: 'makeup',        label: '补课',       tables: ['makeup_records'], desc: '补课：缺勤补课记录（原排课 → 补课排课的对应关系）' },
-  { key: 'memberships',   label: '会员卡',     tables: ['membership_cards', 'member_cards'], desc: '会员卡：卡类型定义与成员持卡实例（剩余课时、有效期等）' },
+  { key: 'memberships',   label: '会员卡',     tables: ['membership_cards', 'member_cards', 'card_transfer_logs'], desc: '会员卡：卡类型定义、成员持卡实例（剩余课时、有效期等）与卡转让流水' },
   { key: 'points',        label: '积分',       tables: ['points', 'point_logs'], desc: '积分：积分账户余额与积分流水' },
-  { key: 'orders',        label: '订单与支付', tables: ['orders', 'payments'], desc: '订单与支付：销售订单、收款/退款记录' },
+  { key: 'orders',        label: '订单与支付', tables: ['orders', 'payments', 'revenue_recognitions'], desc: '订单与支付：销售订单、收款/退款记录、收入摊销台账（权责发生制结转）' },
   { key: 'notifications', label: '通知与推送', tables: ['notifications', 'notification_reads', 'subscribe_msg_logs', 'suppressions'], desc: '通知与推送：站内/微信推送记录、已读状态、订阅消息发送日志、退订抑制名单' },
   { key: 'leaves',        label: '请假',       tables: ['leave_requests', 'leave_deduction_logs'], desc: '请假：家长请假申请与审批、请假扣减流水' },
   { key: 'comments',      label: '教练点评',   tables: ['coach_comments'], desc: '教练点评：教练对学员的课堂点评记录' },
@@ -63,8 +63,13 @@ const MODULE_MAP = Object.fromEntries(MODULES.map((m) => [m.key, m]));
  * 故与 db-restore 共用同一份保护集合（此前 db-restore 自带一份、导入侧完全没有）。
  *
  * sqlite_sequence 是 SQLite 内部自增台账，一并排除。
+ *
+ * audit_log 亦列入：审计日志是合规与追责凭证，必须只增不改。若允许通过
+ * /settings/import?modules=audit&replace=true 或 db-restore 覆盖，则可「事后抹痕」——
+ * 恢复一份旧备份即整体回滚 188 条审计记录，且破坏路径是正常功能操作而非入侵。
+ * 导出侧不受影响（MODULES 仍含 audit，便于合规备份），仅禁止写入。
  */
-const FORBIDDEN_TABLES = new Set(['users', 'settings', 'sqlite_sequence']);
+const FORBIDDEN_TABLES = new Set(['users', 'settings', 'sqlite_sequence', 'audit_log']);
 
 // 各表可用于「按时间范围导出」的日期列（均为 epoch 毫秒）。
 // 仅当该列存在且查询给定了 from/to 时，导出才对该表做时间筛选；其余表导出全部。

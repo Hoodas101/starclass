@@ -20,6 +20,9 @@ const { reversePoints, hasRevenueRecognitionTable, revertRevenueRecognition, rev
 // 单价推导（计次卡元/课时）：从卡的关联订单反推实付价，与时效卡摊销共用同一实现。
 // 禁止在本文件自行 JSON.parse 订单明细（parseItems 等已收口到 utils/items / utils/revenue）。
 const { deriveUnitPrice } = require('../utils/revenue');
+// 积分过期时间：签到积分是最大来源，必须与订单/手工调整写入同一 expire_at，
+// 否则「24 个月滚动过期」对日常签到获得的积分完全无效（积分只增不减）。
+const { computeExpiry } = require('../utils/points-expiry');
 // 请假扣课规则（扣课时 / 扣有效天数）：教师点名标 leave 与家长审批走同一实现，
 // 否则同一「请假」两条路径两种资产结果。leave.js 不 require 本文件，无循环依赖。
 const { applyLeaveDeduction } = require('../routes/leave');
@@ -419,7 +422,8 @@ function applyArrivalDeduction(studentId, scheduleId, t) {
   // 选卡收口到 utils/deduction.pickCardForDeduction：按卡种 course_scope 匹配本课程，
   // 匹配者优先、其次 expires_at ASC，且无匹配时兜底（绝不因范围数据不规范而拒绝扣课）。
   const card = pickCardForDeduction(studentId, scheduleId, t, per);
-  if (!card) return;
+  if (!card) return;                     // 无任何合格卡：维持原行为（不扣课）
+  if (card.scopeMismatch) return;        // 有卡但课程范围不匹配：拒绝扣课，绝不静默扣错卡（如私教卡被团课消耗）
   // 余额条件必须写进 UPDATE 的 WHERE：此前「先 SELECT 校验余额、再按 id 无条件 UPDATE」，
   // 不同排期并发扣同一张卡时两请求会各自读到同一余额、各自扣减 → 余额变负。
   // 加上 remaining_classes >= per 后，UPDATE 由 SQLite 在写锁内原子判定，
@@ -901,12 +905,13 @@ function addPoints(studentId, studentName, amount, type, referenceId, descriptio
     account = db.prepare('SELECT * FROM points WHERE student_id = ?').get(studentId);
   }
 
-  // 记录流水
+  // 记录流水（expire_at：发放即写入 24 个月后的过期时间，供日调度回收）
   const logId = generateId('plog_');
+  const logTs = now();
   db.prepare(`
-    INSERT INTO point_logs (id, student_id, type, amount, balance, reference_id, reason, description, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(logId, studentId, type, amount, account.balance, referenceId, description, description, now());
+    INSERT INTO point_logs (id, student_id, type, amount, balance, reference_id, reason, description, created_at, expire_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(logId, studentId, type, amount, account.balance, referenceId, description, description, logTs, computeExpiry(logTs));
 }
 
 /**

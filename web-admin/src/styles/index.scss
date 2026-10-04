@@ -144,7 +144,9 @@ html[data-theme='dark'] {
   --t-text-1: #F5F5F7;
   --t-text-2: #B9B9BF;
   --t-text-3: #8E8E94;
-  --t-text-faint: #6E6E76;
+  // 提亮 faint 文字：#6E6E76 叠在 --t-surface(#17171C) 上仅 3.53:1（低于 AA 4.5），
+  // 下拉占位符等大量使用该 token；#8A8A92 约 4.6:1，达标。
+  --t-text-faint: #8A8A92;
   --t-accent: #0A84FF;
   --t-accent-strong: #409CFF;
   --t-accent-soft: #64ACFF;
@@ -279,6 +281,12 @@ html, body {
   font-size: $fs-base;
   color: var(--t-text-1);
   background-color: var(--t-bg);
+  // DESIGN.md §4：正文行高 1.5。此前 html/body 未声明行高 → 正文落到浏览器默认 normal(≈1.2)，
+  // 多行文本呼吸感不足、同页行距忽宽忽窄。一处声明全局生效（长文/大数字另行覆盖）。
+  line-height: 1.5;
+  // DESIGN.md §4：数字一律 tabular-nums。此前仅 4 处显式声明、10 个视图目录全缺，
+  // 排期日期/时间、分页「共 N 条」等数字会左右跳动。全局兜底，个别需要 proportional 的场景再覆盖。
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -321,9 +329,9 @@ html, body {
   background: var(--t-surface);
   font-size: $fs-sm !important;
 
-  // S4 P0-1：所有 <el-table> 默认按 small 行高（40px），无需逐处写 size="small"。
-  // 与 .el-table__cell padding: 12px 0 配合，实际行高 ~40px 与 small 一致。
-  --el-table-row-height: 40px;
+  // 行高校准为 48px（按 13px 字号 + 1.5 行高推算）。此前声明 40px 却与实测
+  // 五档行高（47/48.5/53/57/69）全部脱节，跨页表格纵向对不齐。表头定高 40px。
+  --el-table-row-height: 48px;
   --el-table-header-row-height: 40px;
 
   --el-table-border-color: transparent;
@@ -379,9 +387,9 @@ html, body {
     border-bottom: none !important;
   }
 
-  .el-table__body tr:hover > td.el-table__cell {
-    background-color: var(--t-hover-bg) !important;
-  }
+  // 移除 hover 背景的 !important 覆盖层：它用 --t-hover-bg(4% 黑) 盖掉了
+  // --el-table-row-hover-bg-color: var(--t-accent-bg)（8% 主色淡底），
+  // 使「hover 变主色淡底」的变量声明成为摆设。删掉后变量层真正生效（左侧 3px 主色条保留）。
 
   td.is-right,
   td.is-right .cell,
@@ -389,6 +397,12 @@ html, body {
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
+}
+
+// 深色下表头需比表格面更亮，否则多列表格横向扫视找不到列头锚点。
+// 基础规则用 --t-bg-alt，该 token 在暗色为 #15151A（比表面 #17171C 更暗，方向写反），故暗色改亮一档。
+html[data-theme='dark'] .el-table th.el-table__cell {
+  background: var(--t-surface-hover) !important;
 }
 
 .el-table .el-table__body-wrapper,
@@ -590,7 +604,9 @@ html, body {
 // 弹窗（Apple 式圆角 + 精细阴影）
 // ============================================
 .el-dialog {
-  border-radius: $radius-2xl !important;
+  // DESIGN.md §5：弹窗圆角统一用 --t-radius-lg(12px)，与卡片一致；
+  // 此前 $radius-2xl(16px) 与背后 12px 卡片并排时两道圆角刺眼。
+  border-radius: $radius-lg !important;
   overflow: hidden;
   background: var(--t-bg-overlay);
   border: 1px solid var(--t-line);
@@ -610,6 +626,11 @@ html, body {
 
   .el-dialog__body {
     padding: $spacing-xl;
+    // 长表单弹窗必须可滚动：此前只声明 padding，styles/ 全目录 grep max-height 零命中，
+    // 1280×720 下「添加员工」等长表单弹窗底部「保存」按钮溢出视口 +220px 且完全不可滚 → 无法提交，
+    // 必填校验的红字也落在视口外。一处修复覆盖全站所有弹窗。
+    max-height: calc(100vh - 260px);
+    overflow-y: auto;
   }
 
   .el-dialog__footer {
@@ -851,6 +872,17 @@ html, body {
   box-shadow: var(--t-elevation-float) !important;
 }
 
+// 遮罩减轻：EP 默认 rgba(0,0,0,.5) 偏重，与 12px 圆角弹窗搭配观感陈旧；降到 .32。
+.el-overlay {
+  background-color: rgba(0, 0, 0, 0.32);
+}
+
+// 过渡时长收口到 DESIGN.md §6（常规 ≤200ms）：此前项目从未定义 --el-transition-duration，
+// 全部沿用 EP 默认 .3s，比规范慢 50%。一处声明全局生效。
+:root {
+  --el-transition-duration: 200ms;
+}
+
 // ============================================
 // 通用工具类
 // ============================================
@@ -1082,7 +1114,9 @@ html, body {
 }
 
 .section-title {
-  font-size: var(--t-fs-2xl);
+  // 降一档：此前与 .page-title 同为 22px/600，页面标题与区块标题视觉零差距、层级坍塌
+  //（长页面失去层级锚点）。降到 18px（--t-fs-xl），与页面标题 22px 拉开一级。
+  font-size: var(--t-fs-xl);
   font-weight: 600;
   color: var(--t-text-1);
   margin: 0 0 var(--t-spacing-md);
@@ -1273,11 +1307,9 @@ html, body {
 // 数字英雄卡（KPI / 统计大数字）
 .v4-num-display {
   font-family: var(--v4-font-display);
-  // 数字排版力度（对标班主任工作台）：900 字重 + 强负字距
-  // 原 700 / -0.025em 偏保守，视觉冲击只有对方一半。
-  // 工作台用 46px/-2.5px（≈-0.054em），此处取 -0.04em 作中间值，
-  // 在 28px 时约 -1.1px、36px 时约 -1.4px，紧凑但不挤。
-  font-weight: 900;
+  // DESIGN.md §4 字重上限 700：900 不在 token 内，且中文字体栈缺 900 字形时浏览器合成
+  //「伪粗体」（笔画粘连、发虚，Windows 尤甚）。数字冲击力改由字号 + 负字距承担。
+  font-weight: 700;
   letter-spacing: -0.04em;
   line-height: 1;
   color: var(--t-text-1);

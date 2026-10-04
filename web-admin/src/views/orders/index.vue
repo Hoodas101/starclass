@@ -154,7 +154,7 @@
         </el-form-item>
 
         <el-form-item label="产品服务" prop="cardTypeId">
-          <el-select v-model="createForm.cardTypeId" placeholder="选择产品" style="width: 100%">
+          <el-select v-model="createForm.cardTypeId" filterable placeholder="选择/搜索产品" style="width: 100%">
             <el-option
               v-for="c in cardTypes"
               :key="c.id"
@@ -198,6 +198,27 @@
             <el-radio-button value="paid">已收款</el-radio-button>
             <el-radio-button value="pending">挂账/待支付</el-radio-button>
           </el-radio-group>
+        </el-form-item>
+
+        <!-- 收款方式：此前订单页完全没有该字段，后端把渠道硬编码成「微信」，
+             现金/转账收款被记成微信、月底对账打架。 -->
+        <el-form-item label="收款方式">
+          <el-select v-model="createForm.channel" style="width: 100%">
+            <el-option label="微信" value="wechat" />
+            <el-option label="现金" value="cash" />
+            <el-option label="支付宝" value="alipay" />
+            <el-option label="银行转账" value="bank" />
+            <el-option label="其他" value="other" />
+          </el-select>
+        </el-form-item>
+
+        <!-- 成交金额与优惠：此前建单只能按产品标价收款、无法议价（后端已支持
+             overrideAmount / discountAmount，UI 未暴露）。留空则按产品标价。 -->
+        <el-form-item label="成交金额">
+          <el-input-number v-model="createForm.amount" :min="0" :precision="2" :controls="false" placeholder="默认按标价" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="优惠金额">
+          <el-input-number v-model="createForm.discountAmount" :min="0" :precision="2" :controls="false" placeholder="0" style="width: 100%" />
         </el-form-item>
 
         <el-form-item label="备注">
@@ -636,6 +657,9 @@ const createForm = reactive({
   paidAt: '',
   is1v1: false,
   status: 'paid',
+  channel: 'wechat',
+  amount: null,
+  discountAmount: 0,
   remark: ''
 })
 
@@ -652,6 +676,9 @@ const openCreateDialog = async () => {
     paidAt: dayjs().format('YYYY-MM-DD'),
     is1v1: false,
     status: 'paid',
+    channel: 'wechat',
+    amount: null,
+    discountAmount: 0,
     remark: ''
   })
   try {
@@ -671,15 +698,22 @@ const submitCreate = async () => {
 
   submitting.value = true
   try {
-    await addOrder({
+    const payload = {
       studentId: createForm.studentId,
       cardTypeId: createForm.cardTypeId,
       salesperson: createForm.salesperson,
       remark: createForm.remark,
       is1v1: createForm.is1v1 ? 1 : 0,
       status: createForm.status,
+      channel: createForm.channel,
       paidAt: createForm.paidAt ? dayjs(createForm.paidAt).valueOf() : undefined
-    })
+    }
+    // 议价：留空则按产品标价（不传 payableAmount，后端用 totalAmount - discountAmount）
+    if (createForm.discountAmount) payload.discountAmount = Number(createForm.discountAmount)
+    if (createForm.amount !== null && createForm.amount !== undefined && createForm.amount !== '') {
+      payload.payableAmount = Number(createForm.amount)
+    }
+    await addOrder(payload)
     ElMessage.success(createForm.status === 'paid'
       ? `销售单已创建，${t('membership')}已激活`
       : '销售单已创建（挂账，待收款）')
