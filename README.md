@@ -5,15 +5,29 @@
 
 [🇨🇳 中文](#星课-starclass--教培--健身机构一体化管理系统) · [🇬🇧 English](#english)
 
+> **如果你开着一家培训机构**：这套系统一次性部署在**你自己的电脑或服务器**上，
+> 不用每年交 SaaS 年费（同类系统 ¥499–2,099 / 年），不限学员人数，
+> 学员和家长数据全部留在自己机器里，员工离职也带不走。
+
 > 专为小型与个人教培机构打造的一体化教务产品：**Web 管理后台 + API 后端**，覆盖招生、排课、考勤、家校沟通、销售、续费、薪资结算全流程。克隆即可在自己电脑或服务器一键部署；可选付费扩展提供家长 / 教练 / 管理三端微信小程序。
 
 **零云服务依赖 · 数据完全归属机构 · clone 后一条命令跑起来**
 
 ---
 
-## 🚀 一键部署（30 秒上手）
+## 🚀 一键部署（2 分钟上手）
 
-**方式 A · 本机 / 旧电脑直接跑（免 Docker）**
+**方式 A · 想先看效果（灌入演示数据）**
+
+```bash
+git clone https://github.com/Hoodas101/starclass.git
+cd starclass
+SEED_DEMO_DATA=1 bash deploy.sh     # ← 必须带这个变量，才会生成演示数据
+```
+
+打开 http://localhost:3001，用 **`13800000001` / `123456`** 登录。
+
+**方式 B · 正式使用（推荐，安全默认）**
 
 ```bash
 git clone https://github.com/Hoodas101/starclass.git
@@ -21,9 +35,10 @@ cd starclass
 bash deploy.sh
 ```
 
-脚本自动完成：**安装依赖 → 初始化数据库（含示例数据）→ 构建管理端 → 启动服务**。
+> ⚠️ **不带 `SEED_DEMO_DATA=1` 时不会写入任何演示数据**，脚本只创建一个管理员账号，
+> **口令由系统随机生成、仅在终端打印这一次**，请立即复制保存。
 
-**方式 B · 正式上线到云服务器（Docker）**
+**方式 C · 部署到云服务器（Docker）**
 
 ```bash
 git clone https://github.com/Hoodas101/starclass.git
@@ -35,14 +50,14 @@ cd starclass
 也可在 GitHub Actions 里点 **Deploy → Run workflow** 完成全自动部署，
 详见 [`deploy/README.md`](deploy/README.md)。
 
-两种方式完成后打开：
+三种方式完成后打开：
 
 | 服务 | 地址 | 说明 |
 |---|---|---|
 | 🖥️ 管理后台 | http://localhost:3001 | 后端同端口托管，单入口 |
 | ⚙️ 后端 API | http://localhost:3001/api | 健康检查 `/api/health` |
 
-**体验账号**（示例数据自动生成）：
+**演示账号**（仅方式 A 会生成）：
 
 | 身份 | 手机号 | 密码 | 入口 |
 |---|---|---|---|
@@ -50,6 +65,7 @@ cd starclass
 | 教练 / 家长 | `13800000011`（王教练）、`13900000001`（小明爸爸）等 | `123456` / 无需密码 | 数据 API；可选付费三端小程序（见下文） |
 
 > 上线前务必修改默认密码（管理后台 → 系统设置 → 账号安全）。
+> 方式 B / C 创建的管理员账号为随机口令，请以部署脚本终端输出为准。
 
 ### 常用命令
 
@@ -57,7 +73,7 @@ cd starclass
 bash deploy.sh        # 一键部署 / 重新部署（已有数据不会被动）
 bash start-all.sh     # 日常启动（依赖/构建产物已就绪时更快）
 bash stop-all.sh      # 停止服务
-npm test              # 全部后端回归（7 个专项套件 + 256 项全功能，隔离测试库）
+npm test              # 全部后端回归（34 套专项 + 256 项全功能，隔离测试库）
 npm run smoke         # 冒烟测试（39 项，需服务运行中）
 npm run test:backend  # 仅全功能套件（257 项 = 256 断言 + 1 预期 WARN，隔离库自动快照/夹具两模式）
 npm run verify        # 扩展验收套件（约 20 套件，需服务运行中，见 TEST-GUIDE.md）
@@ -88,10 +104,17 @@ export JWT_SECRET=$(openssl rand -hex 32)   # 建议显式设置；未设置时�
 - 🌙 **深色模式**：跟随系统 / 浅色 / 深色三档切换
 
 ### 💰 可选付费扩展：三端微信小程序
+
 家长端 / 教练端 / 管理员端原生小程序（41 页）不随本仓库发布，作为商业扩展单独提供：
 会员身份卡与报名、扫码签到、请假补课、积分商城、订单、成长档案、课后点评、订阅消息提醒（开课/续费/余额）。
 后端 API 已为小程序预留微信登录、支付与订阅消息能力，购买部署授权后即可对接你自己的小程序。
-获取方式：在 [Issues](https://github.com/Hoodas101/starclass/issues) 留言联系。
+
+**也可以只买服务、不买小程序**：如果你想把 Web 管理后台跑起来并教会员工用，
+选择「部署 + 培训服务」即可，不影响后续自行升级。
+
+<!-- TODO(维护者)：把下面一行换成你的实际联系方式（企业微信活码 / 表单链接 / 报价页）。
+     建议明码标价：可挡掉大量"多少钱"的重复咨询。 -->
+👉 咨询方式：在本仓库 [Issues](https://github.com/Hoodas101/starclass/issues) 留言（中文即可）。
 
 ---
 
@@ -100,7 +123,7 @@ export JWT_SECRET=$(openssl rand -hex 32)   # 建议显式设置；未设置时�
 ```
 ┌─────────────────────────────────────────────────┐
 │  Express 后端（Node.js）                          │
-│  22 组路由 · JWT 鉴权 · bcrypt 密码 · 角色门控      │
+│  23 组路由 · JWT 鉴权 · bcrypt 密码 · 角色门控      │
 │  自动备份 · 迁移系统（幂等）· 限流                   │
 ├─────────────────────────────────────────────────┤
 │  SQLite（better-sqlite3, WAL）                    │
@@ -115,6 +138,10 @@ export JWT_SECRET=$(openssl rand -hex 32)   # 建议显式设置；未设置时�
    （可选付费扩展：家长 / 教练 / 管理三端微信小程序，
      经 HTTPS + Bearer Token 对接上述后端 API）
 ```
+
+> **质量声明**：34 套自动化回归测试（支付幂等 / 退款回收 / 跨角色越权 / 审计留痕 / 口径一致性）
+> + CI 在 Node 18 / 20 / 22 三个版本全绿 + 部署前自动备份与健康检查。
+> 改代码后跑 `npm test` 即可复现全部结果。管理端共 23 个页面视图，覆盖 7 大业务模块。
 
 | 端 | 技术栈 | 位置 |
 |---|---|---|
@@ -224,10 +251,12 @@ StarClass is a self-hosted management system for small training and fitness stud
 
 ```bash
 git clone https://github.com/Hoodas101/starclass.git
-cd starclass && bash deploy.sh     # installs deps, seeds demo data, builds, starts
+cd starclass && SEED_DEMO_DATA=1 bash deploy.sh   # deps + demo data + build + start
 ```
 
-Open http://localhost:3001 — admin login `13800000001` / `123456`.
+Open http://localhost:3001 — demo admin login `13800000001` / `123456`.
+Without `SEED_DEMO_DATA=1` the script creates a single admin with a **random password
+printed once**, and seeds no demo data.
 For a public server: `./deploy/deploy.sh --host app.yourdomain.com` (Docker, auto HTTPS).
 The rest of this README and the admin UI are in Chinese.
 

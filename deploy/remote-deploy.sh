@@ -2,7 +2,7 @@
 # 在部署服务器上以 root 运行（由 Deploy 工作流 scp 上传后调用，
 # 参数经 ssh 命令行传入，使本脚本保持为可直接测试的纯 shell 文件）。
 #
-#   REPO       本仓库完整克隆地址（github.com/Mihooni/edu-admin）
+#   REPO       本仓库完整克隆地址（github.com/Hoodas101/starclass）
 #   SERVER     该服务器的公网主机名（IP 或域名）
 #   SKIP_SEED  非空则跳过示例数据
 #   ARGS       deploy/deploy.sh 的额外参数（如 --no-https）
