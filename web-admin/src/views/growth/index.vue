@@ -93,7 +93,9 @@
             </el-table-column>
             <el-table-column label="跟进人" min-width="100" prop="salesperson" />
             <el-table-column label="下次跟进" min-width="130">
-              <template #default="{ row }">{{ row.next_follow_at ? relativeTime(row.next_follow_at) : '—' }}</template>
+              <!-- next_follow_at 是未来时间，必须用 relativeDue：relativeTime 只处理过去
+                   （diff = now - ts），未来时间会落进 diff < 1 分钟的分支而恒显示「刚刚」。 -->
+              <template #default="{ row }">{{ row.next_follow_at ? relativeDue(row.next_follow_at) : '—' }}</template>
             </el-table-column>
           </el-table>
           <div class="pagination-wrap">
@@ -123,7 +125,7 @@
                   <span class="pipeline-card-follow">跟进：{{ row.salesperson || '—' }}</span>
                 </div>
                 <div class="pipeline-card-footer">
-                  <span v-if="row.next_follow_at" class="pipeline-card-next">下次 {{ relativeTime(row.next_follow_at) }}</span>
+                  <span v-if="row.next_follow_at" class="pipeline-card-next">下次 {{ relativeDue(row.next_follow_at) }}</span>
                   <el-select
                     v-model="row.stage"
                     size="small"

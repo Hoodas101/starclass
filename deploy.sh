@@ -88,7 +88,16 @@ echo -e "\n${BOLD}━━━ [4/4] 启动服务 ━━━${NC}"
 bash stop-all.sh >/dev/null 2>&1 || true
 # NODE_ENV=production：一键部署即生产模式（家长免密登录默认关闭、CORS 按 CORS_ORIGINS 白名单）。
 # 开发调试请用 start-all.sh（不设 NODE_ENV），或在 .env 中显式 export PARENT_PHONE_LOGIN=true。
-NODE_ENV=production nohup node backend/server.js > backend.log 2>&1 &
+#
+# 演示模式关闭「默认口令强制改密」（见 backend/utils/security.js）：
+# 演示账号用的就是默认口令 123456，若强制生效，新用户按 README 登录后会被直接拦到改密页，
+# 一屏演示数据都看不到。正式部署（不带 SEED_DEMO_DATA=1）保持强制改密开启，安全语义不变。
+if [ "${SEED_DEMO_DATA:-0}" = "1" ]; then
+  FORCE_PASSWORD_CHANGE=0
+else
+  FORCE_PASSWORD_CHANGE=1
+fi
+NODE_ENV=production FORCE_PASSWORD_CHANGE="$FORCE_PASSWORD_CHANGE" nohup node backend/server.js > backend.log 2>&1 &
 echo $! > backend.pid
 
 # 健康检查轮询（最多约 15 秒，兼容慢机器冷启动）

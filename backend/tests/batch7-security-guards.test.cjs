@@ -112,22 +112,28 @@ async function main() {
   // ════════════════════════════════════════════════════════════
   console.log('\x1b[1m[S5] 排课查询 classId 跨班窥视\x1b[0m');
   {
-    const peek = await call('GET', '/api/schedules', { token: tokParentA, query: { classId: 'cls_b7_b' } });
+    // 本组判别的是「可见性」而非「分页」，故显式放大 pageSize：
+    // seed 现在覆盖历史 27 天 + 未来 7 天（≈34 节），默认分页 10 条、按 date 升序，
+    // 会把本用例的今日夹具挤到第二页 —— 那是分页现象，与跨班可见性无关。
+    // 前端排期页始终传 startDate（weekStart / monthStart），不存在这个问题。
+    const ALL_PAGE = { pageSize: 500 };
+
+    const peek = await call('GET', '/api/schedules', { token: tokParentA, query: { classId: 'cls_b7_b', ...ALL_PAGE } });
     rec('S5 家长读他人班级排课 → 403', peek.status === 403, `status=${peek.status}`);
 
-    const own = await call('GET', '/api/schedules', { token: tokParentA, query: { classId: 'cls_b7_a' } });
+    const own = await call('GET', '/api/schedules', { token: tokParentA, query: { classId: 'cls_b7_a', ...ALL_PAGE } });
     const ownList = (own.data && own.data.data && own.data.data.list) || [];
     rec('S5 家长读自己班级排课 → 200 且含本班排课',
       own.status === 200 && hasId(ownList, 'sch_b7_a'), `status=${own.status} ids=${ownList.map((r) => r.id)}`);
     rec('S5 自己班级的结果中不含他人班级排课',
       !hasId(ownList, 'sch_b7_b'), `ids=${ownList.map((r) => r.id)}`);
 
-    const staff = await call('GET', '/api/schedules', { token: tokens.admin, query: { classId: 'cls_b7_b' } });
+    const staff = await call('GET', '/api/schedules', { token: tokens.admin, query: { classId: 'cls_b7_b', ...ALL_PAGE } });
     const staffList = (staff.data && staff.data.data && staff.data.data.list) || [];
     rec('S5 管理员按班级筛选不受影响（仍可见班B）',
       staff.status === 200 && hasId(staffList, 'sch_b7_b'), `status=${staff.status} ids=${staffList.map((r) => r.id)}`);
 
-    const noParam = await call('GET', '/api/schedules', { token: tokParentA });
+    const noParam = await call('GET', '/api/schedules', { token: tokParentA, query: { ...ALL_PAGE } });
     const noParamList = (noParam.data && noParam.data.data && noParam.data.data.list) || [];
     rec('S5 家长不带 classId 时看不到他人班级排课',
       !hasId(noParamList, 'sch_b7_b') && hasId(noParamList, 'sch_b7_a'),
