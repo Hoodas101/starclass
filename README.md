@@ -3,19 +3,19 @@
 [![CI](https://github.com/Hoodas101/starclass/actions/workflows/ci.yml/badge.svg)](https://github.com/Hoodas101/starclass/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[🇨🇳 中文](#星课-starclass--教培--健身机构一体化管理系统) · [🇬🇧 English](#english)
+[中文](#星课-starclass--教培--健身机构一体化管理系统) · [English](#english)
 
 > **如果你开着一家培训机构**：这套系统一次性部署在**你自己的电脑或服务器**上，
 > 不用每年交 SaaS 年费（同类系统 ¥499–2,099 / 年），不限学员人数，
 > 学员和家长数据全部留在自己机器里，员工离职也带不走。
 
-> 专为小型与个人教培机构打造的一体化教务产品：**Web 管理后台 + API 后端**，覆盖招生、排课、考勤、家校沟通、销售、续费、薪资结算全流程。克隆即可在自己电脑或服务器一键部署；可选付费扩展提供家长 / 教练 / 管理三端微信小程序。
+> 这是给小型和个人教培机构用的一体化教务系统：**Web 管理后台 + API 后端**，招生、排课、考勤、家校沟通、销售续费到薪资结算都在里面。克隆到自己电脑或服务器就能一键部署；可选付费扩展提供家长 / 教练 / 管理三端微信小程序。
 
 **零云服务依赖 · 数据完全归属机构 · clone 后一条命令跑起来**
 
 ---
 
-## 🚀 一键部署（2 分钟上手）
+## 一键部署（2 分钟上手）
 
 **方式 A · 想先看效果（灌入演示数据）**
 
@@ -91,19 +91,19 @@ export JWT_SECRET=$(openssl rand -hex 32)   # 建议显式设置；未设置时�
 
 ---
 
-## ✨ 功能总览（Web 工作台）
+## 功能总览（Web 工作台）
 
 - **数据看板**：今日/本周/本月/本年收入、签单排名、到场率、续期预警
 - **排课**：周视图 / 列表、重复规则（每天/每周/按 N 天）、冲突检测、公开活动报名、补课 / 调课
 - **考勤**：一键点名、签到统计、缺席自动通知家长（迟到计积分）
 - **成员**：学员 / 家长档案、会员卡暂停 / 恢复（按暂停天数顺延）、多孩家庭绑定、续费提醒（15/7/1 天可配）
-- **家校沟通**：站内通知下发、反馈回复闭环、成长记录（教练课后点评）
+- **家校沟通**：站内通知下发、家长反馈与回复处理、成长记录（教练课后点评）
 - **销售**：签单开卡自动激活权益、批量导入、自定义退费、财务汇总
 - **薪资**：课时 / 人头 / 混合计费，课时费规则可视化配置
 - **可定制**：机构称呼自定义（老师/学员/会员…全站替换）、表格字段配置、积分 / 退费 / 请假规则全部可配
-- 🌙 **深色模式**：跟随系统 / 浅色 / 深色三档切换
+- **深色模式**：跟随系统 / 浅色 / 深色三档切换
 
-### 💰 可选付费扩展：三端微信小程序
+### 可选付费扩展：三端微信小程序
 
 家长端 / 教练端 / 管理员端原生小程序（41 页）不随本仓库发布，作为商业扩展单独提供：
 会员身份卡与报名、扫码签到、请假补课、积分商城、订单、成长档案、课后点评、订阅消息提醒（开课/续费/余额）。
@@ -114,11 +114,11 @@ export JWT_SECRET=$(openssl rand -hex 32)   # 建议显式设置；未设置时�
 
 <!-- TODO(维护者)：把下面一行换成你的实际联系方式（企业微信活码 / 表单链接 / 报价页）。
      建议明码标价：可挡掉大量"多少钱"的重复咨询。 -->
-👉 咨询方式：在本仓库 [Issues](https://github.com/Hoodas101/starclass/issues) 留言（中文即可）。
+咨询方式：在本仓库 [Issues](https://github.com/Hoodas101/starclass/issues) 留言（中文即可）。
 
 ---
 
-## 🧱 技术架构
+## 技术架构
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -148,11 +148,11 @@ export JWT_SECRET=$(openssl rand -hex 32)   # 建议显式设置；未设置时�
 | 后端 | Node.js + Express + better-sqlite3 | `backend/` |
 | Web 管理端 | Vue3 + Element Plus + ECharts + Vite | `web-admin/` |
 
-**运行成本为零**：无云服务、无数据库服务、无消息队列，一台 1 核 2G 云服务器或一台旧笔记本即可长期运行。
+**运行成本为零**：没有云服务，没有数据库服务，也没有消息队列，一台 1 核 2G 云服务器或一台旧笔记本就能长期跑。
 
 ---
 
-## 📸 界面预览
+## 界面预览
 
 **浅色模式**
 
@@ -164,7 +164,7 @@ export JWT_SECRET=$(openssl rand -hex 32)   # 建议显式设置；未设置时�
 |---|---|---|
 | ![签到](docs/screenshots/04-checkin.png) | ![成员](docs/screenshots/05-students.png) | ![订单](docs/screenshots/07-orders.png) |
 
-**🌙 深色模式**（跟随系统 / 浅色 / 深色三档切换）
+**深色模式**（跟随系统 / 浅色 / 深色三档切换）
 
 | 数据看板 | 排课管理 |
 |---|---|
@@ -174,13 +174,13 @@ export JWT_SECRET=$(openssl rand -hex 32)   # 建议显式设置；未设置时�
 
 ---
 
-## 🛠 长期稳定运行（运维三件事）
+## 长期稳定运行（运维三件事）
 
 ```bash
-# 1. 备份 —— 数据全在单文件 backend/db/data.db（每日自动备份在 backend/backups/，Web 端可一键下载）
+# 1. 备份：数据全在单文件 backend/db/data.db（每日自动备份在 backend/backups/，Web 端可一键下载）
 sqlite3 backend/db/data.db ".backup 'backup-$(date +%F).db'"
 
-# 2. 升级 —— 拉新代码后重跑一键部署（不会动你的数据）
+# 2. 升级：拉新代码后重跑一键部署（不会动你的数据）
 git pull && bash deploy.sh
 
 # 3. 看日志 / 健康检查
@@ -192,14 +192,14 @@ curl http://localhost:3001/api/health
 
 ---
 
-## ❓ 常见问题（FAQ 速查）
+## 常见问题（FAQ 速查）
 
 | 问题 | 答案 |
 |---|---|
 | Node 版本要求？ | **>= 18**（推荐 20/22）。装好后再跑 `bash deploy.sh` |
 | 依赖安装报错 / better-sqlite3 编译失败？ | 缺编译环境：macOS 执行 `xcode-select --install`；Linux 执行 `apt install build-essential python3` |
 | 端口 3001 被占用？ | 先 `bash stop-all.sh`；仍占用则 `export PORT=3002 && bash start-all.sh` |
-| 忘记管理员密码？ | 执行 `node backend/db/create-admin.js` 重置（可指定 `--phone` / `--password`，不指定则生成随机强口令并打印一次）。**切勿用 `npm run seed` 重置**——seed 会先清空全部业务表再写入示例数据，真实数据将不可恢复 |
+| 忘记管理员密码？ | 执行 `node backend/db/create-admin.js` 重置（可指定 `--phone` / `--password`，不指定则生成随机强口令并打印一次）。**切勿用 `npm run seed` 重置**，seed 会先清空全部业务表再写入示例数据，真实数据将不可恢复 |
 | 想清空示例数据正式使用？ | 管理后台逐个删除演示学员/订单即可，或删 `backend/db/data.db*` 后只跑 `npm run init:db`（不 seed）从零录入 |
 | 换电脑 / 迁移服务器？ | 先 `bash tools/backup.sh` 生成一致性快照，再拷走快照 + `backend/uploads/`，新机重跑 `bash deploy.sh` 后放回。**WAL 模式下直接 `cp backend/db/data.db` 会丢掉尚未 checkpoint 的最近写入** |
 | 三端小程序怎么获取？ | 家长 / 教练 / 管理端小程序为付费商业扩展，不在本仓库内；在 Issues 留言联系获取部署授权 |
@@ -209,7 +209,7 @@ curl http://localhost:3001/api/health
 
 ---
 
-## 📖 文档
+## 文档
 
 | 文档 | 内容 |
 |---|---|
@@ -223,7 +223,7 @@ curl http://localhost:3001/api/health
 
 ---
 
-## 🔒 安全设计
+## 安全设计
 
 - JWT 鉴权 + 角色门控，家长 / 教练 / 管理员数据严格隔离
 - 密码 bcrypt 存储；资金操作（订单导入 / 积分消耗 / 退款 / 审批）全部事务化
@@ -235,7 +235,7 @@ curl http://localhost:3001/api/health
 
 ## 打赏支持
 
-如果这个项目对你有帮助，欢迎请作者喝杯咖啡 —— 每一杯都是持续更新的动力 ☕
+如果这个项目对你有帮助，欢迎请作者喝杯咖啡，这些支持会用在后续更新上。
 
 <p align="center">
   <img src="docs/donate-wechat.png" alt="微信打赏" width="220">&nbsp;&nbsp;
@@ -243,9 +243,9 @@ curl http://localhost:3001/api/health
 </p>
 
 **中国大陆以外？** 这两个码需要绑定大陆银行卡的微信 / 支付宝，海外朋友多半扫不了。
-海外可用 **[GitHub Sponsors](https://github.com/sponsors/Hoodas101)**（支持信用卡）；此外点个 ⭐ Star 或提个 Issue，帮助同样大。
+海外可以用 **[GitHub Sponsors](https://github.com/sponsors/Hoodas101)**（支持信用卡）。点个 Star 或提个 Issue，帮助同样大。
 
-## 🇬🇧 English
+## English
 
 StarClass is a self-hosted management system for small training and fitness studios: enrollment, scheduling, attendance, parent communication, renewals, points and payroll — in one app. A Vue 3 admin console on top of an Express API, with all data in a single SQLite file. No cloud services, no subscriptions.
 
@@ -260,10 +260,10 @@ printed once**, and seeds no demo data.
 For a public server: `./deploy/deploy.sh --host app.yourdomain.com` (Docker, auto HTTPS).
 The rest of this README and the admin UI are in Chinese.
 
-[⬆ 返回中文](#星课-starclass--教培--健身机构一体化管理系统)
+[返回中文](#星课-starclass--教培--健身机构一体化管理系统)
 
 ---
 
-## 📝 License
+## License
 
 MIT
