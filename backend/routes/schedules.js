@@ -309,6 +309,10 @@ function ensureTempCourse() {
     const course = courseId
       ? db.prepare('SELECT id, name, is_active, COALESCE(archived, 0) AS archived FROM courses WHERE id = ?').get(courseId)
       : null;
+    // 显式传入 courseId 但查不到 → 明确报错。此前会带着无效 courseId 继续，最终落到
+    // catch-all 500「操作失败，请稍后重试」，使用者无法定位、监控还会误判为服务端故障。
+    // （临时活动请只传 courseName，不带 courseId。）
+    if (courseId && !course) return res.json(fail('所选课程不存在，请重新选择'));
     if (isCourseUnavailable(course)) return res.json(fail('该课程已下架，请另选'));
     // 教师：已停用 / 离职教练不得再被排课（否则照常计薪）。同样只校验新建侧。
     const teacher = teacherId
@@ -394,6 +398,10 @@ router.post('/recursive', (req, res) => {
     const course = courseId
       ? db.prepare('SELECT id, name, is_active, COALESCE(archived, 0) AS archived FROM courses WHERE id = ?').get(courseId)
       : null;
+    // 显式传入 courseId 但查不到 → 明确报错。此前会带着无效 courseId 继续，最终落到
+    // catch-all 500「操作失败，请稍后重试」，使用者无法定位、监控还会误判为服务端故障。
+    // （临时活动请只传 courseName，不带 courseId。）
+    if (courseId && !course) return res.json(fail('所选课程不存在，请重新选择'));
     if (isCourseUnavailable(course)) return res.json(fail('该课程已下架，请另选'));
     const teacher = teacherId
       ? db.prepare('SELECT id, name, alias, status FROM teachers WHERE id = ?').get(teacherId)

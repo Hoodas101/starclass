@@ -47,6 +47,7 @@ const SUITES = [
   ['permission-keys-regression.cjs', 'P1-5 员工权限键后端强制'],
   ['teacher-phone-role-regression.cjs', 'E10 教师改号+改角色赋权回归'],
   ['order-ownership-regression.cjs', '订单归属（销售横向越权拦截）回归'],
+  ['v103-fixes-regression.cjs', 'v1.0.3 修复项（收款渠道/设置越权/范围隔离）回归'],
   ['card-expiry-regression.cjs', 'P1-8 会员卡过期流转'],
   ['dashboard-charts-regression.cjs', 'P1-13 看板图表聚合'],
   ['sales-export-regression.cjs', 'P1-18 销售导出单品统计'],

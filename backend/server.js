@@ -101,6 +101,10 @@ const RATE_MAX = parseInt(process.env.RATE_MAX) || 600; // per IP per minute; tu
 app.use((req, res, next) => {
   // 预检请求不参与限流
   if (req.method === 'OPTIONS') return next();
+  // 静态资源（SPA 的 JS/CSS/图片、index.html）不计入限流：单页首屏会并发拉取数十个 chunk，
+  // 计入限流会让正常访问在批量刷新/压测时误触发 429，甚至因 CSS chunk 被限而整页白屏。
+  // 限流只针对业务接口 /api/*。
+  if (!req.path.startsWith('/api/')) return next();
   const ip = req.ip || req.connection.remoteAddress;
   const now = Date.now();
   const entry = rateLimitMap.get(ip) || { count: 0, resetAt: now + RATE_WINDOW };

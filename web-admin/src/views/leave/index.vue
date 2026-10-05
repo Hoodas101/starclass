@@ -12,6 +12,7 @@
         </el-radio-group>
       </div>
       <div class="toolbar-right">
+        <el-button type="primary" @click="openApplyDialog">登记请假</el-button>
         <el-button :icon="Download" @click="exportDialogRef?.open()">导出</el-button>
       </div>
     </div>
@@ -86,6 +87,30 @@
       </template>
     </el-dialog>
 
+    <!-- 登记请假（员工代录）：家长端小程序未部署时，前台/教练为学员登记请假的入口。
+         此前「请假」页只有导出、无新建入口，且点名标请假不写台账 → 请假台账永远为空。 -->
+    <el-dialog v-model="applyVisible" title="登记请假" class="dlg-md">
+      <el-form label-width="80px" label-position="left">
+        <el-form-item label="成员" required>
+          <el-select v-model="applyForm.studentId" filterable placeholder="选择/搜索成员" style="width: 100%" @change="onApplyStudentChange">
+            <el-option v-for="s in studentOptions" :key="s.id" :label="`${s.name}${s.parent_phone ? '（' + s.parent_phone + '）' : ''}`" :value="s.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="活动" required>
+          <el-select v-model="applyForm.scheduleId" filterable placeholder="选择要请假的排期" style="width: 100%" :loading="scheduleLoading">
+            <el-option v-for="sc in scheduleOptions" :key="sc.id" :label="`${sc.date} ${sc.start_time}-${sc.end_time} ${sc.course_name || ''}`" :value="sc.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="请假原因" required>
+          <el-input v-model="applyForm.reason" type="textarea" :rows="2" placeholder="如：孩子生病" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="applyVisible = false">取消</el-button>
+        <el-button type="primary" :loading="applySubmitting" @click="submitApply">提交</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 导出确认弹窗 -->
     <ExportDialog
       ref="exportDialogRef"
@@ -102,7 +127,7 @@ const props = defineProps({
 import { ref, onMounted } from 'vue'
 import { Download } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
-import { getLeaves, approveLeave } from '@/api/modules'
+import { getLeaves, approveLeave, applyLeave, getStudents, getSchedules } from '@/api/modules'
 import { exportXlsx } from '@/utils/xlsx'
 import { fetchAllPages } from '@/utils/fetchAll'
 import ExportDialog from '@/components/ExportDialog.vue'
@@ -116,6 +141,58 @@ const currentPage = ref(1)
 const pageSize = ref(10)
 const total = ref(0)
 const exportDialogRef = ref(null)
+
+// 登记请假（员工代录）
+const applyVisible = ref(false)
+const applySubmitting = ref(false)
+const scheduleLoading = ref(false)
+const studentOptions = ref([])
+const scheduleOptions = ref([])
+const applyForm = ref({ studentId: '', scheduleId: '', reason: '' })
+
+const openApplyDialog = async () => {
+  applyForm.value = { studentId: '', scheduleId: '', reason: '' }
+  scheduleOptions.value = []
+  applyVisible.value = true
+  if (!studentOptions.value.length) {
+    try {
+      const res = await getStudents({ page: 1, pageSize: 200 })
+      studentOptions.value = res.list || []
+    } catch (e) { /* 拦截器已提示 */ }
+  }
+}
+
+// 切换成员后拉取其可见排期（供选择要请假的那节课）
+const onApplyStudentChange = async () => {
+  applyForm.value.scheduleId = ''
+  scheduleOptions.value = []
+  if (!applyForm.value.studentId) return
+  scheduleLoading.value = true
+  try {
+    const res = await getSchedules({ studentId: applyForm.value.studentId, pageSize: 100 })
+    scheduleOptions.value = res.list || []
+  } catch (e) {
+    scheduleOptions.value = []
+  } finally {
+    scheduleLoading.value = false
+  }
+}
+
+const submitApply = async () => {
+  const { studentId, scheduleId, reason } = applyForm.value
+  if (!studentId) return ElMessage.warning('请选择成员')
+  if (!scheduleId) return ElMessage.warning('请选择要请假的排期')
+  if (!reason || !reason.trim()) return ElMessage.warning('请填写请假原因')
+  applySubmitting.value = true
+  try {
+    await applyLeave({ studentId, scheduleId, reason: reason.trim() })
+    ElMessage.success('请假已登记')
+    applyVisible.value = false
+    loadList()
+  } catch (e) { /* 拦截器已提示 */ } finally {
+    applySubmitting.value = false
+  }
+}
 
 const statusDotTone = { pending: 'warning', approved: 'success', rejected: 'error' }
 const statusTextMap = { pending: '待审批', approved: '已批准', rejected: '已驳回' }

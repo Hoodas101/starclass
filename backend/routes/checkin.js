@@ -478,9 +478,11 @@ function periodBounds(t) {
  * @returns {string|null} 命中上限时返回明确文案，否则 null
  */
 function checkTimeCardVisitLimit(studentId, t) {
+  // 不限卡种：此前硬过滤 billing_mode='time'，导致「次卡」在卡种页可配到店限次却静默不生效
+  //（经营者以为已约束、实则空转）。现对次卡与时效卡一并校验，取最严档。
   const cards = db.prepare(`
     SELECT visit_limit_per_week, visit_limit_per_month FROM member_cards
-    WHERE student_id = ? AND status = 'active' AND billing_mode = 'time' AND expires_at > ?
+    WHERE student_id = ? AND status = 'active' AND expires_at > ?
   `).all(studentId, t);
   if (!cards.length) return null;
 

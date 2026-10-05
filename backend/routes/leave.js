@@ -8,8 +8,10 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, isCoachReq, recordAudit } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, getActor, now, isCoachReq, isAdminReq, isStaffReq, recordAudit } = require('../utils');
 const { requireStaffPerm } = require('../middleware/authz');
+// 「学员是否在册」的唯一判据（已删除/已归档排除），员工代录请假时按此校验
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
 // 请假规则默认值（可在 Web 管理端「系统设置 → 请假规则」中配置）
 function getLeaveRules() {
@@ -153,7 +155,27 @@ router.post('/apply', (req, res) => {
 
     // 支持为指定孩子请假（多孩家庭），未传时回退到主绑定孩子，兼容旧调用
     let bind;
-    if (studentId) {
+    const isStaffActor = isAdminReq(req) || isStaffReq(req);
+    if (isStaffActor) {
+      // 员工代录（管理员/教练/销售）：家长端小程序未部署时，这是机构内部登记请假的唯一路径。
+      // 员工 openid 不是任何学员的家长，故跳过 parent_bindings 归属校验，按 studentId 直接登记。
+      if (!studentId) return res.json(fail('代登记请假请指定成员ID'));
+      const stu = db.prepare(`SELECT s.id, s.name FROM students s WHERE s.id = ? AND ${ACTIVE_STUDENT_SQL}`).get(studentId);
+      if (!stu) {
+        const any = db.prepare('SELECT id FROM students WHERE id = ?').get(studentId);
+        return res.json(fail(any ? '该学员非在册状态，无法登记请假' : '成员不存在'));
+      }
+      // 关联该学员的主家长绑定（便于家长端/通知仍能定位到人），无绑定则记录代录员工 openid
+      const mainBind = db.prepare(`
+        SELECT parent_openid, parent_phone FROM parent_bindings WHERE student_id = ? ORDER BY is_main DESC, id ASC LIMIT 1
+      `).get(studentId);
+      bind = {
+        student_id: stu.id,
+        student_name: stu.name,
+        parent_openid: (mainBind && mainBind.parent_openid) || openid,
+        parent_phone: (mainBind && mainBind.parent_phone) || '',
+      };
+    } else if (studentId) {
       bind = db.prepare(`
         SELECT * FROM parent_bindings WHERE parent_openid = ? AND student_id = ?
       `).get(openid, studentId);
@@ -200,7 +222,20 @@ router.post('/apply', (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
     `).run(id, bind.student_id, bind.student_name || schedule.course_name, scheduleId,
       schedule.course_name, schedule.date, schedule.start_time,
-      reason.trim(), openid, bind.parent_phone || '', currentTime, currentTime);
+      reason.trim(), bind.parent_openid || openid, bind.parent_phone || '', currentTime, currentTime);
+
+    // 员工代录请假属敏感操作（影响课时/退费口径），留痕以便追溯「谁代谁登记了请假」
+    if (isStaffActor) {
+      const actor = getActor(req);
+      recordAudit(db, {
+        entity: 'leave_request',
+        entityId: id,
+        action: 'staff_leave_apply',
+        actorId: actor.id,
+        actorRole: actor.role,
+        after: { student_id: bind.student_id, schedule_id: scheduleId, date: schedule.date },
+      });
+    }
 
     res.json(success({ id, status: 'pending' }));
   } catch (err) {

@@ -1,6 +1,6 @@
 {
   "name": "starclass",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "星课 StarClass — 教培/健身机构一体化管理系统：Web 管理后台 + API，Node.js + Express + SQLite 私有化部署（可选付费三端小程序）",
   "private": true,
   "scripts": {

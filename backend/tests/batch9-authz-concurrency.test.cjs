@@ -385,8 +385,10 @@ async function main() {
     // T3 结束时已把 mc_006 复原为 remaining=7 / used=3 并删掉自己的流水行，故此处读到的就是夹具原值。
     const cardId = 'mc_006', stuId = 'stu_006';
     const before = db.prepare('SELECT remaining_classes, used_classes FROM member_cards WHERE id = ?').get(cardId);
+    // mc_006 是 1v1 私教次卡（card_type ct_004，course_scope='一对一'）。课程范围隔离已收紧为
+    // 「范围不匹配一律拒绝扣课（含临时活动）」，故排期活动名须落在卡范围内（course_scope 需包含活动名）。
     const created = await call('POST', '/api/schedules', { token: tokens.admin, body: {
-      courseName: '批次9清除点名', date: '2099-06-16', startTime: '22:00', endTime: '22:59',
+      courseName: '一对一', date: '2099-06-16', startTime: '22:00', endTime: '22:59',
       teacherId: 'teacher_001', maxStudents: 5,
     }});
     const schId = created.data && created.data.data && created.data.data.id;

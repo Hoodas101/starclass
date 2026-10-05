@@ -86,6 +86,10 @@ service.interceptors.response.use(
             ElMessage.error(response.data?.message || '没有权限访问')
           }
           return Promise.reject(new Error(response.data?.message || '没有权限访问'))
+        case 429:
+          // 触发限流：明确提示而非落到 default（避免用户只看到「请求失败」而不知是频率问题）
+          ElMessage.warning(response.data?.message || '操作过于频繁，请稍后重试')
+          return Promise.reject(new Error(response.data?.message || '操作过于频繁，请稍后重试'))
         case 404:
           ElMessage.error(response.data?.message || '请求的资源不存在')
           return Promise.reject(new Error(response.data?.message || '请求的资源不存在'))

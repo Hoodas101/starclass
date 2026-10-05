@@ -82,15 +82,12 @@ function pickCardForDeduction(studentId, scheduleId, t, per) {
   const matched = cards.filter(scopeMatches);
   // 已按 expires_at ASC，matched[0] 即「匹配范围内最先到期的卡」
   if (matched.length) return matched[0];
-  // 有合格卡（余额/有效期都够）但全部课程范围不匹配：
-  //   · 排期绑定的是**真实课程**（course_id 存在且非内置「临时活动」占位）→ 返回显式标记，
-  //     由调用方拒绝扣课，避免把 1v1 私教卡静默扣到团课上（1v1 单价数倍于团课，误扣即营收错误）。
-  //     此前直接 `return cards[0]` 兜底，正是「私教卡被团课消耗」的根因。
-  //   · 临时活动 / 无课程（course_temp）→ 课程范围无从判定，沿用兜底扣任意合格卡，
-  //     保持既有语义（自定义活动名不参与范围匹配）。
-  const isRealCourse = sch && sch.course_id && sch.course_id !== 'course_temp';
-  if (isRealCourse) return { scopeMismatch: true };
-  return cards[0];
+  // 有合格卡（余额/有效期都够）但全部课程范围不匹配 → 返回显式标记，由调用方拒绝扣课。
+  // 不再区分「真实课程 / 临时活动」：此前为兼容临时活动保留了 `return cards[0]` 兜底，
+  // 结果 course_temp 排期绕过范围隔离，1v1 私教卡（单价数倍于团课）被临时/团课静默消耗
+  //（实测余次 10→9），属直接营收损失且不易察觉。若临时活动确需用某张限定卡，
+  // 应调整卡种范围或改用「全活动通用」卡，而非让系统静默扣错卡。
+  return { scopeMismatch: true };
 }
 
 module.exports = { resolveConsumeClasses, pickCardForDeduction };

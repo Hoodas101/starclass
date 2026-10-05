@@ -1476,6 +1476,15 @@ onBeforeUnmount(() => {})
 
 .calendar-grid {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+
+// 窄屏（手机）：7 天 × 最小列宽必然超出视口，保证可横向滚动且滚动条常显，
+// 避免教练在手机上误判「今天没课」；同时收窄日列最小宽度，尽量多露出一天。
+@media (max-width: 768px) {
+  .calendar-grid { scrollbar-color: var(--t-line-strong) transparent; padding-bottom: 4px; }
+  .day-header { min-width: 84px; }
 }
 
 .grid-header {

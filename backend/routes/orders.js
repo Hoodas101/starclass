@@ -296,7 +296,9 @@ router.post('/', (req, res) => {
       });
     })();
 
-    res.json(success({ orderId: id, orderNo, totalAmount, payableAmount, discountAmount }));
+    // 同时返回 id 与 orderId：其它创建接口统一用 data.id，此处补 id 以免调用方取不到；
+    // orderId 保留以兼容既有调用方。
+    res.json(success({ id, orderId: id, orderNo, totalAmount, payableAmount, discountAmount }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }
@@ -448,6 +450,8 @@ router.get('/my', (req, res) => {
 router.post('/:id/pay', (req, res) => {
   try {
     const { id } = req.params;
+    // 收款渠道：与建单自动结算（settleOrder）统一走 normalizeChannel，避免现金/转账被硬编码记成微信。
+    const channel = normalizeChannel(req.body && req.body.channel);
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
     if (!order) return res.json(fail('订单不存在'));
     // Ownership: only the order owner (or a bound parent) can pay
@@ -482,7 +486,7 @@ router.post('/:id/pay', (req, res) => {
       }
       const paidOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
       db.prepare('INSERT INTO payments (id, order_id, order_no, user_id, amount, channel, status, paid_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(generateId('PAY'), paidOrder.id, paidOrder.order_no, paidOrder.user_id, paidOrder.payable_amount, 'wechat', 'success', currentTime, currentTime);
+        .run(generateId('PAY'), paidOrder.id, paidOrder.order_no, paidOrder.user_id, paidOrder.payable_amount, channel, 'success', currentTime, currentTime);
       // 仅激活会员卡 + 发积分（grantOrderBenefits 内部按 订单+商品 幂等去重），不再重复置订单状态
       grantOrderBenefits(paidOrder, currentTime);
 
@@ -497,7 +501,7 @@ router.post('/:id/pay', (req, res) => {
         after: {
           status: 'paid',
           payableAmount: Number(paidOrder.payable_amount) || 0,
-          paymentMethod: 'wechat',
+          paymentMethod: channel,
           paidAt: currentTime,
         },
       });

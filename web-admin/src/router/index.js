@@ -44,13 +44,14 @@ const routes = [
         meta: { title: '销售增长', icon: 'ShoppingBag', roles: ['admin', 'sales', 'coach'], perms: ['sales', 'growth'] }
       },
       {
-        // 同上：教练可见「家校沟通」（数据范围由后端限定为自己名下学员）。
-        // ⚠️ 后端 feedback.js / messages.js 目前是 isAdminReq 硬校验（仅管理员），
-        // 即使给教练勾了 parents 权限键，接口仍会 403 —— 需后端配合，前端不擅自改。
+        // 家校沟通当前为管理员专属：ParentsHub 三个页签均为 roles:['admin']，且后端
+        // feedback.js / messages.js 是 isAdminReq 硬校验。此前 roles 含 coach，导致教练
+        // 进入后是「无页签空白页 + 接口 403」的死路。先收紧为仅 admin 止血；
+        // 若后续要让教练看自己学员的反馈/消息，需同时放开页签 roles 并把后端改为「管理员或该学员的教练」。
         path: 'parents',
         name: 'Parents',
         component: () => import('@/views/hubs/ParentsHub.vue'),
-        meta: { title: '家校沟通', icon: 'ChatDotRound', roles: ['admin', 'coach'], perm: 'parents' }
+        meta: { title: '家校沟通', icon: 'ChatDotRound', roles: ['admin'], perm: 'parents' }
       },
       {
         // perm 由 'staff' 改为 'coachstats'：守卫改 AND 后，教练默认权限里没有 'staff'，

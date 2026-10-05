@@ -49,6 +49,8 @@ export const saveSettings = (data) => request.put('/settings', data)
 // 请假
 export const getLeaves = (params) => request.get('/leave', { params })
 export const approveLeave = (id, data) => request.put(`/leave/${id}/approve`, data)
+// 员工代录请假：管理员/教练/销售为学员登记请假（家长端小程序未部署时的唯一入口）
+export const applyLeave = (data) => request.post('/leave/apply', data)
 
 // 反馈
 export const getFeedback = (params) => request.get('/feedback', { params })

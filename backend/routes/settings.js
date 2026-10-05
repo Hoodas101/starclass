@@ -11,7 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const Database = require('better-sqlite3');
 const bodyParser = require('body-parser');
-const { success, fail, safeFail, getOpenId, getActor, recordAudit, now, isAdminReq, isStaffReq } = require('../utils');
+const { success, fail, safeFail, getOpenId, getActor, recordAudit, now, isAdminReq } = require('../utils');
 const { getBackupConfig, createBackup, listBackups, deleteBackup, BACKUP_DIR } = require('../utils/backup');
 const { getModulesMeta, exportData, importData, FORBIDDEN_TABLES } = require('../utils/dataio');
 const termsUtil = require('../utils/terms');
@@ -98,7 +98,9 @@ const DEFAULT_REFUND_RULES = {
  */
 router.get('/', (req, res) => {
   try {
-    const isPublicReq = !isStaffReq(req);
+    // 完整配置（含积分/退费/推送等经营规则）仅管理员可读；教练/销售/未登录一律只回公开子集。
+    // 此前门槛是 isStaffReq → 销售虽无 UI 入口却能直连接口读到全部经营规则（前端隐藏 ≠ 后端鉴权）。
+    const isAdminViewer = isAdminReq(req);
     const rows = db.prepare('SELECT key, value FROM settings').all();
     const raw = {};
     rows.forEach((r) => { raw[r.key] = r.value; });
@@ -139,14 +141,17 @@ router.get('/', (req, res) => {
         result[key] = (result[key] && typeof result[key] === 'object') ? result[key] : {};
       }
     }
-    if (isPublicReq) {
-      // 未登录只回公开展示子集，其余键（规则/列配置）置 null 不泄露
+    if (!isAdminViewer) {
+      // 非管理员：只回公开子集 + 表格列配置（列配置供教练/销售的学员/订单列表页使用，非经营敏感项），
+      // 其余键（积分/退费/推送规则等经营配置）一律不泄露。
       const org = result.org_info && typeof result.org_info === 'object' ? result.org_info : {};
       return res.json(success({
         org_info: { name: org.name || '', logo: org.logo || '' },
         service_phone: result.service_phone || '',
         term_scheme: result.term_scheme,
         term_overrides: result.term_overrides,
+        students_columns: result.students_columns,
+        orders_columns: result.orders_columns,
       }));
     }
     res.json(success(result));
