@@ -164,8 +164,24 @@
           <el-input-number v-model="cardForm.price" :min="0" :max="999999" :step="100" />
           <span class="unit-text">元</span>
         </el-form-item>
-        <el-form-item label="适用项目">
-          <el-input v-model="cardForm.courseScope" placeholder="留空表示全部项目" />
+        <!-- 结构化课程范围（迁移 033）：按课程 id 精确匹配，扣课时不再依赖「中文名互相包含」的巧合。
+             留空则回退到下方文字范围（兼容旧口径与历史卡种）。 -->
+        <el-form-item label="限定课程">
+          <el-select
+            v-model="cardForm.scopeCourseIds"
+            multiple
+            filterable
+            clearable
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="留空 = 不限课程"
+            style="width: 100%"
+          >
+            <el-option v-for="c in courseOptions" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="文字范围">
+          <el-input v-model="cardForm.courseScope" placeholder="兼容旧口径（如「全活动通用」「1v1」），一般留空" />
         </el-form-item>
         <el-form-item label="可转让">
           <el-switch v-model="cardForm.transferable" :active-value="1" :inactive-value="0" />
@@ -217,7 +233,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import {
-  getCardTypes, addCardType, updateCardType,
+  getCardTypes, addCardType, updateCardType, getCourses,
 } from '@/api/modules'
 import StatusDot from '@/components/StatusDot.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -261,6 +277,8 @@ const cardForm = reactive({
   pointsReward: 0,
   price: 0,
   courseScope: '',
+  // 结构化课程范围：课程 id 数组（后端归一化为逗号分隔文本）
+  scopeCourseIds: [],
   isActive: 1,
   // 到店次数上限（0 = 不限），仅时效制卡种使用
   visitLimitPerWeek: 0,
@@ -292,6 +310,7 @@ const openCardDialog = (row) => {
     pointsReward: row?.points_reward || 0,
     price: row?.price || 0,
     courseScope: row?.course_scope || '',
+    scopeCourseIds: String(row?.scope_course_ids || '').split(',').map((s) => s.trim()).filter(Boolean),
     isActive: row ? (row.is_active !== 0 ? 1 : 0) : 1,
     visitLimitPerWeek: Number(row?.visit_limit_per_week) || 0,
     visitLimitPerMonth: Number(row?.visit_limit_per_month) || 0,
@@ -365,7 +384,16 @@ const submitGoods = async () => {
     submittingGoods.value = false
   }
 }
+// 限定课程下拉的数据源（课程列表）
+const courseOptions = ref([])
+const loadCourses = async () => {
+  try {
+    const res = await getCourses({ pageSize: 200 })
+    courseOptions.value = res.list || []
+  } catch (e) { /* 拦截器已提示 */ }
+}
 onMounted(load)
+onMounted(loadCourses)
 </script>
 
 <style lang="scss" scoped>

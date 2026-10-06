@@ -271,6 +271,38 @@
             </div>
           </div>
 
+          <!-- 数据体检：存量脏数据自查 + 一次性安全清理（对应 backend/utils/data-health.js） -->
+          <div class="backup-card">
+            <div class="backup-card__head">
+              <el-icon :size="18" class="backup-card__icon"><WarningFilled /></el-icon>
+              <div>
+                <div class="backup-card__title">数据体检</div>
+                <div class="backup-card__desc">自查存量脏数据：孤儿家长账号 / 非法卡种 / 0 元卡种 / 重名卡种 / 教练表混入非教练账号</div>
+              </div>
+            </div>
+            <div class="backup-box">
+              <template v-if="health">
+                <p class="backup-tip">
+                  孤儿家长账号 {{ health.orphanParents.count }} · 非法卡种 {{ health.invalidCardTypes.count }} ·
+                  0 元卡种 {{ health.zeroPriceCardTypes.count }} · 重名卡种 {{ health.duplicateCardNames.count }} ·
+                  教练表混入非教练 {{ health.salesInTeachers.count }}
+                </p>
+                <p v-if="health.zeroPriceCardTypes.count || health.duplicateCardNames.count || health.salesInTeachers.count" class="backup-tip">
+                  0 元 / 重名卡种与教练表混入项涉及定价与人事语义，请在「产品服务」「团队管理」中人工处理。
+                </p>
+              </template>
+              <p v-else class="backup-tip">点击「开始体检」扫描存量脏数据（只读，不修改任何数据）。</p>
+              <el-button :icon="Refresh" :loading="healthLoading" @click="runHealthCheck">开始体检</el-button>
+              <el-button
+                v-if="health && (health.orphanParents.count || health.invalidCardTypes.count)"
+                type="danger"
+                plain
+                :loading="cleaning"
+                @click="doCleanup"
+              >安全清理（{{ health.orphanParents.count + health.invalidCardTypes.count }} 项）</el-button>
+            </div>
+          </div>
+
           <!-- 方式一：完整数据库文件 -->
           <div class="backup-card">
             <div class="backup-card__head">
@@ -698,7 +730,7 @@
 import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { Upload, Picture, Download, Bell, Plus, Delete, Document, QuestionFilled, WarningFilled, Refresh, FolderOpened, Search } from '@element-plus/icons-vue'
 import request from '@/api/request'
-import { getSettings, saveSettings, generateRenewalNotices, getDataModules, exportData, importData, getBackups, createBackup, deleteBackup, getAuditLogs } from '@/api/modules'
+import { getSettings, saveSettings, generateRenewalNotices, getDataModules, exportData, importData, getBackups, createBackup, deleteBackup, getAuditLogs, getDataHealth, runDataCleanup } from '@/api/modules'
 import { useSettingsStore } from '@/store/settings'
 import { useUserStore } from '@/store/user'
 import { SCHEMES, CONCEPTS } from '@/constants/terms'
@@ -786,6 +818,38 @@ const saveDashWidgets = () => {
 // ============================================
 const backingUp = ref(false)
 const dbDownloadConfirmVisible = ref(false)
+
+// 数据体检：存量脏数据自查与一次性安全清理
+const health = ref(null)
+const healthLoading = ref(false)
+const cleaning = ref(false)
+const runHealthCheck = async () => {
+  healthLoading.value = true
+  try {
+    health.value = await getDataHealth()
+  } catch (e) { /* 拦截器已提示 */ } finally {
+    healthLoading.value = false
+  }
+}
+const doCleanup = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '将删除「无任何绑定的孤儿家长账号」，并把「非法卡种（有效天数/总次数 <= 0）」下架（不删除，保留可追溯）。建议先下载一份备份。',
+      '确认清理',
+      { type: 'warning', confirmButtonText: '执行清理', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return // 用户取消
+  }
+  cleaning.value = true
+  try {
+    const r = await runDataCleanup(['orphan_parents', 'invalid_card_types'])
+    ElMessage.success(`已清理：孤儿家长账号 ${r.orphanParents} 个，非法卡种下架 ${r.invalidCardTypes} 个`)
+    await runHealthCheck()
+  } catch (e) { /* 拦截器已提示 */ } finally {
+    cleaning.value = false
+  }
+}
 
 const openDbDownload = () => {
   dbDownloadConfirmVisible.value = true

@@ -12,6 +12,8 @@ const { generateId, success, fail, safeFail, getOpenId, getActor, now, isCoachRe
 const { requireStaffPerm } = require('../middleware/authz');
 // 「学员是否在册」的唯一判据（已删除/已归档排除），员工代录请假时按此校验
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
+// 选卡收口到统一实现（含课程范围隔离），与签到/手工扣课路径同一口径
+const { pickCardForDeduction } = require('../utils/deduction');
 
 // 请假规则默认值（可在 Web 管理端「系统设置 → 请假规则」中配置）
 function getLeaveRules() {
@@ -60,12 +62,10 @@ function applyLeaveDeduction(studentId, scheduleId, currentTime) {
   if (rules.deductMode === 'none' || !rules.deductAmount) return { deducted: false };
 
   if (rules.deductMode === 'class') {
-    // 扣课时：只扣次数卡，优先扣到期最近的（DESC 会把新购卡先扣掉，与契约相反）
-    const card = db.prepare(`
-      SELECT * FROM member_cards
-      WHERE student_id = ? AND status = 'active' AND billing_mode = 'count' AND remaining_classes > 0
-      ORDER BY expires_at ASC LIMIT 1
-    `).get(studentId);
+    // 扣课时：收口到 utils/deduction.pickCardForDeduction（与签到路径同一口径，含课程范围隔离）。
+    // 此前本路径自写 SQL、不校验 course_scope，导致「团课请假」会扣掉 1v1 私教卡（仅需教练权限即可触发）。
+    const card = pickCardForDeduction(studentId, scheduleId, currentTime, rules.deductAmount);
+    if (card && card.scopeMismatch) return { deducted: false, reason: 'scope_mismatch' };
     if (!card) return { deducted: false, reason: 'no_count_card' };
     const before = card.remaining_classes;
     const after = Math.max(0, before - rules.deductAmount);

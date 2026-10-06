@@ -486,15 +486,16 @@ const onColumnFilter = (filters) => {
 
 // 批量导入销售记录
 const importDialogRef = ref(null)
+// aliases：见 students 导入列定义说明（归一化 + 同义表头匹配）
 const importColumns = [
-  { key: 'studentName', label: t('learner') + '姓名', required: true },
-  { key: 'phone', label: '联系方式' },
-  { key: 'itemName', label: '项目', required: true },
-  { key: 'amount', label: '金额', required: true },
-  { key: 'salesperson', label: '签单人' },
-  { key: 'paidDate', label: '购买日期' },
-  { key: 'orderNo', label: '收据单号' },
-  { key: 'remark', label: '备注' },
+  { key: 'studentName', label: t('learner') + '姓名', required: true, aliases: ['学员姓名', '学生姓名', '姓名', '会员姓名', 'studentName'] },
+  { key: 'phone', label: '联系方式', aliases: ['手机号', '手机', '家长电话', '联系电话', '电话', 'tel', 'phone'] },
+  { key: 'itemName', label: '项目', required: true, aliases: ['项目名称', '产品', '卡种', '课程', '商品', 'itemName'] },
+  { key: 'amount', label: '金额', required: true, aliases: ['金额(元)', '实收金额', '应收金额', '价格', 'amount'] },
+  { key: 'salesperson', label: '签单人', aliases: ['销售', '销售员', '签单人', '销售姓名', 'salesperson'] },
+  { key: 'paidDate', label: '购买日期', aliases: ['购买日期', '收款日期', '下单日期', 'paidDate'] },
+  { key: 'orderNo', label: '收据单号', aliases: ['订单号', '收据单号', '单号', 'orderNo'] },
+  { key: 'remark', label: '备注', aliases: ['备注', '说明', 'remark'] },
 ]
 
 const openImport = () => {

@@ -14,11 +14,20 @@ const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, isAdminReq, isCoachReq, hasPerm, getReqUser, canViewStudentData, calcCardExpiresAt, parsePagination } = require('../utils');
 // 订单明细解析 / 每次课消耗课时数：与签到扣课、导出报表共用同一实现
 const { parseItems, itemLineTotal } = require('../utils/items');
-const { resolveConsumeClasses } = require('../utils/deduction');
+const { resolveConsumeClasses, pickCardForDeduction } = require('../utils/deduction');
 // 退卡与订单退款共用同一套退费规则引擎（refund_rules），避免同一笔钱两条路径两个金额
 const { computeRefundSuggestion } = require('../utils/refund');
 // 已删除（status='refunded'）/ 已归档学员的统一排除条件（学员表别名须为 s）
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
+
+/**
+ * 结构化课程范围归一化：接受数组或逗号分隔字符串，去空去重后存为逗号分隔文本。
+ * 为空表示「不限范围」，扣课时回退到原文本 course_scope 逻辑（向后兼容）。
+ */
+function normalizeScopeCourseIds(v) {
+  const arr = Array.isArray(v) ? v : String(v == null ? '' : v).split(',');
+  return [...new Set(arr.map((s) => String(s).trim()).filter(Boolean))].join(',');
+}
 
 // schema 列（paused_at/billing_mode/points_reward/product_type 等）已收编至 migrations/011；
 // 此处仅保留数据回填。
@@ -159,7 +168,7 @@ router.post('/resume', (req, res) => {
 router.post('/card-type', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可管理产品'));
-    const { name, totalClasses, validDays, billingMode = 'time', price, pointsReward = 0, courseScope, transferable, refundable, productType = 'membership', unit = '', description = '', visitLimitPerWeek, visitLimitPerMonth } = req.body;
+    const { name, totalClasses, validDays, billingMode = 'time', price, pointsReward = 0, courseScope, scopeCourseIds, transferable, refundable, productType = 'membership', unit = '', description = '', visitLimitPerWeek, visitLimitPerMonth } = req.body;
     if (!name) return res.json(fail('名称为必填'));
     const type = productType === 'goods' ? 'goods' : 'membership';
     // 到店限次（0/NULL = 不限次）；负数与非法值一律归 0
@@ -194,9 +203,9 @@ router.post('/card-type', (req, res) => {
 
     const id = generateId('ct_');
     db.prepare(`
-      INSERT INTO membership_cards (id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, transferable, refundable, product_type, unit, description, visit_limit_per_week, visit_limit_per_month, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'membership', '', ?, ?, ?, ?)
-    `).run(id, name, mode === 'count' ? totalClasses : 0, validDays || 0, mode, pointsReward || 0, price || 0, courseScope || '', transferable ? 1 : 0, refundable !== false ? 1 : 0, description || '', vw, vm, now());
+      INSERT INTO membership_cards (id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, scope_course_ids, transferable, refundable, product_type, unit, description, visit_limit_per_week, visit_limit_per_month, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'membership', '', ?, ?, ?, ?)
+    `).run(id, name, mode === 'count' ? totalClasses : 0, validDays || 0, mode, pointsReward || 0, price || 0, courseScope || '', normalizeScopeCourseIds(scopeCourseIds), transferable ? 1 : 0, refundable !== false ? 1 : 0, description || '', vw, vm, now());
 
     // 产品（卡类型/商品）定价与权益变更影响销售口径，需留痕
     const actor = getActor(req);
@@ -304,10 +313,34 @@ router.get('/products', (req, res) => {
 router.put('/card-type/:id', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可管理产品'));
-    const { name, totalClasses, validDays, billingMode, price, pointsReward, courseScope, transferable, refundable, isActive, productType, unit, description, visitLimitPerWeek, visitLimitPerMonth } = req.body;
-    const existing = db.prepare('SELECT id, product_type FROM membership_cards WHERE id = ?').get(req.params.id);
+    const { name, totalClasses, validDays, billingMode, price, pointsReward, courseScope, scopeCourseIds, transferable, refundable, isActive, productType, unit, description, visitLimitPerWeek, visitLimitPerMonth } = req.body;
+    // 结构化范围：未传则保持原值（COALESCE 兜底），显式传入才覆盖
+    const scopeIdsVal = (scopeCourseIds === undefined || scopeCourseIds === null) ? null : normalizeScopeCourseIds(scopeCourseIds);
+    const existing = db.prepare('SELECT id, product_type, billing_mode, valid_days, total_classes FROM membership_cards WHERE id = ?').get(req.params.id);
     if (!existing) return res.json(fail('产品不存在'));
     const isGoods = productType === 'goods' || existing.product_type === 'goods';
+
+    // 参数校验（与创建接口同判据）：更新接口此前只有「存在性」校验，可把时效卡的有效天数清空
+    // 写成 0/负数 → calcCardExpiresAt 返回激活时刻 → 「买来即过期」且永不被选卡命中（直接营收/口碑损失），
+    // 且照界面正常编辑即可触发。注意「部分更新」语义：未传（undefined/null）沿用库中原值不校验，显式传入必须合法。
+    if (!isGoods) {
+      const mode = billingMode || existing.billing_mode;
+      if (mode === 'time' && validDays !== undefined && validDays !== null) {
+        const vd = Number(validDays);
+        if (!Number.isInteger(vd) || vd <= 0) return res.json(fail('时效制卡的有效天数必须是正整数'));
+      }
+      if (mode === 'count' && totalClasses !== undefined && totalClasses !== null) {
+        const tc = Number(totalClasses);
+        if (!Number.isInteger(tc) || tc <= 0) return res.json(fail('次数制卡的总次数必须是正整数'));
+      }
+      // 切换计费模式时必须补齐新模式必填项（次数卡改时效制却不带有效天数 → 直接拒绝，最易漏的一处）
+      if (billingMode !== undefined && billingMode !== existing.billing_mode) {
+        const vd = Number(validDays != null ? validDays : existing.valid_days);
+        const tc = Number(totalClasses != null ? totalClasses : existing.total_classes);
+        if (billingMode === 'time' && !(vd > 0)) return res.json(fail('改为时效制必须设置有效天数'));
+        if (billingMode === 'count' && !(tc > 0)) return res.json(fail('改为次数制必须设置总次数'));
+      }
+    }
     // 到店限次：未传（undefined/null）→ 保持原值（COALESCE 兜底）；显式传值则写库，负数/非法值归 0
     const vw = (visitLimitPerWeek === undefined || visitLimitPerWeek === null) ? null : Math.max(0, Number(visitLimitPerWeek) || 0);
     const vm = (visitLimitPerMonth === undefined || visitLimitPerMonth === null) ? null : Math.max(0, Number(visitLimitPerMonth) || 0);
@@ -333,6 +366,7 @@ router.put('/card-type/:id', (req, res) => {
           points_reward = COALESCE(?, points_reward),
           price = COALESCE(?, price),
           course_scope = COALESCE(?, course_scope),
+          scope_course_ids = COALESCE(?, scope_course_ids),
           transferable = COALESCE(?, transferable),
           refundable = COALESCE(?, refundable),
           description = COALESCE(?, description),
@@ -340,7 +374,7 @@ router.put('/card-type/:id', (req, res) => {
           visit_limit_per_week = COALESCE(?, visit_limit_per_week),
           visit_limit_per_month = COALESCE(?, visit_limit_per_month)
         WHERE id = ?
-      `).run(name, totalClasses, validDays, billingMode, pointsReward, price, courseScope, transferable, refundable, description, isActive, vw, vm, req.params.id);
+      `).run(name, totalClasses, validDays, billingMode, pointsReward, price, courseScope, scopeIdsVal, transferable, refundable, description, isActive, vw, vm, req.params.id);
     }
 
     // 产品（卡类型/商品）定价与权益变更影响销售口径，需留痕
@@ -621,11 +655,24 @@ router.get('/my', (req, res) => {
         WHERE student_id IN (${ph}) AND status = 'paid' GROUP BY student_id
       `).all(...studentIds).forEach((r) => { countMap[r.student_id] = r.count; });
     }
-    const enriched = cards.map((c) => ({
-      ...c,
-      purchased_at: c.activated_at || c.created_at || null,
-      purchase_count: countMap[c.student_id] || 0,
-    }));
+    // 与扣课侧（pickCardForDeduction）同一口径的派生状态：会员中心保留全量（家长有知情权），
+    // 但必须给出显式状态供前端渲染徽标——否则「status=active 但已过期」的卡会被家长误以为还能用
+    //（家长看到「还有 5 节课」，教练点名时该卡却被时间条件跳过）。
+    const nowMs = Date.now();
+    const enriched = cards.map((c) => {
+      const expiresAt = Number(c.expires_at) || 0;
+      const isExpired = expiresAt > 0 && expiresAt <= nowMs;
+      const isUsable = c.status === 'active' && expiresAt > nowMs
+        && (c.billing_mode !== 'count' || Number(c.remaining_classes) > 0);
+      return {
+        ...c,
+        purchased_at: c.activated_at || c.created_at || null,
+        purchase_count: countMap[c.student_id] || 0,
+        display_status: c.status !== 'active' ? c.status : (isExpired ? 'expired' : 'active'),
+        is_expired: isExpired,
+        is_usable: isUsable,
+      };
+    });
 
     res.json(success(enriched));
   } catch (err) {
@@ -681,10 +728,10 @@ router.post('/deduct', (req, res) => {
         return res.json(fail('该卡已过期'));
       }
     } else {
-      // 自动选卡路径口径不变（由另一处统一收敛）
-      card = db.prepare(
-        "SELECT * FROM member_cards WHERE student_id = ? AND status = 'active' AND expires_at > ? ORDER BY expires_at ASC LIMIT 1"
-      ).get(studentId, now());
+      // 自动选卡收口到 utils/deduction.pickCardForDeduction：与签到路径同一口径（含课程范围隔离）。
+      // 此前本路径自写 SQL、不校验 course_scope，导致 1v1 私教卡可被团课/临时活动手工扣课。
+      card = pickCardForDeduction(studentId, scheduleId, now(), n);
+      if (card && card.scopeMismatch) return res.json(fail('该学员所持卡不适用于本课程，请确认课程范围或更换卡'));
     }
 
     if (!card) return res.json(fail('没有可用会员卡'));

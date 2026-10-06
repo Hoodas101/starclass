@@ -6,7 +6,8 @@
         <!-- 品牌区（固定标题，不随页面变化） -->
         <div class="header-brand">
           <div class="logo-icon">
-            <el-icon :size="16"><School /></el-icon>
+            <img v-if="orgLogo" :src="orgLogo" :alt="orgName" class="logo-img" />
+            <el-icon v-else :size="16"><School /></el-icon>
           </div>
           <span class="logo-text">{{ orgName }}</span>
         </div>
@@ -322,13 +323,18 @@ const noticeLoading = ref(false)
 const notices = ref([])
 const unreadCount = ref(0)
 const orgName = ref('管理中心')
+// 机构 Logo：与机构名一同从 settings.org_info 读取。此前侧边栏只读名称、图标写死为 School，
+// 机构上传的 Logo 在侧边栏看不到 → 品牌定制形同虚设（只有设置页能预览）。
+const orgLogo = ref('')
 
 const loadOrgName = async () => {
   try {
     const res = await getSettings()
     orgName.value = res?.org_info?.name || '管理中心'
+    orgLogo.value = res?.org_info?.logo || ''
   } catch (e) {
     orgName.value = '管理中心'
+    orgLogo.value = ''
   }
 }
 
@@ -741,6 +747,15 @@ const handleCommand = async (command) => {
     justify-content: center;
     flex-shrink: 0;
     box-shadow: var(--t-elevation-accent);
+
+    // 机构 Logo：铺满 24px 方块并保持比例（白底 Logo 用 contain 不裁切）
+    .logo-img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      border-radius: 6px;
+      display: block;
+    }
   }
 }
 

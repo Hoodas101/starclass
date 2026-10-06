@@ -291,23 +291,27 @@ console.log('\n\x1b[1m[五] F1 看板单品金额/件数口径 + F2 非法元素
 
   // 数量刻意放大：看板 itemStats 有 LIMIT 5，而前面几节已往本月塞了不少探针订单，
   // 夹具件数必须稳稳排在 Top5 内，否则断言会因截断而假红（与聚合逻辑无关）。
-  // 订单1：单明细 1000（10 件 × 100）
-  mkPaidOrder(JSON.stringify([{ itemName: n1, quantity: 10, unitPrice: 100, totalPrice: 1000 }]), 1000);
-  // 订单2：双明细，n1 占 600（6 件）、n2 占 400（4 件），整单实付 1000
+  // 夹具数量统一放大 ×10：看板 itemStats 为 Top5（ORDER BY 件数 DESC），而种子数据本月
+  // 已有「时效月卡 5 件 / 时效季卡 4 件」，原夹具的 n2=4 件会被挤出 Top5 造成假红
+  //（与本用例聚合逻辑无关，纯截断）。放大后各断言按同比例更新，语义（跨单合并 / 件数口径 /
+  // 不按明细条数放大 / 折扣毛口径）完全不变。
+  // 订单1：单明细 10000（100 件 × 100）
+  mkPaidOrder(JSON.stringify([{ itemName: n1, quantity: 100, unitPrice: 100, totalPrice: 10000 }]), 10000);
+  // 订单2：双明细，n1 占 6000（60 件）、n2 占 4000（40 件），整单实付 10000
   mkPaidOrder(JSON.stringify([
-    { itemName: n1, quantity: 6, unitPrice: 100, totalPrice: 600 },
-    { itemName: n2, quantity: 4, unitPrice: 100, totalPrice: 400 },
-  ]), 1000);
-  // 订单3：双重编码，quantity=7 → 件数应为 7
-  mkPaidOrder(JSON.stringify([JSON.stringify({ itemName: n3, quantity: 7, unitPrice: 100, totalPrice: 700 })]), 700);
-  // 订单4：折扣单（标价 1000 / 实付 800）——单品统计刻意保留毛口径
+    { itemName: n1, quantity: 60, unitPrice: 100, totalPrice: 6000 },
+    { itemName: n2, quantity: 40, unitPrice: 100, totalPrice: 4000 },
+  ]), 10000);
+  // 订单3：双重编码，quantity=70 → 件数应为 70
+  mkPaidOrder(JSON.stringify([JSON.stringify({ itemName: n3, quantity: 70, unitPrice: 100, totalPrice: 7000 })]), 7000);
+  // 订单4：折扣单（标价 10000 / 实付 8000）——单品统计刻意保留毛口径
   {
     const ts = Date.now();
     const id = gen('ORD_F1DISC_');
     db.prepare(`INSERT INTO orders (id, order_no, student_id, student_name, order_type, items,
         total_amount, discount_amount, payable_amount, status, paid_at, refunded_amount, created_at, updated_at)
-      VALUES (?, ?, 'stu_chart_probe', '图表探针', 'membership', ?, 1000, 200, 800, 'paid', ?, 0, ?, ?)`)
-      .run(id, gen('F1D'), JSON.stringify([{ itemName: n4, quantity: 5, unitPrice: 200, totalPrice: 1000 }]), ts, ts, ts);
+      VALUES (?, ?, 'stu_chart_probe', '图表探针', 'membership', ?, 10000, 2000, 8000, 'paid', ?, 0, ?, ?)`)
+      .run(id, gen('F1D'), JSON.stringify([{ itemName: n4, quantity: 50, unitPrice: 200, totalPrice: 10000 }]), ts, ts, ts);
     created.push(id);
   }
   // 订单5：合法数组 + 非法元素（旧实现下这一行会让整块统计抛错/整个图表页 500）
@@ -325,18 +329,18 @@ console.log('\n\x1b[1m[五] F1 看板单品金额/件数口径 + F2 非法元素
   rec('itemStats 非空（非法元素不再让整块统计静默消失）', itemStats.length > 0, `len=${itemStats.length}`);
 
   const a1 = byItem[n1];
-  rec('F1 同一单品跨「单明细 + 双明细」两单的金额 = 1000 + 600 = 1600',
-    !!a1 && a1.amount === 1600, `got=${JSON.stringify(a1)}`);
-  rec('F1 金额不再按明细条数放大（旧口径为 2000 = 两张整单金额相加）',
-    !!a1 && a1.amount !== 2000, `got=${JSON.stringify(a1)}`);
-  rec('F1 count 为件数：n1 跨两单 10 + 6 = 16 件（旧口径为笔数 2）',
-    !!a1 && a1.count === 16, `got=${JSON.stringify(a1)}`);
-  rec('F1 双明细单的另一项金额 = 400（旧口径为整单 1000）',
-    !!byItem[n2] && byItem[n2].amount === 400 && byItem[n2].count === 4, `got=${JSON.stringify(byItem[n2])}`);
-  rec('F1 count 改为件数：双重编码 quantity=7 → count=7（旧口径为笔数 1）',
-    !!byItem[n3] && byItem[n3].count === 7 && byItem[n3].amount === 700, `got=${JSON.stringify(byItem[n3])}`);
-  rec('F1 折扣单按标价毛口径记 1000（与 CSV 导出单品金额同口径）',
-    !!byItem[n4] && byItem[n4].amount === 1000 && byItem[n4].count === 5, `got=${JSON.stringify(byItem[n4])}`);
+  rec('F1 同一单品跨「单明细 + 双明细」两单的金额 = 10000 + 6000 = 16000',
+    !!a1 && a1.amount === 16000, `got=${JSON.stringify(a1)}`);
+  rec('F1 金额不再按明细条数放大（旧口径为 20000 = 两张整单金额相加）',
+    !!a1 && a1.amount !== 20000, `got=${JSON.stringify(a1)}`);
+  rec('F1 count 为件数：n1 跨两单 100 + 60 = 160 件（旧口径为笔数 2）',
+    !!a1 && a1.count === 160, `got=${JSON.stringify(a1)}`);
+  rec('F1 双明细单的另一项金额 = 4000（旧口径为整单 10000）',
+    !!byItem[n2] && byItem[n2].amount === 4000 && byItem[n2].count === 40, `got=${JSON.stringify(byItem[n2])}`);
+  rec('F1 count 改为件数：双重编码 quantity=70 → count=70（旧口径为笔数 1）',
+    !!byItem[n3] && byItem[n3].count === 70 && byItem[n3].amount === 7000, `got=${JSON.stringify(byItem[n3])}`);
+  rec('F1 折扣单按标价毛口径记 10000（与 CSV 导出单品金额同口径）',
+    !!byItem[n4] && byItem[n4].amount === 10000 && byItem[n4].count === 50, `got=${JSON.stringify(byItem[n4])}`);
 
   // /charts 同一份数据：旧实现直接对非法元素 json_extract → 整条查询抛 malformed JSON → 500
   const ch = callCharts('month');
@@ -345,8 +349,8 @@ console.log('\n\x1b[1m[五] F1 看板单品金额/件数口径 + F2 非法元素
   const ps = (ch.body && ch.body.data && ch.body.data.productSales) || [];
   const psByName = {};
   for (const p of ps) psByName[p.name] = p;
-  rec('F2 合法项在非法元素存在时仍按真实项目名归类（n1 件数=16）',
-    !!psByName[n1] && psByName[n1].count === 16, `got=${JSON.stringify(psByName[n1])}`);
+  rec('F2 合法项在非法元素存在时仍按真实项目名归类（n1 件数=160）',
+    !!psByName[n1] && psByName[n1].count === 160, `got=${JSON.stringify(psByName[n1])}`);
   rec('F2 非法元素降级进「其他」桶（件数 1），不再拖垮接口',
     !!psByName['其他'] && psByName['其他'].count >= 1, `got=${JSON.stringify(psByName['其他'])}`);
 }

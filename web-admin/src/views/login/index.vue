@@ -4,9 +4,11 @@
     <div class="login-brand">
       <div class="brand-inner">
         <div class="brand-logo">
-          <el-icon :size="26"><School /></el-icon>
+          <img v-if="orgLogo" :src="orgLogo" :alt="orgName" class="brand-logo-img" />
+          <el-icon v-else :size="26"><School /></el-icon>
         </div>
-        <h1 class="brand-name">星课<span class="brand-en">StarClass</span></h1>
+        <h1 v-if="orgName" class="brand-name">{{ orgName }}</h1>
+        <h1 v-else class="brand-name">星课<span class="brand-en">StarClass</span></h1>
         <p class="brand-tagline">教务 · 排期 · 销售 · {{ $t('learner') }}，一体化管理</p>
 
         <div class="brand-meta">
@@ -102,12 +104,25 @@ import { useRouter, useRoute } from 'vue-router'
 import { School, Iphone, UserFilled, Basketball, Setting, Lock } from '@element-plus/icons-vue'
 import { useUserStore } from '@/store/user'
 import { useSettingsStore } from '@/store/settings'
+import { getSettings } from '@/api/modules'
 
 const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
 const settingsStore = useSettingsStore()
 const t = settingsStore.t
+
+// 登录页品牌化：未登录时后端 /api/settings 只回公开子集（含 org_info.name/logo），
+// 用机构自己的名称与 Logo 替换默认「星课 StarClass」——机构配了 Logo 才算真正生效。
+const orgName = ref('')
+const orgLogo = ref('')
+onMounted(async () => {
+  try {
+    const res = await getSettings()
+    orgName.value = res?.org_info?.name || ''
+    orgLogo.value = res?.org_info?.logo || ''
+  } catch (e) { /* 忽略：回退到默认品牌 */ }
+})
 
 const loginFormRef = ref(null)
 const passwordRef = ref(null)
@@ -243,6 +258,15 @@ onMounted(() => {
   justify-content: center;
   margin-bottom: 28px;
   box-shadow: none;
+
+  // 机构 Logo：铺满 56px 方块并保持比例
+  .brand-logo-img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    border-radius: var(--t-radius-md);
+    display: block;
+  }
 }
 
 .brand-name {

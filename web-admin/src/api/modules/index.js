@@ -33,6 +33,9 @@ export const updateTeacher = (id, data) => request.put(`/admin/teachers/${id}`, 
 export const deleteTeacher = (id) => request.delete(`/admin/teachers/${id}`)
 export const getClassrooms = (params) => request.get('/admin/classrooms', { params })
 export const getCourses = (params) => request.get('/admin/courses', { params })
+// 存量脏数据体检 / 一次性安全清理
+export const getDataHealth = () => request.get('/admin/data-health')
+export const runDataCleanup = (actions) => request.post('/admin/data-cleanup', { actions })
 export const getCourseOptions = (params) => request.get('/admin/courses/options', { params })
 export const addCourse = (data) => request.post('/admin/courses', data)
 export const updateCourse = (id, data) => request.put(`/admin/courses/${id}`, data)

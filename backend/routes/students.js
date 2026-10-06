@@ -327,15 +327,28 @@ router.post('/import', (req, res) => {
           return;
         }
 
+        // 日期校验：建档（POST /）与修改（PUT /:id）都有 isValidDateStr，唯独导入路径缺失 →
+        // 2018-02-30 被 SQLite date() 静默归一为 03-02（年龄错一天）、2018/1/5 令 date() 返回 NULL
+        //（按年龄分班/统计时该学员凭空消失）。与既有判据同源，命中则记入 failed 且不影响其余行。
+        const birthdayRaw = String(r.birthday || '').trim();
+        if (birthdayRaw && !isValidDateStr(birthdayRaw)) {
+          failed.push({ row: idx + 2, name, reason: `生日「${birthdayRaw}」不是有效日期（格式 YYYY-MM-DD）` });
+          return;
+        }
+        const joinRaw = String(r.joinDate || r.join_date || '').trim();
+        if (joinRaw && !isValidDateStr(joinRaw)) {
+          failed.push({ row: idx + 2, name, reason: `入会日期「${joinRaw}」不是有效日期（格式 YYYY-MM-DD）` });
+          return;
+        }
+
         const id = generateId('stu_');
         const t = now();
         const statusVal = String(r.status || '').trim() || 'active';
-        const joinRaw = String(r.joinDate || r.join_date || '').trim();
         const joinDateVal = joinRaw ? new Date(joinRaw + 'T12:00:00').getTime() || t : t;
         db.prepare(`
           INSERT INTO students (id, name, gender, birthday, school, grade, level, remark, status, join_date, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(id, name, String(r.gender || '').trim(), String(r.birthday || '').trim(), String(r.school || '').trim(),
+        `).run(id, name, String(r.gender || '').trim(), birthdayRaw, String(r.school || '').trim(),
           String(r.grade || '').trim(), String(r.level || '').trim(), String(r.remark || '').trim(), statusVal, joinDateVal, t, t);
 
         if (phoneOk) {
@@ -658,7 +671,15 @@ router.get('/home/data', (req, res) => {
 
     let membership = null;
     if (student) {
-      membership = db.prepare('SELECT * FROM member_cards WHERE student_id = ? AND status = ? ORDER BY expires_at ASC LIMIT 1').get(student.id, 'active');
+      // 取卡口径与扣课侧（pickCardForDeduction）对齐：此前只看 status='active'，
+      // 当出现「状态 active 但已过期」的卡（定时扫到期漏跑 / 停机未补跑）时，家长看到有课、
+      // 教练却点不了课。补 expires_at > now 与次数卡余额条件，首页只展示真正可用的卡。
+      membership = db.prepare(`
+        SELECT * FROM member_cards
+        WHERE student_id = ? AND status = 'active' AND expires_at > ?
+          AND (billing_mode IS NULL OR billing_mode <> 'count' OR remaining_classes > 0)
+        ORDER BY expires_at ASC LIMIT 1
+      `).get(student.id, Date.now());
     }
 
     // 家长端不得看到同场次**其他孩子**的姓名：未成年人名单属于敏感信息，
@@ -1093,10 +1114,24 @@ router.delete('/:id', requireAuth, (req, res) => {
       // archived 必须一并置 1：学员列表默认只显示 archived = 0，只改 status 的话
       // 已删学员仍留在列表里（且因会员卡仍有效而被派生状态覆盖成「在读」），删除等于没删。
       db.prepare("UPDATE students SET status = 'refunded', archived = 1, updated_at = ? WHERE id = ?").run(now(), id);
+      // 先采集该学员的家长 openid —— 必须在 DELETE parent_bindings 之前，关联一断就再也取不到
+      const parentOpenids = db.prepare(
+        "SELECT DISTINCT parent_openid AS openid FROM parent_bindings WHERE student_id = ? AND parent_openid IS NOT NULL AND parent_openid != ''"
+      ).all(id).map((r) => r.openid);
       db.prepare('DELETE FROM parent_bindings WHERE student_id = ?').run(id);
       // 一并清理积分流水：此前只清了 parent_bindings，point_logs 残留成孤儿记录
       //（由系统产生，非导入遗留），对账时会出现无法归属的积分明细。
       db.prepare('DELETE FROM point_logs WHERE student_id = ?').run(id);
+      // 清理孤儿家长账号：建档/导入时凭手机号自动建了 role='parent' 的 users，删除学员却不动它，
+      // 真实库曾积累约 41.5% 无绑定的幽灵账号（且会被下一个同手机号学员复用 → 上一任家长看到下一任数据）。
+      // 三重约束：① 该 openid 不再绑定任何其他孩子（多孩家庭不误删）；② 仅 phone_ 前缀
+      //（wx_ 可能已有真实登录行为，应走专门工具）；③ 账号必须是 parent 角色。
+      for (const openid of parentOpenids) {
+        if (!String(openid).startsWith('phone_')) continue;
+        const stillUsed = db.prepare('SELECT 1 FROM parent_bindings WHERE parent_openid = ? LIMIT 1').get(openid);
+        if (stillUsed) continue;
+        db.prepare("DELETE FROM users WHERE openid = ? AND role = 'parent'").run(openid);
+      }
 
       // 冻结该学员名下仍有效的会员卡：归档后卡仍为 active，不仅会让派生状态把已删学员
       // 显示成「在读」，扣课/续费/到期提醒也会继续把这张卡当作有效卡使用。

@@ -13,6 +13,8 @@ const { parseItems, itemQuantity, itemLineTotal } = require('../utils/items');
 const { getStaffDefaultPassword } = require('../utils/security');
 // 已删除（status='refunded'）/ 已归档学员的统一排除条件（学员表别名须为 s）
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
+// 存量脏数据体检 + 一次性安全清理
+const { scanDirtyData, applyCleanup } = require('../utils/data-health');
 // 到期口径单一来源：看板「即将到期」的窗口与状态必须与续费提醒扫描同源，
 // 否则会出现「预警清单列出、提醒却从不发出」的口径分裂（详见 utils/renewal.js 头注释）。
 const { EXPIRY_WINDOWS, buildExpiringWhere } = require('../utils/renewal');
@@ -885,8 +887,13 @@ router.get('/teachers', staffRead, (req, res) => {
  */
 router.get('/teachers/options', staffRead, (req, res) => {
   try {
+    // 仅列「教练」：teachers 表是员工载体（销售账号也录在里面），
+    // 不过滤会让销售出现在「授课教师」下拉里被误选。无登录账号的教师视为教练保留。
     const list = db.prepare(`
-      SELECT id, name FROM teachers WHERE status = 'active' ORDER BY created_at ASC
+      SELECT t.id, t.name FROM teachers t
+      LEFT JOIN users u ON u.phone = t.phone
+      WHERE t.status = 'active' AND (u.id IS NULL OR u.role = 'coach')
+      ORDER BY t.created_at ASC
     `).all();
     res.json(success({ list, total: list.length }));
   } catch (err) {
@@ -1946,6 +1953,41 @@ router.post('/students/:id/classes', adminOnly, (req, res) => {
   } catch (err) {
     console.error('[admin student classes update]', err);
     res.status(500).json(safeFail('更新学员班级失败'));
+  }
+});
+
+/**
+ * GET /api/admin/data-health — 存量脏数据体检（只读）
+ * 报告孤儿家长账号 / 非法卡种 / 0 元卡种 / 重名卡种 / 教练表混入非教练账号。
+ */
+router.get('/data-health', (req, res) => {
+  try {
+    if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可查看数据体检'));
+    res.json(success(scanDirtyData()));
+  } catch (err) {
+    console.error('[admin data-health]', err && err.stack ? err.stack : err);
+    res.status(500).json(safeFail('数据体检失败'));
+  }
+});
+
+/**
+ * POST /api/admin/data-cleanup — 一次性安全清理
+ * Body: { actions: ['orphan_parents', 'invalid_card_types'] }
+ * 仅处理「无歧义」的两类：孤儿家长账号（删除）、非法卡种（下架不删除）。
+ */
+router.post('/data-cleanup', (req, res) => {
+  try {
+    if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可执行数据清理'));
+    const actions = Array.isArray(req.body && req.body.actions) ? req.body.actions : [];
+    if (!actions.length) return res.json(fail('请指定要执行的清理项'));
+    const allowed = ['orphan_parents', 'invalid_card_types'];
+    const bad = actions.filter((a) => !allowed.includes(a));
+    if (bad.length) return res.json(fail(`不支持的清理项：${bad.join('、')}`));
+    const result = applyCleanup(actions, req);
+    res.json(success(result));
+  } catch (err) {
+    console.error('[admin data-cleanup]', err && err.stack ? err.stack : err);
+    res.status(500).json(safeFail('数据清理失败'));
   }
 });
 

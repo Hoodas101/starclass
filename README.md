@@ -23,6 +23,8 @@ SEED_DEMO_DATA=1 bash deploy.sh    # 先看效果：额外灌入演示数据
 
 打开 <http://localhost:3001> 即可。演示账号 `13800000001` / `123456`（仅灌演示数据时存在）。
 
+> 部署完成后，**桌面会自动生成「星课 StarClass」入口**（macOS 为 `.app`、Linux 为 `.desktop`、Windows 为 `.url`），双击即可进入——服务未运行时会自动拉起。
+
 **部署到云服务器（Docker + 自动 HTTPS）**
 
 ```bash
@@ -92,7 +94,9 @@ npm run smoke         # 冒烟测试（需服务运行中）
 | 后端 | Node.js + Express + better-sqlite3 | `backend/` |
 | Web 管理端 | Vue3 + Element Plus + ECharts + Vite | `web-admin/` |
 
-> **质量**：35 套自动化回归（支付幂等 / 退款回收 / 跨角色越权 / 审计留痕 / 口径一致性），CI 在 Node 18 / 20 / 22 全绿。改代码后跑 `npm test` 即可复现。
+> **质量**：36 套自动化回归（支付幂等 / 退款回收 / 跨角色越权 / 审计留痕 / 口径一致性），CI 在 Node 18 / 20 / 22 全绿。改代码后跑 `npm test` 即可复现。
+
+> **接口约定**：所有接口统一返回 `{ code, data, message }`，`code === 0` 为成功；**业务校验失败以 `body.code` 为准**（HTTP 状态仍为 200），仅限流（429）、鉴权（401/403）与未捕获异常（500）返回真实状态码。对接第三方（含小程序）时请按 `body.code` 判定成败。
 
 **运行成本为零**：无云服务、无独立数据库、无消息队列，1 核 2G 服务器或一台旧笔记本即可长期运行。
 

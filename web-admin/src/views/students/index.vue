@@ -34,6 +34,10 @@
               <el-dropdown-item @click="exportDialogRef?.open()">
                 <el-icon><Download /></el-icon>导出
               </el-dropdown-item>
+              <!-- 导出为「导入模板」格式：列名与顺序与导入模板一致，打通「导出 → 修正 → 再导入」闭环 -->
+              <el-dropdown-item @click="doExportTemplate">
+                <el-icon><Download /></el-icon>导出为导入模板
+              </el-dropdown-item>
               <el-dropdown-item @click="openImport">
                 <el-icon><Upload /></el-icon>导入
               </el-dropdown-item>
@@ -707,18 +711,21 @@ const saveColumns = async (settings) => {
 
 // 批量导入成员
 const importDialogRef = ref(null)
+// aliases：新手最常拿「其他机构导出的表格」直接上传，表头与本模板不同名。
+// 归一化后按 label / key / aliases 匹配（见 utils/csv.js buildHeaderIndex），
+// 否则「学员姓名 / 手机号 / 家长电话」这类同义表头一律识别不了。
 const importColumns = [
-  { key: 'name', label: '姓名', required: true },
-  { key: 'gender', label: '性别' },
-  { key: 'birthday', label: '出生日期' },
-  { key: 'school', label: '就读学校' },
-  { key: 'grade', label: '年级' },
-  { key: 'level', label: '训练级别' },
-  { key: 'parentName', label: t('guardian') + '姓名' },
-  { key: 'phone', label: '联系方式' },
-  { key: 'remark', label: '备注' },
-  { key: 'joinDate', label: '入会日期' },
-  { key: 'status', label: '状态' },
+  { key: 'name', label: '姓名', required: true, aliases: ['学员姓名', '学生姓名', '名字', '儿童姓名', '会员姓名', '宝宝姓名', 'name'] },
+  { key: 'gender', label: '性别', aliases: ['性别', 'gender'] },
+  { key: 'birthday', label: '出生日期', aliases: ['生日', '出生年月', '出生日期(必填)', 'birthday'] },
+  { key: 'school', label: '就读学校', aliases: ['学校', '就读学校', '幼儿园', 'school'] },
+  { key: 'grade', label: '年级', aliases: ['年级', '班级', 'grade'] },
+  { key: 'level', label: '训练级别', aliases: ['级别', '训练级别', 'level'] },
+  { key: 'parentName', label: t('guardian') + '姓名', aliases: ['家长姓名', '家长', '联系人', '家长名字', 'parentName'] },
+  { key: 'phone', label: '联系方式', aliases: ['手机号', '手机', '家长电话', '联系电话', '电话', 'tel', 'phone'] },
+  { key: 'remark', label: '备注', aliases: ['备注', '说明', 'remark'] },
+  { key: 'joinDate', label: '入会日期', aliases: ['入会日期', '报名日期', '购买日期', 'joinDate'] },
+  { key: 'status', label: '状态', aliases: ['状态', 'status'] },
 ]
 
 const openImport = () => {
@@ -1252,6 +1259,36 @@ const doExport = async (range) => {
   ])
   exportXlsx(`成员列表_${dayjs().format('YYYYMMDD')}`, headers, rows, { sheetName: '成员列表' })
   ElMessage.success(`已导出 ${rows.length} 名成员`)
+}
+
+// 导出为「导入模板」格式：列名/顺序与导入模板一致，便于「导出 → 修改 → 再导入」闭环。
+// 默认导出的是 23 个数据库原始字段（含 id / created_at 等内部列），无法直接再导入。
+const doExportTemplate = () => {
+  const list = filteredStudents.value || []
+  if (!list.length) {
+    ElMessage.warning('暂无可导出的成员数据')
+    return
+  }
+  const headers = importColumns.map((c) => c.label)
+  const pick = (s, key) => {
+    switch (key) {
+      case 'name': return s.name || ''
+      case 'gender': return s.gender || ''
+      case 'birthday': return s.birthday || ''
+      case 'school': return s.school || ''
+      case 'grade': return s.grade || ''
+      case 'level': return s.level || ''
+      case 'parentName': return s.parent_name || ''
+      case 'phone': return s.parent_phone || ''
+      case 'remark': return s.remark || ''
+      case 'joinDate': return s.join_date ? dayjs(Number(s.join_date)).format('YYYY-MM-DD') : ''
+      case 'status': return s.status || ''
+      default: return ''
+    }
+  }
+  const rows = list.map((s) => importColumns.map((c) => pick(s, c.key)))
+  exportXlsx(`成员导入模板_${dayjs().format('YYYYMMDD')}`, headers, rows, { sheetName: '成员' })
+  ElMessage.success(`已按导入模板格式导出 ${rows.length} 名成员`)
 }
 
 onMounted(() => {

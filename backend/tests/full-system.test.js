@@ -134,6 +134,8 @@ const ROUTES = [
   ['GET', '/api/admin/teachers'], ['GET', '/api/admin/parents'], ['GET', '/api/admin/staff-options'],
   // 教师轻量选项（上课记录页教师筛选此前 404，本轮补别名路由）
   ['GET', '/api/admin/teachers/options'],
+  // 存量脏数据体检 / 一次性清理（routes/admin.js）：新增受保护路由必须同步本清单
+  ['GET', '/api/admin/data-health'], ['POST', '/api/admin/data-cleanup'],
   ['POST', '/api/admin/teachers'], ['PUT', '/api/admin/teachers/ID1'], ['DELETE', '/api/admin/teachers/ID1'],
   // 场地管理（此前只有 GET，本轮补 POST/PUT/DELETE）
   ['GET', '/api/admin/classrooms'], ['POST', '/api/admin/classrooms'],

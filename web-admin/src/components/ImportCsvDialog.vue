@@ -11,11 +11,24 @@
         <el-button :icon="Download" @click="downloadTemplate">下载模板</el-button>
         <el-upload
           :show-file-list="false"
-          accept=".csv,.xlsx,.xls"
+          accept=".csv,.tsv,.txt,.xlsx,.xls"
           :before-upload="handleFile"
         >
           <el-button type="primary" :icon="Upload">选择文件</el-button>
         </el-upload>
+      </div>
+
+      <!-- 表头诊断：新手常拿别家机构导出的表格直接上传，表头对不上时必须告诉他「你有什么」，
+           而不是只说「缺少必填列」。非必填列匹配失败是静默丢数据，更要显式提示。 -->
+      <div v-if="headerDiag && (headerDiag.missingRequired.length || headerDiag.unrecognized.length || headerDiag.sheet || headerDiag.encoding)" class="header-diag">
+        <div v-if="headerDiag.missingRequired.length" class="preview-error-item">
+          未找到必填列：{{ headerDiag.missingRequired.join('、') }}。你表格的表头是：{{ headerDiag.header.join('、') || '（空）' }}
+        </div>
+        <div v-if="headerDiag.unrecognized.length" class="preview-warn-item">
+          未识别的列（将被忽略）：{{ headerDiag.unrecognized.join('、') }} —— 可改成模板列名后重新上传
+        </div>
+        <div v-if="headerDiag.sheet" class="preview-warn-item">已自动使用工作表「{{ headerDiag.sheet }}」</div>
+        <div v-if="headerDiag.encoding" class="preview-warn-item">已按 {{ headerDiag.encoding }} 解码文件</div>
       </div>
 
       <div v-if="previewRows.length" class="import-preview">
@@ -65,7 +78,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { Download, Upload } from '@element-plus/icons-vue'
-import { parseCsv, csvToObjects } from '@/utils/csv'
+import { parseCsv, csvToObjects, buildHeaderIndex, decodeTextFile } from '@/utils/csv'
 import { exportXlsx } from '@/utils/xlsx'
 
 const props = defineProps({
@@ -81,6 +94,8 @@ const previewRows = ref([])
 const parseErrors = ref([])
 const importing = ref(false)
 const importResult = ref(null)
+// 表头诊断信息（未识别列 / 缺失必填列 / 实际表头 / 使用的工作表 / 文件编码）
+const headerDiag = ref(null)
 // 未建立家长绑定的行（仅成员导入会返回 warnings；订单导入没有，故兜底为空数组）
 const importWarnings = computed(() => (importResult.value && importResult.value.warnings) || [])
 // 查重命中而跳过的行（仅成员导入会返回 skipped；订单导入没有，故兜底为空数组）。
@@ -92,6 +107,7 @@ const open = () => {
   previewRows.value = []
   parseErrors.value = []
   importResult.value = null
+  headerDiag.value = null
 }
 
 const downloadTemplate = () => {
@@ -100,26 +116,42 @@ const downloadTemplate = () => {
 
 const handleFile = (file) => {
   const lower = (file.name || '').toLowerCase()
-  if (lower.endsWith('.csv')) {
+  if (lower.endsWith('.csv') || lower.endsWith('.tsv') || lower.endsWith('.txt')) {
     const reader = new FileReader()
     reader.onload = () => {
-      const rows = parseCsv(String(reader.result || ''))
-      const { objects, errors } = csvToObjects(rows, props.templateColumns)
-      applyParsed(objects, errors)
+      // 先解码再解析：固定 readAsText(file,'utf-8') 会把 GBK 文件读成乱码，而乱码字符非空，
+      // 姓名列照样通过必填校验并入库。改为 UTF-8 优先、GBK 兜底，无法识别则明确报错。
+      const { text, encoding, garbled } = decodeTextFile(reader.result)
+      if (garbled) {
+        ElMessage.error('文件编码无法识别（可能是 GBK 或二进制），请另存为 UTF-8 编码的 CSV 后重试')
+        return
+      }
+      const rows = parseCsv(text)
+      const parsed = csvToObjects(rows, props.templateColumns)
+      applyParsed(parsed, { encoding, header: (rows[0] || []).map((h) => String(h || '').trim()) })
     }
-    reader.readAsText(file, 'utf-8')
+    reader.readAsArrayBuffer(file)
     return false
   }
-  // .xlsx / .xls：用 SheetJS 解析首个工作表（371KB 重依赖，仅在真正导入 Excel 时动态加载）
+  // .xlsx / .xls：用 SheetJS 解析（371KB 重依赖，仅在真正导入 Excel 时动态加载）
   const reader = new FileReader()
   reader.onload = async (e) => {
     try {
       const XLSX = await import('xlsx')
       const wb = XLSX.read(e.target.result, { type: 'array' })
-      const sheet = wb.Sheets[wb.SheetNames[0]]
-      const json = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false })
-      const { objects, errors } = xlsxToObjects(json, props.templateColumns)
-      applyParsed(objects, errors)
+      // 多工作表：机构从其他系统导出的表常是「说明页 + 数据页」，此前只读第 1 个 → 解析 0 行且无提示。
+      // 依次尝试各工作表，取第一个能解析出有效数据的。
+      let parsed = { objects: [], errors: [], unrecognized: [], missingRequired: [], header: [] }
+      let usedSheet = wb.SheetNames[0] || ''
+      for (const name of wb.SheetNames) {
+        const json = XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '', raw: false })
+        const r = xlsxToObjects(json, props.templateColumns)
+        usedSheet = name
+        parsed = r
+        if (r.objects.length) break
+      }
+      // 仅多工作表时提示使用了哪一张（单表无需打扰）
+      applyParsed(parsed, { sheet: wb.SheetNames.length > 1 ? usedSheet : '', header: parsed.header || [] })
     } catch (err) {
       ElMessage.error('Excel 解析失败：' + (err && err.message ? err.message : err))
     }
@@ -128,19 +160,26 @@ const handleFile = (file) => {
   return false
 }
 
-// 将 Excel 首个工作表（对象数组，键为表头文字）映射为按 col.key 取值的对象数组
+// 将 Excel 工作表（对象数组，键为表头文字）映射为按 col.key 取值的对象数组。
+// 表头匹配复用 buildHeaderIndex（label / key / aliases + 归一化），与 CSV 分支口径一致。
 const xlsxToObjects = (json, columns) => {
   const objects = []
   const errors = []
+  if (!json.length) return { objects, errors, unrecognized: [], missingRequired: [], header: [] }
+  const header = Object.keys(json[0] || {}).map((k) => String(k).trim())
+  const indexMap = buildHeaderIndex(header, columns)
+  const matched = new Set(indexMap.filter((i) => i >= 0))
+  const unrecognized = header.filter((h, i) => h && !matched.has(i))
+  const missingRequired = columns.filter((c, ci) => c.required && indexMap[ci] < 0).map((c) => c.label)
   json.forEach((rec, ri) => {
     const norm = {}
     Object.keys(rec || {}).forEach((k) => {
       norm[String(k).trim()] = rec[k]
     })
     const obj = {}
-    columns.forEach((col) => {
-      let v = norm[col.label]
-      if (v === undefined || v === '') v = norm[col.key]
+    columns.forEach((col, ci) => {
+      const h = indexMap[ci] >= 0 ? header[indexMap[ci]] : null
+      const v = h ? norm[h] : undefined
       obj[col.key] = v == null ? '' : String(v).trim()
     })
     const required = columns.filter((c) => c.required)
@@ -151,15 +190,23 @@ const xlsxToObjects = (json, columns) => {
       objects.push(obj)
     }
   })
-  return { objects, errors }
+  return { objects, errors, unrecognized, missingRequired, header }
 }
 
-const applyParsed = (objects, errors) => {
-  previewRows.value = objects
-  parseErrors.value = errors
+const applyParsed = (parsed, meta = {}) => {
+  previewRows.value = parsed.objects || []
+  parseErrors.value = parsed.errors || []
+  headerDiag.value = {
+    unrecognized: parsed.unrecognized || [],
+    missingRequired: parsed.missingRequired || [],
+    header: meta.header || [],
+    sheet: meta.sheet || '',
+    // 仅非 UTF-8 时提示（UTF-8 是常态，不必打扰）
+    encoding: meta.encoding && meta.encoding !== 'utf-8' ? meta.encoding : '',
+  }
   importResult.value = null
-  if (!objects.length && !errors.length) {
-    ElMessage.warning('未解析到有效数据，请检查文件格式')
+  if (!previewRows.value.length && !parseErrors.value.length) {
+    ElMessage.warning('未解析到有效数据，请检查文件格式与表头')
   }
 }
 
@@ -247,6 +294,17 @@ defineExpose({ open })
   font-size: 12px;
   color: var(--t-warning-text);
   line-height: 1.7;
+}
+
+/* 表头诊断块：告诉用户「缺什么」的同时也告诉他「你有什么」 */
+.header-diag {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-radius-md);
+  background: var(--t-bg-alt);
 }
 
 .import-result {

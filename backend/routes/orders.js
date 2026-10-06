@@ -320,6 +320,8 @@ router.post('/import', (req, res) => {
     const failed = [];
     // 导入文件显式带 orderNo 的行命中已存在的订单号时记入这里（跳过而非报错）
     const skipped = [];
+    // 非致命告警（如项目名查不到卡种）：订单照常入账，但权益未发放，必须让用户看到
+    const warnings = [];
 
     const insertOrder = db.prepare(`
       INSERT INTO orders (id, order_no, user_id, student_id, student_name, order_type, items, total_amount, discount_amount, payable_amount, status, salesperson, remark, is_1v1, created_at, updated_at)
@@ -379,7 +381,21 @@ router.post('/import', (req, res) => {
         let paidTs = r.paidDate ? new Date(String(r.paidDate).trim() + 'T12:00:00').getTime() : t;
         if (!Number.isFinite(paidTs)) paidTs = t; // 非法日期回退为当前时间，防止 NaN 写入
         const orderNo = rawOrderNo || `ORD${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-        const items = [{ itemType: 'product', itemName, quantity: 1, unitPrice: amount, totalPrice: amount }];
+        // 按项目名反查卡种：导入的 items 此前缺 itemId，grantOrderBenefits 两个循环都在
+        // `if (!item.itemId) continue` 处整体跳过 → 发卡与积分静默不发，而订单入账、接口仍返回成功
+        //（典型「账实相符但权益丢失」）。命中则写 itemType:'membershipCard' + itemId；查不到不静默成功，记入 warnings。
+        const cardType = db.prepare('SELECT id FROM membership_cards WHERE name = ? LIMIT 1').get(itemName);
+        const items = [{
+          itemType: cardType ? 'membershipCard' : 'product',
+          itemId: cardType ? cardType.id : undefined,
+          itemName,
+          quantity: 1,
+          unitPrice: amount,
+          totalPrice: amount,
+        }];
+        if (!cardType) {
+          warnings.push({ row: idx + 2, reason: `项目「${itemName}」在产品库中不存在，订单已入账但未开通会员卡，请手工补发` });
+        }
         insertOrder.run(id, orderNo, student.id, student.name, JSON.stringify(items), amount, amount, String(r.salesperson || '').trim(), String(r.remark || '').trim(), t, t);
         const order = {
           id,
@@ -409,7 +425,7 @@ router.post('/import', (req, res) => {
     })();
 
     // skipped 为「订单号已存在」被跳过的行数，skippedRows 给出具体行号与订单号，供界面提示用户
-    res.json(success({ success: okCount.length, failed, created: okCount.length, skipped: skipped.length, skippedRows: skipped }));
+    res.json(success({ success: okCount.length, failed, created: okCount.length, skipped: skipped.length, skippedRows: skipped, warnings }));
   } catch (err) {
     console.error('[orders import]', err);
     res.status(500).json(safeFail('导入失败，请稍后重试'));

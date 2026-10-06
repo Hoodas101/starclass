@@ -60,7 +60,7 @@ function pickCardForDeduction(studentId, scheduleId, t, per) {
   // LEFT JOIN 卡种取 course_scope：member_cards 上只有 card_type_id，范围策略存在卡种（membership_cards）。
   // mc.* 展开保证调用方拿到的仍是完整的 member_cards 行（order_id / card_type_name 等结转所需字段）。
   const cards = db.prepare(`
-    SELECT mc.*, mct.course_scope AS course_scope
+    SELECT mc.*, mct.course_scope AS course_scope, mct.scope_course_ids AS scope_course_ids
     FROM member_cards mc
     LEFT JOIN membership_cards mct ON mct.id = mc.card_type_id
     WHERE mc.student_id = ? AND mc.status = 'active' AND mc.billing_mode = 'count'
@@ -71,17 +71,29 @@ function pickCardForDeduction(studentId, scheduleId, t, per) {
 
   const sch = db.prepare('SELECT course_id, course_name FROM schedules WHERE id = ?').get(scheduleId);
   const scopeMatches = (card) => {
+    // 结构化范围优先：scope_course_ids 非空时按 course_id 精确匹配，
+    // 不再依赖「中文名互相包含」的巧合（迁移 033）。
+    const ids = String(card.scope_course_ids || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (ids.length) return !!(sch && sch.course_id && ids.includes(String(sch.course_id)));
     const scope = String(card.course_scope || '').trim();
     if (!scope) return true;                                  // 空 = 不限
     if (scope.includes('通用') || scope.includes('全部')) return true; // 自由文本的「通用」约定
     if (sch && sch.course_id && scope.includes(sch.course_id)) return true;
-    if (sch && sch.course_name && scope.includes(sch.course_name)) return true;
+    if (sch && sch.course_name) {
+      const name = String(sch.course_name).trim();
+      // 双向包含：范围串可能比课程名长（scope「1v1私教」 vs 课程名「1v1私教课」），
+      // 单向 scope.includes(name) 会把这类合法场景误拒。反向包含兜住它，避免「防误扣」变成「误拒」。
+      if (name && (scope.includes(name) || name.includes(scope))) return true;
+    }
     return false;
   };
 
   const matched = cards.filter(scopeMatches);
   // 已按 expires_at ASC，matched[0] 即「匹配范围内最先到期的卡」
   if (matched.length) return matched[0];
+  // 排期不存在（如手工扣课传入尚未落库的 scheduleId）：课程范围无从判定，沿用兜底不阻断，
+  // 避免把「排期数据缺失」变成「静默不扣课」。
+  if (!sch) return cards[0];
   // 有合格卡（余额/有效期都够）但全部课程范围不匹配 → 返回显式标记，由调用方拒绝扣课。
   // 不再区分「真实课程 / 临时活动」：此前为兼容临时活动保留了 `return cards[0]` 兜底，
   // 结果 course_temp 排期绕过范围隔离，1v1 私教卡（单价数倍于团课）被临时/团课静默消耗

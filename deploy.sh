@@ -118,6 +118,12 @@ if [ "$HEALTH_OK" != "1" ]; then
   exit 1
 fi
 
+# ─── 5. 桌面入口 ───
+# 在桌面放置「星课 StarClass」入口，双击即可进入（服务未启动时会自动拉起）。
+# 跨平台：macOS 生成 .app / Linux 生成 .desktop / Windows 生成 .url。失败不影响部署。
+bash tools/create-desktop-entry.sh "$PORT" || \
+  echo -e "${YELLOW}  ⚠️  桌面入口创建失败（不影响使用），可稍后手动执行：bash tools/create-desktop-entry.sh${NC}"
+
 echo -e "\n${BOLD}${CYAN}"
 echo "  ╔═══════════════════════════════════════════════╗"
 echo "  ║  ✅ 部署完成！                                 ║"
@@ -130,6 +136,7 @@ echo "  ║      账号与随机口令见上方输出（请立即改密）    �
 fi
 echo "  ║  ⚙️  后端 API：http://localhost:${PORT}/api       ║"
 echo "  ║                                               ║"
+echo "  ║  🖥️  桌面入口：双击桌面「星课 StarClass」       ║"
 echo "  ║  🛑 停止：bash stop-all.sh                     ║"
 echo "  ║  📖 部署上线（域名/HTTPS）：                  ║"
 echo "  ║     见《部署上线说明.md》                       ║"

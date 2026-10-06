@@ -132,4 +132,10 @@ router.beforeEach((to, from, next) => {
   }
 })
 
+// 页面标题动态化：此前所有页面共用一个静态标题，浏览器标签页与收藏夹都分不清是哪个页面。
+router.afterEach((to) => {
+  const base = '星课 StarClass'
+  document.title = to.meta && to.meta.title ? `${to.meta.title} · ${base}` : base
+})
+
 export default router
