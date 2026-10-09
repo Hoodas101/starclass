@@ -25,25 +25,48 @@
           style="width: 260px"
           @change="onFilterChange"
         />
+        <!-- 字段设置：此前弹窗被移除且无任何入口，销售表的列显隐/顺序完全无法调整（死功能） -->
+        <ColumnSettingsDialog
+          title="销售字段设置"
+          :columns="orderColumnDefs"
+          v-model:settings="columnSettings"
+          :defaults="DEFAULT_COLUMN_SETTINGS"
+          :widths="customWidths"
+          :auto-width="autoColumnWidth"
+          @update:widths="onWidthsChange"
+          @update:auto-width="onAutoWidthChange"
+          @reset-widths="resetColumnWidths"
+          @save="saveColumns"
+        />
         <el-button :icon="Upload" @click="openImport">导入</el-button>
         <el-button :icon="Download" @click="exportDialogRef?.open()">导出</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreateDialog">新建销售单</el-button>
       </div>
     </div>
 
+    <!-- 视图栏：一套「筛选 + 排序 + 字段顺序 + 列宽」的快照，可多套并存切换 -->
+    <TableViewBar
+      :views="viewList"
+      :active-id="activeViewId"
+      @select="applyView"
+      @create="createView"
+      @rename="renameView"
+      @remove="removeView"
+    />
+
     <!-- 统计卡片 -->
     <div class="order-stats">
       <div class="order-stat-card">
         <span class="order-stat-label">今日收入</span>
-        <span class="order-stat-value v4-num-display is-md">¥{{ todayAmount.toLocaleString() }}</span>
+        <span class="order-stat-value v4-num-display is-md">{{ formatMoney(todayAmount) }}</span>
       </div>
       <div class="order-stat-card">
         <span class="order-stat-label">本月营收</span>
-        <span class="order-stat-value v4-num-display is-md">¥{{ monthAmount.toLocaleString() }}</span>
+        <span class="order-stat-value v4-num-display is-md">{{ formatMoney(monthAmount) }}</span>
       </div>
       <div class="order-stat-card">
         <span class="order-stat-label">本年营收</span>
-        <span class="order-stat-value v4-num-display is-md">¥{{ yearAmount.toLocaleString() }}</span>
+        <span class="order-stat-value v4-num-display is-md">{{ formatMoney(yearAmount) }}</span>
       </div>
       <div class="order-stat-card">
         <span class="order-stat-label">销售单数</span>
@@ -55,7 +78,7 @@
     <div class="card table-container">
       <ListErrorState v-if="!loading && error" :error="error" @retry="loadOrders" />
       <el-table v-else
-        :data="orders"
+        :data="sortedOrders"
         v-loading="loading"
         size="small"
         @filter-change="onColumnFilter"
@@ -66,15 +89,27 @@
           v-for="col in visibleCols"
           :key="col.key"
           :label="col.label"
-          :width="col.width"
-          :min-width="col.minWidth"
+          :width="colWidths[col.key] && colWidths[col.key].width"
+          :min-width="colWidths[col.key] && colWidths[col.key].minWidth"
           :align="col.align"
           :column-key="col.key"
           :filters="col.key === 'status' ? ORDER_STATUS_FILTERS : undefined"
           :show-overflow-tooltip="col.tooltip"
         >
+          <!-- 表头：单行（inline-flex）+ 自定义排序控件；不挂 Element Plus 的 :sortable，
+               它会自动插入 caret-wrapper 块级箭头并与自定义箭头并存，把表头撑成两行 -->
+          <template #header>
+            <SortableHeader
+              :label="col.label"
+              :state="sortState(col.key)"
+              :priority="sortPriority(col.key)"
+              :sortable="col.sortable !== false"
+              @sort="(e) => onSortColumn(col.key, e)"
+            />
+          </template>
           <template #default="{ row, $index }">
-            <template v-if="col.key === 'seq'">{{ $index + 1 }}</template>
+            <!-- 序号跨页连续：此前用 $index+1，翻到第 2 页又从 1 开始，与「按 XX 排」的认知冲突 -->
+            <template v-if="col.key === 'seq'">{{ (currentPage - 1) * pageSize + $index + 1 }}</template>
 
             <span v-else-if="col.key === 'orderNo'" class="order-no">{{ row.order_no }}</span>
 
@@ -89,14 +124,14 @@
               <el-tag v-if="row.is_1v1" size="small" type="warning" effect="light" class="one-v-one-tag">1v1</el-tag>
             </span>
 
-            <span v-else-if="col.key === 'amount'" class="order-amount">¥{{ Number(row.payable_amount || 0).toLocaleString() }}</span>
+            <span v-else-if="col.key === 'amount'" class="order-amount">{{ formatMoney(row.payable_amount) }}</span>
             <template v-else-if="col.key === 'salesperson'">{{ row.salesperson || '-' }}</template>
             <template v-else-if="col.key === 'date'">{{ row.paid_at ? formatDate(row.paid_at) : formatDate(row.created_at) }}</template>
 
             <template v-else-if="col.key === 'status'">
               <StatusDot
                 :tone="row.status === 'paid' && Number(row.refunded_amount) > 0 ? 'warning' : (statusDotTone[row.status] || 'neutral')"
-                :label="row.status === 'paid' && Number(row.refunded_amount) > 0 ? `部分退款 ¥${Number(row.refunded_amount).toLocaleString()}` : (statusTextMap[row.status] || row.status)"
+                :label="row.status === 'paid' && Number(row.refunded_amount) > 0 ? `部分退款 ${formatMoney(row.refunded_amount)}` : (statusTextMap[row.status] || row.status)"
                 subtle
               />
             </template>
@@ -245,11 +280,11 @@
         </div>
         <div class="refund-row">
           <span class="refund-label">订单金额</span>
-          <span class="refund-value danger">¥{{ orderAmount.toLocaleString() }}</span>
+          <span class="refund-value danger">{{ formatMoney(orderAmount) }}</span>
         </div>
         <div class="refund-row">
           <span class="refund-label">已累计退款</span>
-          <span class="refund-value">{{ Number(refundOrder.refunded_amount) > 0 ? '¥' + Number(refundOrder.refunded_amount).toLocaleString() : '无' }}</span>
+          <span class="refund-value">{{ Number(refundOrder.refunded_amount) > 0 ? formatMoney(refundOrder.refunded_amount) : '无' }}</span>
         </div>
         <div class="refund-row">
           <span class="refund-label">单号</span>
@@ -285,11 +320,11 @@
         <div v-if="refundMode === 'custom'" class="refund-row">
           <span class="refund-label">退款金额</span>
           <el-input-number v-model="refundAmount" :min="1" :max="refundRemain" :step="10" style="width: 160px" />
-          <span class="refund-amount-text">最多 ¥{{ refundRemain.toLocaleString() }}</span>
+          <span class="refund-amount-text">最多 {{ formatMoney(refundRemain) }}</span>
         </div>
         <div class="refund-row refund-final">
           <span class="refund-label">本次退款</span>
-          <span class="refund-value danger">¥{{ refundFinal.toLocaleString() }}</span>
+          <span class="refund-value danger">{{ formatMoney(refundFinal) }}</span>
         </div>
         <p v-if="refundPreview?.needApproval" class="refund-approval-hint">
           按退费规则，本次退款需管理员审批，预计 {{ refundPreview.processDays }} 个工作日内到账。
@@ -297,7 +332,7 @@
       </div>
       <template #footer>
         <el-button @click="refundDialogVisible = false">取消</el-button>
-        <el-button type="danger" :loading="submitting" @click="confirmRefund">确认退款 ¥{{ refundFinal.toLocaleString() }}</el-button>
+        <el-button type="danger" :loading="submitting" @click="confirmRefund">确认退款 {{ formatMoney(refundFinal) }}</el-button>
       </template>
     </el-dialog>
 
@@ -327,7 +362,7 @@
           </div>
           <div class="detail-item">
             <span class="detail-label">已退款</span>
-            <span class="detail-value">¥{{ Number(detailOrder.refunded_amount || 0).toLocaleString() }}</span>
+            <span class="detail-value">{{ formatMoney(detailOrder.refunded_amount) }}</span>
           </div>
         </div>
 
@@ -428,6 +463,16 @@ import {
 import { exportXlsx } from '@/utils/xlsx'
 import { fetchAllPages } from '@/utils/fetchAll'
 import ImportCsvDialog from '@/components/ImportCsvDialog.vue'
+import ColumnSettingsDialog from '@/components/ColumnSettingsDialog.vue'
+import TableViewBar from '@/components/TableViewBar.vue'
+import SortableHeader from '@/components/SortableHeader.vue'
+// 多维表格：排序（三态/多列/空值末尾）、列宽（canvas 实测 + 手动微调）、视图（整套快照）
+import { sortRows, toggleSort, sortStateOf, sortPriorityOf } from '@/utils/tableSort'
+import { computeAutoWidths, resolveColumnWidths } from '@/utils/tableWidth'
+import { allViews, makeView, userViews, VIEW_ALL, VIEW_FILTERED } from '@/utils/tableView'
+// 金额统一走全站口径（整数元 + 千分位）：裸 toLocaleString() 未固定小数位，
+// 浮点累加误差会漏出 `¥3,029.9`，与同列 `¥4,997` 两种写法并存，用户会以为金额变了。
+import { formatMoney } from '@/utils/format'
 import StatusDot from '@/components/StatusDot.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
@@ -488,7 +533,8 @@ const onColumnFilter = (filters) => {
 const importDialogRef = ref(null)
 // aliases：见 students 导入列定义说明（归一化 + 同义表头匹配）
 const importColumns = [
-  { key: 'studentName', label: t('learner') + '姓名', required: true, aliases: ['学员姓名', '学生姓名', '姓名', '会员姓名', 'studentName'] },
+  // 「会员」是机构自建销售台账里最常见的姓名列写法，缺它会整列错配（姓名值落到「序号」列）
+  { key: 'studentName', label: t('learner') + '姓名', required: true, aliases: ['学员姓名', '学生姓名', '姓名', '会员姓名', '会员', '会员名', '客户姓名', 'studentName'] },
   { key: 'phone', label: '联系方式', aliases: ['手机号', '手机', '家长电话', '联系电话', '电话', 'tel', 'phone'] },
   { key: 'itemName', label: '项目', required: true, aliases: ['项目名称', '产品', '卡种', '课程', '商品', 'itemName'] },
   { key: 'amount', label: '金额', required: true, aliases: ['金额(元)', '实收金额', '应收金额', '价格', 'amount'] },
@@ -525,7 +571,8 @@ const monthAmount = ref(0)
 const yearAmount = ref(0)
 
 const orderColumnDefs = [
-  { key: 'seq', label: '序号', minWidth: 54, align: 'center' },
+  // sortable: false —— 序号是展示位次；filterable 用于列宽计算时预留筛选触发器占位
+  { key: 'seq', label: '序号', minWidth: 54, align: 'center', sortable: false },
   { key: 'orderNo', label: '收据单号', minWidth: 150, tooltip: true },
   { key: 'student', label: t('learner'), minWidth: 100 },
   { key: 'phone', label: '联系方式', minWidth: 116, tooltip: true },
@@ -533,7 +580,7 @@ const orderColumnDefs = [
   { key: 'amount', label: '购买金额', minWidth: 100, align: 'right' },
   { key: 'salesperson', label: '签单人', minWidth: 86, align: 'center' },
   { key: 'date', label: '收款日期', minWidth: 100 },
-  { key: 'status', label: '状态', minWidth: 80, align: 'center' },
+  { key: 'status', label: '状态', minWidth: 80, align: 'center', filterable: true },
   { key: 'remark', label: '备注', minWidth: 100, tooltip: true },
 ]
 const DEFAULT_COLUMN_SETTINGS = {
@@ -556,13 +603,186 @@ const visibleCols = computed(() => {
   return [...ordered, ...rest]
 })
 
-// 列设置由后端 orders_columns 读取；「字段设置」弹窗此前无任何打开入口（no-button 且 ref 从未 open），
-// 属死功能，已移除弹窗与 @save 处理，仅保留读取以兼容历史已保存的列配置。
+// ==== 多维表格状态：排序 / 列宽 / 视图（与列显隐、顺序一起存进 orders_columns）====
+const sorts = ref([])
+const customWidths = ref({})
+const autoColumnWidth = ref(true)
+const activeViewId = ref(VIEW_FILTERED)
+
+// 表头控件占位（P2-2）：排序箭头 + 优先级角标 + 列筛选触发器常驻占位，只量文字会截断短列名
+const colExtra = (col) => (col.sortable === false ? 0 : 26) + (col.filterable ? 20 : 0)
+
+// 单元格纯文本：供列宽实测（与模板渲染保持一致，否则量出的宽度对不上）
+const cellText = (col, row) => {
+  switch (col.key) {
+    case 'seq': return '9999'
+    case 'orderNo': return row.order_no || ''
+    case 'student': return row.student_name || ''
+    case 'phone': return row.parent_phone || ''
+    case 'item': return row.item_name || t(row.order_type) || row.order_type || ''
+    case 'amount': return formatMoney(row.payable_amount)
+    case 'salesperson': return row.salesperson || ''
+    case 'date': return formatDate(row.paid_at || row.created_at)
+    case 'status': return statusTextMap[row.status] || row.status || ''
+    case 'remark': return row.remark || ''
+    default: return row[col.key] == null ? '' : String(row[col.key])
+  }
+}
+
+// 排序取值：金额/日期按数值或时间戳比，其余按文本（中文走拼音序）
+const sortValueOf = (key, row) => {
+  switch (key) {
+    case 'amount': return Number(row.payable_amount || 0)
+    case 'date': return row.paid_at || row.created_at || null
+    case 'status': return statusTextMap[row.status] || row.status || ''
+    default: return cellText({ key }, row)
+  }
+}
+
+// 排序后的列表（纯前端，作用于当前页 —— 表格类产品的常规语义）
+const sortedOrders = computed(() => sortRows(orders.value, sorts.value, sortValueOf))
+
+// 自适应列宽：按当前页数据实测文本像素；关闭时退回列定义宽度
+const autoWidths = computed(() => {
+  const cols = visibleCols.value
+  if (!autoColumnWidth.value) {
+    const out = {}
+    for (const c of cols) out[c.key] = c.minWidth || 80
+    return out
+  }
+  // 必须把 extra（表头排序箭头/筛选触发器占位）注入列定义，否则 P2-2 的预留不会生效
+  const colsWithExtra = cols.map((c) => ({ ...c, extra: colExtra(c) }))
+  return computeAutoWidths(colsWithExtra, sortedOrders.value, { textOf: (col, row) => cellText(col, row) })
+})
+
+// 最终列宽绑定（P2-3：存在任何手动列宽时全部列固定 width，避免相邻 min-width 列被压缩）
+const colWidths = computed(() => resolveColumnWidths(visibleCols.value, customWidths.value, autoWidths.value))
+
+const sortState = (key) => sortStateOf(sorts.value, key)
+const sortPriority = (key) => sortPriorityOf(sorts.value, key)
+
+// 点列头：升序 → 降序 → 取消；按住 Shift/Cmd 点击追加为次级排序
+const onSortColumn = (key, { additive } = {}) => {
+  sorts.value = toggleSort(sorts.value, key, additive)
+  persistViews()
+}
+
+// 保存字段设置：`orders_columns` 是「一个键 = 一整个对象」的覆盖语义，前端持有的只是
+// 打开页面那一刻的快照，直接写回会抹掉期间其他写入。改为「先重读服务端 → 按本页管理的键合并 → 写回」。
+const persistColumns = async (next) => {
+  let remote = {}
+  try {
+    const cur = await getSettings()
+    remote = (cur && cur.orders_columns) || {}
+  } catch (e) {
+    await saveSettings({ orders_columns: next })
+    return
+  }
+  const merged = { ...remote, ...next }
+  columnSettings.value = merged
+  await saveSettings({ orders_columns: merged })
+}
+
+const saveColumns = async (settings) => {
+  try {
+    await persistColumns(settings)
+    ElMessage.success('字段设置已保存')
+  } catch (e) {
+    // 拦截器已提示
+  }
+}
+
+// ==== 视图：筛选 + 排序 + 字段顺序 + 列宽 的整套快照 ====
+const views = ref([])
+const viewList = computed(() => allViews(views.value))
+
+const currentSnapshot = () => ({
+  filters: { status: filterStatus.value, range: dateRange.value || null },
+  sorts: sorts.value,
+  order: columnSettings.value.order || [],
+  widths: customWidths.value,
+})
+
+// 300ms 去抖：连续点列头会连发写入，既保证「点了就生效」，又避免写入风暴
+// 与「读远端 → 合并 → 写回」在并发下互相覆盖导致先后错序
+let persistTimer = null
+const persistViews = () => {
+  clearTimeout(persistTimer)
+  persistTimer = setTimeout(() => {
+    persistColumns({
+      ...columnSettings.value,
+      sorts: sorts.value,
+      widths: customWidths.value,
+      autoColumnWidth: autoColumnWidth.value,
+      views: views.value,
+      activeViewId: activeViewId.value,
+    }).catch(() => { /* 拦截器已提示 */ })
+  }, 300)
+}
+
+const applyView = (id) => {
+  activeViewId.value = id
+  // 「当前筛选」= 保持现状（它不是快照，而是「我正在用的筛选态」）
+  if (id === VIEW_FILTERED) return
+  const v = id === VIEW_ALL
+    ? { filters: {}, sorts: [], order: [], widths: {} }
+    : userViews(views.value).find((x) => x.id === id)
+  if (!v) return
+  filterStatus.value = (v.filters && v.filters.status) || ''
+  dateRange.value = (v.filters && v.filters.range) || null
+  sorts.value = Array.isArray(v.sorts) ? v.sorts : []
+  customWidths.value = v.widths || {}
+  if (Array.isArray(v.order) && v.order.length) columnSettings.value = { ...columnSettings.value, order: v.order }
+  onFilterChange()
+  persistViews()
+}
+
+const createView = (name) => {
+  const v = makeView(name, currentSnapshot())
+  views.value = [...views.value, v]
+  activeViewId.value = v.id
+  persistViews()
+  ElMessage.success(`已保存视图「${v.name}」`)
+}
+
+const renameView = (id, name) => {
+  views.value = views.value.map((v) => (v.id === id ? { ...v, name } : v))
+  persistViews()
+}
+
+const removeView = (id) => {
+  views.value = views.value.filter((v) => v.id !== id)
+  if (activeViewId.value === id) activeViewId.value = VIEW_FILTERED
+  persistViews()
+}
+
+// 「点了就生效」：列宽微调与自适应开关即时落盘
+const resetColumnWidths = () => {
+  customWidths.value = {}
+  persistViews()
+}
+const onWidthsChange = (w) => {
+  customWidths.value = w
+  persistViews()
+}
+const onAutoWidthChange = (v) => {
+  autoColumnWidth.value = !!v
+  persistViews()
+}
+
+// 列设置由后端 orders_columns 读取
 const loadColumnSettings = async () => {
   try {
     const data = await getSettings()
     if (data?.orders_columns) {
-      columnSettings.value = { ...DEFAULT_COLUMN_SETTINGS, ...data.orders_columns }
+      const s = data.orders_columns
+      columnSettings.value = { ...DEFAULT_COLUMN_SETTINGS, ...s }
+      // 多维表格配置与列显隐同存一个键（orders_columns）
+      sorts.value = Array.isArray(s.sorts) ? s.sorts : []
+      customWidths.value = s.widths || {}
+      if (s.autoColumnWidth === false) autoColumnWidth.value = false
+      views.value = userViews(s.views)
+      activeViewId.value = s.activeViewId || VIEW_FILTERED
     }
   } catch (e) {
     // 使用默认值
@@ -780,9 +1000,9 @@ const confirmRefund = async () => {
   if (deviate) {
     try {
       await ElMessageBox.confirm(
-        `按退费规则建议应退 ¥${suggested.toLocaleString()}（${
+        `按退费规则建议应退 ${formatMoney(suggested)}（${
           refundPreview.value?.reason || '规则建议值'
-        }），本次将退 ¥${refundFinal.value.toLocaleString()}。\n\n按规则外金额退款视为协商让利，不会回收卡内剩余权益，确认继续？`,
+        }），本次将退 ${formatMoney(refundFinal.value)}。\n\n按规则外金额退款视为协商让利，不会回收卡内剩余权益，确认继续？`,
         '偏离退费规则',
         {
           type: 'warning',
@@ -906,7 +1126,7 @@ const printReceipt = () => {
   if (!o) return
   const w = window.open('', '_blank', 'width=420,height=640')
   if (!w) return
-  const money = Number(o.payable_amount || 0).toLocaleString()
+  const money = formatMoney(o.payable_amount, { symbol: false })
   const date = formatDate(o.paid_at || o.created_at)
   const statusText = statusTextMap[o.status] || o.status
   const row = (label, value) => `<tr><td>${label}</td><td>${escapeHtml(value)}</td></tr>`
@@ -1239,5 +1459,11 @@ const loadStaffOptions = async () => {
   .order-stats {
     grid-template-columns: repeat(2, 1fr);
   }
+}
+
+// P2-1 表头独立内边距：表头只有一行（排序控件已 inline-flex、无 Element Plus 的
+// caret-wrapper 块级箭头），沿用「与数据行等高」的宽松 padding 会让表头比数据行还厚
+:deep(.el-table__header-wrapper th.el-table__cell) {
+  padding: 6px 0;
 }
 </style>

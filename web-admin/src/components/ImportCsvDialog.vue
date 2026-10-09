@@ -27,6 +27,9 @@
         <div v-if="headerDiag.unrecognized.length" class="preview-warn-item">
           未识别的列（将被忽略）：{{ headerDiag.unrecognized.join('、') }} —— 可改成模板列名后重新上传
         </div>
+        <div v-if="headerDiag.headerRowIndex > 0" class="preview-warn-item">
+          已自动识别第 {{ headerDiag.headerRowIndex + 1 }} 行为表头（忽略其上 {{ headerDiag.headerRowIndex }} 行标题）
+        </div>
         <div v-if="headerDiag.sheet" class="preview-warn-item">已自动使用工作表「{{ headerDiag.sheet }}」</div>
         <div v-if="headerDiag.encoding" class="preview-warn-item">已按 {{ headerDiag.encoding }} 解码文件</div>
       </div>
@@ -78,7 +81,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { Download, Upload } from '@element-plus/icons-vue'
-import { parseCsv, csvToObjects, buildHeaderIndex, decodeTextFile } from '@/utils/csv'
+import { parseCsv, csvToObjects, decodeTextFile } from '@/utils/csv'
 import { exportXlsx } from '@/utils/xlsx'
 
 const props = defineProps({
@@ -128,7 +131,7 @@ const handleFile = (file) => {
       }
       const rows = parseCsv(text)
       const parsed = csvToObjects(rows, props.templateColumns)
-      applyParsed(parsed, { encoding, header: (rows[0] || []).map((h) => String(h || '').trim()) })
+      applyParsed(parsed, { encoding, header: parsed.header || [] })
     }
     reader.readAsArrayBuffer(file)
     return false
@@ -141,11 +144,14 @@ const handleFile = (file) => {
       const wb = XLSX.read(e.target.result, { type: 'array' })
       // 多工作表：机构从其他系统导出的表常是「说明页 + 数据页」，此前只读第 1 个 → 解析 0 行且无提示。
       // 依次尝试各工作表，取第一个能解析出有效数据的。
-      let parsed = { objects: [], errors: [], unrecognized: [], missingRequired: [], header: [] }
+      // 以「网格」而非对象模式读取：对象模式固定把第 1 行当表头，而机构台账常是
+      // 「第 1 行标题 + 第 2 行列名」，会一列都匹配不上并导致整表错位一列。
+      // 网格 + csvToObjects 内的表头行探测可自动定位真表头（CSV 与 XLSX 同一套逻辑）。
+      let parsed = { objects: [], errors: [], unrecognized: [], missingRequired: [], header: [], headerRowIndex: 0 }
       let usedSheet = wb.SheetNames[0] || ''
       for (const name of wb.SheetNames) {
-        const json = XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '', raw: false })
-        const r = xlsxToObjects(json, props.templateColumns)
+        const grid = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: '', raw: false, blankrows: false })
+        const r = csvToObjects(grid, props.templateColumns)
         usedSheet = name
         parsed = r
         if (r.objects.length) break
@@ -160,39 +166,6 @@ const handleFile = (file) => {
   return false
 }
 
-// 将 Excel 工作表（对象数组，键为表头文字）映射为按 col.key 取值的对象数组。
-// 表头匹配复用 buildHeaderIndex（label / key / aliases + 归一化），与 CSV 分支口径一致。
-const xlsxToObjects = (json, columns) => {
-  const objects = []
-  const errors = []
-  if (!json.length) return { objects, errors, unrecognized: [], missingRequired: [], header: [] }
-  const header = Object.keys(json[0] || {}).map((k) => String(k).trim())
-  const indexMap = buildHeaderIndex(header, columns)
-  const matched = new Set(indexMap.filter((i) => i >= 0))
-  const unrecognized = header.filter((h, i) => h && !matched.has(i))
-  const missingRequired = columns.filter((c, ci) => c.required && indexMap[ci] < 0).map((c) => c.label)
-  json.forEach((rec, ri) => {
-    const norm = {}
-    Object.keys(rec || {}).forEach((k) => {
-      norm[String(k).trim()] = rec[k]
-    })
-    const obj = {}
-    columns.forEach((col, ci) => {
-      const h = indexMap[ci] >= 0 ? header[indexMap[ci]] : null
-      const v = h ? norm[h] : undefined
-      obj[col.key] = v == null ? '' : String(v).trim()
-    })
-    const required = columns.filter((c) => c.required)
-    const missing = required.filter((c) => !obj[c.key]?.trim())
-    if (missing.length) {
-      errors.push(`第 ${ri + 2} 行：缺少必填列「${missing.map((m) => m.label).join('、')}」`)
-    } else {
-      objects.push(obj)
-    }
-  })
-  return { objects, errors, unrecognized, missingRequired, header }
-}
-
 const applyParsed = (parsed, meta = {}) => {
   previewRows.value = parsed.objects || []
   parseErrors.value = parsed.errors || []
@@ -203,6 +176,8 @@ const applyParsed = (parsed, meta = {}) => {
     sheet: meta.sheet || '',
     // 仅非 UTF-8 时提示（UTF-8 是常态，不必打扰）
     encoding: meta.encoding && meta.encoding !== 'utf-8' ? meta.encoding : '',
+    // 标题行被跳过的提示：让用户知道系统认的是第几行
+    headerRowIndex: parsed.headerRowIndex || 0,
   }
   importResult.value = null
   if (!previewRows.value.length && !parseErrors.value.length) {

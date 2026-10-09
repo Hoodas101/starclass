@@ -84,10 +84,17 @@ export const formatNumber = (v, decimals = 0) => {
 
 const pad2 = (n) => String(n).padStart(2, '0')
 
-/** 解析成 Date：兼容 epoch 毫秒数字、'YYYY-MM-DD'、ISO 字符串 */
+/**
+ * 解析成 Date：兼容 epoch 毫秒数字、'YYYY-MM-DD'、ISO 字符串。
+ *
+ * 注意 `(\.\d+)?`：`students.join_date` 是 TEXT 列，而 better-sqlite3 把 JS 数字按 REAL 绑定，
+ * SQLite 的 TEXT 亲和性会把毫秒时间戳落成 **'1788059200000.0'**（带 `.0`）。
+ * 旧正则 /^\d{10,}$/ 不匹配该形态 → new Date('1788059200000.0') → Invalid Date →
+ * 学员档案「加入时间」整列显示 `-`。
+ */
 const toDate = (v) => {
   if (v === null || v === undefined || v === '') return null
-  if (typeof v === 'number' || /^\d{10,}$/.test(String(v))) {
+  if (typeof v === 'number' || /^\d{10,}(\.\d+)?$/.test(String(v).trim())) {
     const d = new Date(Number(v))
     return Number.isNaN(d.getTime()) ? null : d
   }

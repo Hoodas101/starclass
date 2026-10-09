@@ -181,7 +181,9 @@ router.post('/', (req, res) => {
             h.value === undefined ? 0 : h.value,
             w.value === undefined ? 0 : w.value,
             b.value === undefined ? 0 : b.value,
-            remark || '', now(), nextMemberNo(), now(), now());
+            // join_date 是 TEXT 列：必须绑字符串。绑数字时 better-sqlite3 按 REAL 写入，
+            // SQLite 的 TEXT 亲和性会落成 '1788059200000.0'，前端按 epoch 解析失败 → 整列显示 `-`。
+            remark || '', String(now()), nextMemberNo(), now(), now());
           inserted = true;
         } catch (e) {
           // 仅对「会员编号唯一冲突」重试；主键/其它唯一约束冲突直接抛出（重试无意义）
@@ -344,7 +346,8 @@ router.post('/import', (req, res) => {
         const id = generateId('stu_');
         const t = now();
         const statusVal = String(r.status || '').trim() || 'active';
-        const joinDateVal = joinRaw ? new Date(joinRaw + 'T12:00:00').getTime() || t : t;
+        // 同建档路径：join_date 为 TEXT 列，绑字符串避免落成 '...0'（前端会解析失败显示 `-`）
+        const joinDateVal = String(joinRaw ? (new Date(joinRaw + 'T12:00:00').getTime() || t) : t);
         db.prepare(`
           INSERT INTO students (id, name, gender, birthday, school, grade, level, remark, status, join_date, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

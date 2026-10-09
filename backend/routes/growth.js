@@ -316,10 +316,12 @@ router.post('/leads/:id/convert', (req, res) => {
             out.duplicate = dup.list;
           } else {
           const studentId = generateId('stu_');
+          // join_date 为 TEXT 列，必须绑字符串：绑数字时 better-sqlite3 按 REAL 写入，
+          // 落库为 '1788059200000.0'，前端按 epoch 解析失败 → 整列显示 `-`
           db.prepare(`
             INSERT INTO students (id, name, gender, birthday, school, grade, hobby, level, height, weight, bmi, remark, status, join_date, member_no, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
-          `).run(studentId, name, '', '', '', '', '', '', 0, 0, 0, '', t, nextMemberNo(), t, t);
+          `).run(studentId, name, '', '', '', '', '', '', 0, 0, 0, '', String(t), nextMemberNo(), t, t);
 
           // 家长账号与绑定：与 students.js 创建成员保持一致，保证手机号登录后可见该成员
           const parentNameVal = `${name}家长`;

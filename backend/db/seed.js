@@ -144,7 +144,8 @@ function seed() {
     INSERT INTO students (id, name, gender, birthday, school, grade, hobby, remark, height, weight, bmi, status, join_date, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
   `);
-  students.forEach(s => insertStudent.run(s.id, s.name, s.gender, s.birthday, s.school, s.grade, s.hobby, s.remark, s.height || 0, s.weight || 0, s.bmi || 0, NOW, NOW, NOW));
+  // join_date 为 TEXT 列：绑字符串（绑数字会落成 '...0'，前端解析失败显示 `-`）
+  students.forEach(s => insertStudent.run(s.id, s.name, s.gender, s.birthday, s.school, s.grade, s.hobby, s.remark, s.height || 0, s.weight || 0, s.bmi || 0, String(NOW), NOW, NOW));
 
   // ========= 3. 家长-成员绑定表 =========
   console.log('[Seed] 创建家长绑定...');

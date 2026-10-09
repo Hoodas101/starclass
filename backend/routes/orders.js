@@ -10,7 +10,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 // 管理员判断统一来自 utils（此前各路由各自复制实现）
-const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser, calcCardExpiresAt, formatDate, recordAudit, isAdminReq } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser, calcCardExpiresAt, formatDate, normalizeDateInput, recordAudit, isAdminReq } = require('../utils');
 const { parseItems } = require('../utils/items');
 // 退费规则引擎已抽到 utils/refund：refund-preview / refund / 退卡（membership）共用同一口径
 const { computeRefundSuggestion } = require('../utils/refund');
@@ -305,6 +305,34 @@ router.post('/', (req, res) => {
 });
 
 /**
+ * 宽松金额解析：机构台账的金额列常见多种写法在**同一列内混用**
+ * （199 / ¥199.00 / ￥29.90 / ¥2,699.00 / 29.90）。
+ * 旧实现直接 `Number(r.amount)`，遇到「¥2,699.00」得到 NaN → 整行被拒，
+ * 而错误文案只说「金额需为大于 0 的数字」，用户完全无法定位是货币符号导致的。
+ * 处理：剥离货币符号（含全角）、千分位（中英文逗号）、空白与尾缀「元」；
+ * 兼容会计负数写法 (100.00) → -100。
+ * @returns {{ok: boolean, value?: number, raw: string}}
+ */
+function parseMoneyLoose(input) {
+  const raw = String(input == null ? '' : input).trim();
+  if (!raw) return { ok: false, raw };
+  let s = raw.replace(/[¥￥$＄]/g, '').replace(/[,，\s]/g, '').replace(/元$/, '');
+  let negative = false;
+  const paren = s.match(/^\((.*)\)$/);
+  if (paren) {
+    negative = true;
+    s = paren[1];
+  }
+  if (s.startsWith('-')) {
+    negative = true;
+    s = s.slice(1);
+  }
+  const n = Number(s);
+  if (!Number.isFinite(n)) return { ok: false, raw };
+  return { ok: true, value: negative ? -n : n, raw };
+}
+
+/**
  * POST /api/orders/import — 批量导入销售记录（CSV 解析后由前端提交 JSON）
  * Body: { rows: [{ studentName, phone, itemName, amount, salesperson, paidDate, orderNo, remark }] }
  * 按「姓名 + 电话」匹配成员；找不到的行会跳过并返回原因。
@@ -340,15 +368,19 @@ router.post('/import', (req, res) => {
         const studentName = String(r.studentName || '').trim();
         const phone = String(r.phone || '').trim();
         const itemName = String(r.itemName || '').trim();
-        const amount = Number(r.amount);
         if (!studentName || !itemName) {
           failed.push({ row: idx + 2, reason: '成员姓名与项目必填' });
           return;
         }
-        if (!Number.isFinite(amount) || amount <= 0) {
-          failed.push({ row: idx + 2, reason: '金额需为大于 0 的数字' });
+        // 金额走宽松解析：台账里「¥2,699.00」「￥29.90」「199元」都要能吃下；
+        // 失败时把原值回显，用户才知道是哪个写法不被接受。
+        const amountParsed = parseMoneyLoose(r.amount);
+        if (!amountParsed.ok || !(amountParsed.value > 0)) {
+          const shown = String(r.amount == null ? '' : r.amount).trim();
+          failed.push({ row: idx + 2, reason: `金额需为大于 0 的数字（当前值「${shown || '空'}」）` });
           return;
         }
+        const amount = amountParsed.value;
 
         // 仅对导入文件显式提供了 orderNo 的行查重：orderNo 为空时走下方随机生成逻辑，
         // 生成的订单号天然唯一，无法也无需查重。命中即跳过该行，不影响其余行与本批事务。
@@ -378,8 +410,23 @@ router.post('/import', (req, res) => {
 
         const id = generateId('ORD');
         const t = now();
-        let paidTs = r.paidDate ? new Date(String(r.paidDate).trim() + 'T12:00:00').getTime() : t;
-        if (!Number.isFinite(paidTs)) paidTs = t; // 非法日期回退为当前时间，防止 NaN 写入
+        // 购买日期走统一解析（YYYY-M-D / M/D/YY / Excel 序列号 / YYYYMMDD / 中文日期）。
+        // 此前解析失败会**静默回退为当前时间**，整批记录的时间全部落在导入当天，
+        // 销售趋势与按月统计随之全错而界面看不出异常；现改为该行入 failed 并说明原因。
+        let paidTs = t;
+        if (String(r.paidDate == null ? '' : r.paidDate).trim()) {
+          const pd = normalizeDateInput(r.paidDate);
+          if (!pd.ok) {
+            failed.push({ row: idx + 2, reason: `购买日期无法识别：${pd.reason}` });
+            return;
+          }
+          const ms = new Date(pd.value + 'T12:00:00').getTime();
+          if (!Number.isFinite(ms)) {
+            failed.push({ row: idx + 2, reason: `购买日期无法识别：${pd.reason || '解析失败'}` });
+            return;
+          }
+          paidTs = ms;
+        }
         const orderNo = rawOrderNo || `ORD${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
         // 按项目名反查卡种：导入的 items 此前缺 itemId，grantOrderBenefits 两个循环都在
         // `if (!item.itemId) continue` 处整体跳过 → 发卡与积分静默不发，而订单入账、接口仍返回成功

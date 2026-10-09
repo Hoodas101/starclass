@@ -100,6 +100,34 @@
     </div>
     <div v-if="customizable" class="cs-custom-tip">自定义字段显示表格中对应列的内容，可随时隐藏或删除</div>
 
+    <!-- 列宽：自适应（canvas 实测文本像素）+ 逐列手动微调 + 一键复位。
+         留空 = 跟随自适应；填了就按该值固定（此时其余列也会一并固定，避免相邻列被压缩）。 -->
+    <div class="cs-widths">
+      <div class="cs-widths-head">
+        <span class="cs-pane-title">列宽</span>
+        <label class="cs-widths-auto">
+          <el-switch :model-value="autoWidth" size="small" @update:model-value="$emit('update:autoWidth', $event)" />
+          <span>自适应</span>
+        </label>
+        <el-button text size="small" @click="$emit('reset-widths')">一键复位</el-button>
+      </div>
+      <div class="cs-widths-list">
+        <div v-for="key in orderedKeys" :key="key" class="cs-width-row">
+          <span class="cs-width-label">{{ labelOf(key) }}</span>
+          <el-input-number
+            :model-value="widths[key]"
+            size="small"
+            :min="40"
+            :max="600"
+            :step="10"
+            controls-position="right"
+            placeholder="自动"
+            @update:model-value="(v) => setWidth(key, v)"
+          />
+        </div>
+      </div>
+    </div>
+
     <div class="cs-footer">
       <el-button text @click="resetDefaults">恢复默认</el-button>
       <div class="cs-footer-right">
@@ -120,8 +148,20 @@ const props = defineProps({
   defaults: { type: Object, required: true },
   noButton: { type: Boolean, default: false },
   customizable: { type: Boolean, default: true },
+  // 列宽：{ [key]: px } 手动值；autoWidth 为自适应开关
+  widths: { type: Object, default: () => ({}) },
+  autoWidth: { type: Boolean, default: true },
 })
-const emit = defineEmits(['update:settings', 'save'])
+const emit = defineEmits(['update:settings', 'save', 'update:widths', 'update:autoWidth', 'reset-widths'])
+
+// 留空 = 跟随自适应；填了就按该值固定
+const setWidth = (key, v) => {
+  const next = { ...(props.widths || {}) }
+  const n = Number(v)
+  if (v === null || v === undefined || v === '' || Number.isNaN(n) || n <= 0) delete next[key]
+  else next[key] = n
+  emit('update:widths', next)
+}
 
 const visible = ref(false)
 const orderedKeys = ref([])
@@ -211,12 +251,14 @@ const applySetting = (key, val) => {
   emit('update:settings', { ...props.settings, [key]: val })
 }
 
+// 「恢复默认」只应重置列显隐与顺序，不能顺手清掉行高、列宽自适应、排序、视图等非列偏好
+//（旧写法 `{ ...defaults }` 会把它们一并抹掉，用户点一次「恢复默认」就丢了已调好的行高与开关）
 const resetDefaults = () => {
   const def = { ...props.defaults }
   delete def.order
   delete def.customFields
   orderedKeys.value = allKeys().filter((k) => def[k] !== false)
-  emit('update:settings', { ...def, order: orderedKeys.value })
+  emit('update:settings', { ...props.settings, ...def, order: orderedKeys.value })
 }
 
 const save = () => {
@@ -398,6 +440,58 @@ defineExpose({
 
 .cs-del {
   color: var(--t-danger-text) !important;
+}
+
+/* 列宽区 */
+.cs-widths {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--t-line);
+}
+
+.cs-widths-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.cs-widths-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--t-text-2);
+  cursor: pointer;
+}
+
+.cs-widths-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 14px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.cs-width-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  .el-input-number {
+    width: 104px;
+  }
+}
+
+.cs-width-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--t-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 640px) {

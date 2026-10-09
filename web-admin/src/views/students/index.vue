@@ -53,6 +53,16 @@
       </div>
     </div>
 
+    <!-- 视图栏：一套「筛选 + 排序 + 字段顺序 + 列宽」的快照，可多套并存切换 -->
+    <TableViewBar
+      :views="viewList"
+      :active-id="activeViewId"
+      @select="applyView"
+      @create="createView"
+      @rename="renameView"
+      @remove="removeView"
+    />
+
     <!-- 数据概览 -->
     <div class="overview-strip">
       <div class="overview-item">
@@ -97,22 +107,29 @@
           v-for="col in visibleCols"
           :key="col.key"
           :label="col.label"
-          :width="col.width"
-          :min-width="col.minWidth"
+          :width="colWidths[col.key] && colWidths[col.key].width"
+          :min-width="colWidths[col.key] && colWidths[col.key].minWidth"
           :align="col.align"
           :fixed="col.fixed"
           :column-key="col.key"
           :filters="col.key === 'project' ? projectFilters : (col.key === 'status' ? STATUS_FILTERS : undefined)"
           :show-overflow-tooltip="col.tooltip"
         >
-          <!-- 表头全文兜底：Element Plus 的 show-overflow-tooltip 只作用于单元格
-               （表头渲染路径里没有 tooltip，已核对 table-column/render-helper.mjs），
-               所以用 header 插槽挂原生 title，鼠标悬停即可看到被 ellipsis 截断的完整列名。 -->
+          <!-- 表头：单行（inline-flex）+ 自定义排序控件。
+               排序完全由本控件承担（不挂 Element Plus 的 :sortable —— 它会自动插入
+               caret-wrapper 上下箭头块级元素，与自定义箭头并存并撑成两行表头）。 -->
           <template #header>
-            <span class="col-header" :title="col.label">{{ col.label }}</span>
+            <SortableHeader
+              :label="col.label"
+              :state="sortState(col.key)"
+              :priority="sortPriority(col.key)"
+              :sortable="col.sortable !== false"
+              @sort="(e) => onSortColumn(col.key, e)"
+            />
           </template>
           <template #default="{ row, $index }">
-            <template v-if="col.key === 'seq'">{{ $index + 1 }}</template>
+            <!-- 序号跨页连续：$index+1 在翻到第 2 页时又从 1 开始 -->
+            <template v-if="col.key === 'seq'">{{ (currentPage - 1) * pageSize + $index + 1 }}</template>
             <div v-else-if="col.key === 'info'" class="student-cell">
               <span class="student-name">{{ row.name }}</span>
             </div>
@@ -150,9 +167,13 @@
             <span v-else-if="col.key === 'latestPurchase'">{{ row.latest_purchase_date ? formatDate(row.latest_purchase_date) : '-' }}</span>
             <span v-else-if="col.key === 'purchaseCount'">{{ row.purchase_count || 0 }} 次</span>
 
-            <span v-else-if="col.key === 'spent'" class="total-spent">¥{{ Number(row.total_spent || 0).toLocaleString() }}</span>
+            <span v-else-if="col.key === 'spent'" class="total-spent">{{ formatMoney(row.total_spent) }}</span>
 
-            <template v-else-if="col.key === 'join'">{{ row.join_date ? relativeTime(Date.parse(row.join_date)) : '-' }}</template>
+            <!-- 加入时间统一 YYYY-MM-DD：Date.parse 对数值时间戳必然 NaN，且相对时间会
+                 在同一列混出「3 天前」与「09-06」两种写法；「距今多久」移到 title 悬停 -->
+            <template v-else-if="col.key === 'join'">
+              <span :title="row.join_date ? relativeTime(Number(row.join_date)) : ''">{{ formatDate(row.join_date) }}</span>
+            </template>
 
             <template v-else-if="col.key === 'lastActivity'">
               <span class="last-activity" :class="{ none: !row.last_activity_at }">
@@ -279,7 +300,8 @@
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">加入时间</span>
-                  <span class="prop-value prop-static">{{ selectedStudent.join_date ? relativeTime(Date.parse(selectedStudent.join_date)) : '-' }}</span>
+                  <!-- Date.parse 对数值时间戳返回 NaN，relativeTime 会把 NaN 原样吐到页面；改走统一 formatDate -->
+                  <span class="prop-value prop-static">{{ formatDate(selectedStudent.join_date) }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">最近活跃</span>
@@ -295,7 +317,7 @@
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">累计消费</span>
-                  <span class="prop-value prop-strong prop-static">¥{{ Number(selectedStudent.total_spent || 0).toLocaleString() }}</span>
+                  <span class="prop-value prop-strong prop-static">{{ formatMoney(selectedStudent.total_spent) }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">备注</span>
@@ -376,7 +398,7 @@
                     <span class="order-item-no">{{ o.order_no || '' }}</span>
                   </div>
                   <div class="order-item-right">
-                    <span class="order-item-amount">¥{{ Number(o.payable_amount || 0).toLocaleString() }}</span>
+                    <span class="order-item-amount">{{ formatMoney(o.payable_amount) }}</span>
                     <StatusDot
                       :tone="orderDotTone(o.status)"
                       :label="orderStatusText(o.status)"
@@ -539,6 +561,11 @@
       :columns="studentColumnDefs"
       v-model:settings="columnSettings"
       :defaults="DEFAULT_COLUMN_SETTINGS"
+      :widths="customWidths"
+      :auto-width="autoColumnWidth"
+      @update:widths="onWidthsChange"
+      @update:auto-width="onAutoWidthChange"
+      @reset-widths="resetColumnWidths"
       @save="saveColumns"
       no-button
     />
@@ -573,10 +600,16 @@ import { getStudents, getStudentDetail, addStudent, updateStudent, deleteStudent
 import ColumnSettingsDialog from '@/components/ColumnSettingsDialog.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import TableViewBar from '@/components/TableViewBar.vue'
+import SortableHeader from '@/components/SortableHeader.vue'
+// 多维表格：排序（三态/多列/空值末尾）、列宽（canvas 实测 + 手动微调）、视图（整套快照）
+import { sortRows, toggleSort, sortStateOf, sortPriorityOf } from '@/utils/tableSort'
+import { computeAutoWidths, resolveColumnWidths } from '@/utils/tableWidth'
+import { allViews, makeView, userViews, VIEW_ALL, VIEW_FILTERED } from '@/utils/tableView'
 import ImportCsvDialog from '@/components/ImportCsvDialog.vue'
 import { exportXlsx } from '@/utils/xlsx'
 import { fetchAllPages } from '@/utils/fetchAll'
-import { relativeTime } from '@/utils/format'
+import { relativeTime, formatDate as formatDateStd, formatMoney } from '@/utils/format'
 import { useSettingsStore } from '@/store/settings'
 
 const settingsStore = useSettingsStore()
@@ -630,7 +663,8 @@ const loadStats = async () => {
 }
 
 const studentColumnDefs = [
-  { key: 'seq', label: '序号', minWidth: 56, align: 'center' },
+  // sortable: false —— 序号是展示位次，排序它没有意义；filterable 用于列宽计算时预留筛选触发器占位
+  { key: 'seq', label: '序号', minWidth: 56, align: 'center', sortable: false },
   // fixed:'left' 只加在最左侧的「姓名」上。
   // 需求原本希望固定「当前项目/剩余课时/到期日」，但 Element Plus 的固定列会被
   // 抽到独立的左固定层、按 DOM 顺序排在非固定列之前 —— 固定中间列会直接改变列序
@@ -642,7 +676,7 @@ const studentColumnDefs = [
   { key: 'age', label: '年龄', minWidth: 56, align: 'right' },
   { key: 'birthday', label: '出生日期', minWidth: 100, align: 'left' },
   { key: 'level', label: '训练级别', minWidth: 80, align: 'left' },
-  { key: 'project', label: '当前项目', minWidth: 120, tooltip: true },
+  { key: 'project', label: '当前项目', minWidth: 120, tooltip: true, filterable: true },
   { key: 'remaining', label: '剩余课时/次数', minWidth: 100, align: 'right' },
   { key: 'expires', label: '到期日期', minWidth: 100 },
   { key: 'startDate', label: '开始日期', minWidth: 100 },
@@ -651,7 +685,7 @@ const studentColumnDefs = [
   { key: 'spent', label: '累计消费', minWidth: 100, align: 'right', tooltip: true },
   { key: 'join', label: '加入时间', minWidth: 100 },
   { key: 'lastActivity', label: '最近活跃', minWidth: 90, align: 'right' },
-  { key: 'status', label: '状态', minWidth: 80, align: 'center' },
+  { key: 'status', label: '状态', minWidth: 80, align: 'center', filterable: true },
 ]
 
 // 列头筛选（类似 Excel）：状态联动后端，项目使用在售卡种枚举
@@ -678,6 +712,16 @@ const DEFAULT_COLUMN_SETTINGS = {
 const columnSettings = ref({ ...DEFAULT_COLUMN_SETTINGS })
 const colDialogRef = ref(null)
 
+// ==== 多维表格状态：排序 / 列宽 / 视图（与列显隐、顺序一起存进 students_columns）====
+const sorts = ref([])                 // [{ key, state }]：三态，多列按优先级
+const customWidths = ref({})          // { [key]: px } 手动列宽
+const autoColumnWidth = ref(true)     // 列宽自适应开关
+const activeViewId = ref(VIEW_FILTERED)
+
+// 表头控件占位（P2-2）：排序箭头 + 优先级角标 + 列筛选触发器在表头里是常驻占位的，
+// 自适应列宽若只量文字，会把「序号」这类短列名截断（实测 th 50px 扣内边距后只剩 15px）
+const colExtra = (col) => (col.sortable === false ? 0 : 26) + (col.filterable ? 20 : 0)
+
 // 按用户设置的顺序渲染列（未保存顺序时保持默认定义顺序）
 const visibleCols = computed(() => {
   const order = Array.isArray(columnSettings.value.order) ? columnSettings.value.order : []
@@ -692,21 +736,191 @@ const visibleCols = computed(() => {
   return [...ordered, ...rest]
 })
 
-// 年龄：按出生日期实时计算（后端动态返回周岁），最多两位整数、无小数点
+// 自适应列宽：按当前页数据实测文本像素；关闭自适应时退回列定义宽度
+const autoWidths = computed(() => {
+  const cols = visibleCols.value
+  if (!autoColumnWidth.value) {
+    const out = {}
+    for (const c of cols) out[c.key] = c.minWidth || 80
+    return out
+  }
+  // 必须把 extra（表头排序箭头/筛选触发器占位）注入列定义，否则 P2-2 的预留不会生效
+  const colsWithExtra = cols.map((c) => ({ ...c, extra: colExtra(c) }))
+  return computeAutoWidths(colsWithExtra, filteredStudents.value, { textOf: (col, row) => cellText(col, row) })
+})
+
+// 最终列宽绑定（P2-3：只要存在任何手动列宽，全部列固定 width，避免相邻 min-width 列被压缩）
+const colWidths = computed(() => resolveColumnWidths(visibleCols.value, customWidths.value, autoWidths.value))
+
+const sortState = (key) => sortStateOf(sorts.value, key)
+const sortPriority = (key) => sortPriorityOf(sorts.value, key)
+
+// 点列头：升序 → 降序 → 取消；按住 Shift/Cmd 点击追加为次级排序
+const onSortColumn = (key, { additive } = {}) => {
+  sorts.value = toggleSort(sorts.value, key, additive)
+  persistViews()
+}
+
+// 年龄：按出生日期实时计算（后端动态返回周岁），最多两位整数、无小数点。
+// 必须先排空再转换：Number(null) === 0，旧写法的空值守卫形同虚设，
+// 把「未填生日」渲染成「0 岁」（实测 245/360 名学员显示 0 岁，看起来像孩子 0 岁）。
 const formatAge = (age) => {
+  if (age === null || age === undefined || age === '') return '-'
   const n = Number(age)
   if (!Number.isFinite(n) || n < 0) return '-'
   return `${Math.min(Math.floor(n), 99)} 岁`
 }
 
-const saveColumns = async (settings) => {
-  columnSettings.value = settings
+// 单元格纯文本：供列宽实测使用（与模板里的渲染保持一致，否则量出来的宽度对不上）
+const cellText = (col, row) => {
+  switch (col.key) {
+    case 'seq': return '9999'
+    case 'info': return row.name || ''
+    case 'memberNo': return row.member_no || ''
+    case 'phone': return row.parent_phone || row.phone || ''
+    case 'age': return formatAge(row.age)
+    case 'birthday': return row.birthday || ''
+    case 'level': return row.level || ''
+    case 'project': return row.card_type_name || '未购卡'
+    case 'remaining': return row.time_card_count ? '不限·时效' : `${row.remaining_classes || 0} 次`
+    case 'expires': return formatCardExpiry(row.expires_at)
+    case 'startDate': return formatDate(row.card_start_date)
+    case 'latestPurchase': return formatDate(row.latest_purchase_date)
+    case 'purchaseCount': return `${row.purchase_count || 0} 次`
+    case 'spent': return formatMoney(row.total_spent)
+    case 'join': return formatDate(row.join_date)
+    case 'lastActivity': return row.last_activity_at ? relativeTime(row.last_activity_at) : '从未出勤'
+    case 'status': return statusTextMap[row.status] || row.status || ''
+    default: return row[col.key] == null ? '' : String(row[col.key])
+  }
+}
+
+// 排序取值：与 cellText 同源，保证「看到的」与「排的」是同一个值
+const sortValueOf = (key, row) => {
+  switch (key) {
+    // 「序号」是展示位次，不参与排序（故列定义里 sortable: false）
+    case 'age': return row.age === null || row.age === undefined || row.age === '' ? null : Number(row.age)
+    case 'remaining': return row.time_card_count ? null : Number(row.remaining_classes || 0)
+    case 'expires': return row.expires_at || null
+    case 'startDate': return row.card_start_date || null
+    case 'latestPurchase': return row.latest_purchase_date || null
+    case 'purchaseCount': return Number(row.purchase_count || 0)
+    case 'spent': return Number(row.total_spent || 0)
+    case 'join': return row.join_date ? Number(row.join_date) : null
+    case 'lastActivity': return row.last_activity_at || null
+    default: return cellText({ key }, row)
+  }
+}
+
+// 保存字段设置：`students_columns` 在设置表里是「一个键 = 一整个对象」的覆盖语义，
+// 而前端持有的只是打开页面那一刻的快照 —— 直接写回会把期间其他写入无声抹掉
+//（实测：外部写入两个视图后，本页保存一次字段设置，两个视图随即消失，用户毫无察觉）。
+// 改为「先重读服务端 → 按本页管理的键合并 → 写回」。
+const persistColumns = async (next) => {
+  let remote = {}
   try {
-    await saveSettings({ students_columns: settings })
+    const cur = await getSettings()
+    remote = (cur && cur.students_columns) || {}
+  } catch (e) {
+    // 读不到服务端就退化为直接写（不能因为一次读失败让保存整个失败）
+    await saveSettings({ students_columns: next })
+    return
+  }
+  // 本页管理的键覆盖服务端；服务端有、本页不管理的键（如别处新增的配置）保留
+  const merged = { ...remote, ...next }
+  columnSettings.value = merged
+  await saveSettings({ students_columns: merged })
+}
+
+const saveColumns = async (settings) => {
+  try {
+    await persistColumns(settings)
     ElMessage.success('字段设置已保存')
   } catch (e) {
     // 拦截器已提示
   }
+}
+
+// ==== 视图：筛选 + 排序 + 字段顺序 + 列宽 的整套快照 ====
+const views = ref([])
+const viewList = computed(() => allViews(views.value))
+
+const currentSnapshot = () => ({
+  filters: { status: filterStatus.value, project: filterProject.value, keyword: searchKeyword.value },
+  sorts: sorts.value,
+  order: columnSettings.value.order || [],
+  widths: customWidths.value,
+})
+
+// 排序/列宽/视图的落盘：与字段设置共用同一条「重读服务端 + 按键合并」写入路径。
+// 连续点列头会连发写入，故做 300ms 去抖：既保证「点了就生效」，又避免写入风暴
+// 与「读远端 → 合并 → 写回」在并发下互相覆盖导致先后错序。
+let persistTimer = null
+const persistViews = () => {
+  clearTimeout(persistTimer)
+  persistTimer = setTimeout(() => {
+    persistColumns({
+      ...columnSettings.value,
+      sorts: sorts.value,
+      widths: customWidths.value,
+      autoColumnWidth: autoColumnWidth.value,
+      views: views.value,
+      activeViewId: activeViewId.value,
+    }).catch(() => { /* 拦截器已提示 */ })
+  }, 300)
+}
+
+const applyView = (id) => {
+  activeViewId.value = id
+  // 「当前筛选」= 保持现状（它不是快照，而是「我正在用的筛选态」）
+  if (id === VIEW_FILTERED) return
+  const v = id === VIEW_ALL
+    ? { filters: {}, sorts: [], order: [], widths: {} }
+    : userViews(views.value).find((x) => x.id === id)
+  if (!v) return
+  filterStatus.value = (v.filters && v.filters.status) || ''
+  filterProject.value = (v.filters && v.filters.project) || ''
+  searchKeyword.value = (v.filters && v.filters.keyword) || ''
+  sorts.value = Array.isArray(v.sorts) ? v.sorts : []
+  customWidths.value = v.widths || {}
+  if (Array.isArray(v.order) && v.order.length) columnSettings.value = { ...columnSettings.value, order: v.order }
+  onSearch()
+  persistViews()
+}
+
+const createView = (name) => {
+  const v = makeView(name, currentSnapshot())
+  views.value = [...views.value, v]
+  activeViewId.value = v.id
+  persistViews()
+  ElMessage.success(`已保存视图「${v.name}」`)
+}
+
+const renameView = (id, name) => {
+  views.value = views.value.map((v) => (v.id === id ? { ...v, name } : v))
+  persistViews()
+}
+
+const removeView = (id) => {
+  views.value = views.value.filter((v) => v.id !== id)
+  if (activeViewId.value === id) activeViewId.value = VIEW_FILTERED
+  persistViews()
+}
+
+// 列宽一键复位（逐列手动微调的反操作）
+const resetColumnWidths = () => {
+  customWidths.value = {}
+  persistViews()
+}
+
+// 「点了就生效」：列宽微调与自适应开关即时落盘，不需要再点一次「保存」
+const onWidthsChange = (w) => {
+  customWidths.value = w
+  persistViews()
+}
+const onAutoWidthChange = (v) => {
+  autoColumnWidth.value = !!v
+  persistViews()
 }
 
 // 批量导入成员
@@ -715,7 +929,7 @@ const importDialogRef = ref(null)
 // 归一化后按 label / key / aliases 匹配（见 utils/csv.js buildHeaderIndex），
 // 否则「学员姓名 / 手机号 / 家长电话」这类同义表头一律识别不了。
 const importColumns = [
-  { key: 'name', label: '姓名', required: true, aliases: ['学员姓名', '学生姓名', '名字', '儿童姓名', '会员姓名', '宝宝姓名', 'name'] },
+  { key: 'name', label: '姓名', required: true, aliases: ['学员姓名', '学生姓名', '名字', '儿童姓名', '会员姓名', '会员', '会员名', '宝宝姓名', 'name'] },
   { key: 'gender', label: '性别', aliases: ['性别', 'gender'] },
   { key: 'birthday', label: '出生日期', aliases: ['生日', '出生年月', '出生日期(必填)', 'birthday'] },
   { key: 'school', label: '就读学校', aliases: ['学校', '就读学校', '幼儿园', 'school'] },
@@ -751,7 +965,14 @@ const loadColumnSettings = async () => {
   try {
     const data = await getSettings()
     if (data?.students_columns) {
-      columnSettings.value = { ...DEFAULT_COLUMN_SETTINGS, ...data.students_columns }
+      const s = data.students_columns
+      columnSettings.value = { ...DEFAULT_COLUMN_SETTINGS, ...s }
+      // 多维表格配置与列显隐同存一个键（students_columns）
+      sorts.value = Array.isArray(s.sorts) ? s.sorts : []
+      customWidths.value = s.widths || {}
+      if (s.autoColumnWidth === false) autoColumnWidth.value = false
+      views.value = userViews(s.views)
+      activeViewId.value = s.activeViewId || VIEW_FILTERED
     }
   } catch (e) {
     // 使用默认值
@@ -793,12 +1014,9 @@ const statusTextMap = {
 
 const students = ref([])
 
-const formatDate = (v) => {
-  if (!v) return '-'
-  const n = Number(v)
-  if (Number.isNaN(n)) return String(v)
-  return dayjs(n).format('YYYY-MM-DD')
-}
+// 委托到全站统一实现：兼容毫秒时间戳、'YYYY-MM-DD'，以及 SQLite TEXT 列写出的
+// '1788059200000.0'（REAL 亲和）形态；本页统一用 '-' 作为空值占位。
+const formatDate = (v) => (v === null || v === undefined || v === '' ? '-' : formatDateStd(v, '-'))
 
 const formatCardExpiry = (v) => {
   if (!v) return '-'
@@ -865,7 +1083,9 @@ const onColumnFilter = (filters) => {
   }
 }
 
-const filteredStudents = computed(() => students.value)
+// 列表数据：服务端已完成筛选与分页，排序在客户端对当前页生效
+// （纯前端排序的常规语义，与飞书多维表格一致；新增可排序列无需动后端）
+const filteredStudents = computed(() => sortRows(students.value, sorts.value, sortValueOf))
 
 // ============================================
 // 详情抽屉
@@ -1281,7 +1501,10 @@ const doExportTemplate = () => {
       case 'parentName': return s.parent_name || ''
       case 'phone': return s.parent_phone || ''
       case 'remark': return s.remark || ''
-      case 'joinDate': return s.join_date ? dayjs(Number(s.join_date)).format('YYYY-MM-DD') : ''
+      // 走统一 formatDate：兼容毫秒时间戳与 'YYYY-MM-DD' 两种形态。
+      // 旧写法 dayjs(Number(s.join_date)) 在 join_date 已是日期串时得到 NaN → 产出
+      // 「Invalid Date」→ 再导入必然整行失败，闭环断裂。
+      case 'joinDate': return s.join_date ? formatDate(s.join_date, '') : ''
       case 'status': return s.status || ''
       default: return ''
     }
@@ -1312,13 +1535,12 @@ onMounted(() => {
 </script>
 
 <style lang="scss" scoped>
-// 表头全文兜底：列宽不足时列名会被 ellipsis 截断，
-// 这里让截断稳定生效，并靠 header 插槽上的原生 title 提供全文提示。
-.col-header {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+// P2-1 表头独立内边距：表头只有一行（排序控件已 inline-flex、无 Element Plus 的
+// caret-wrapper 块级箭头），沿用「与数据行等高」的宽松 padding 会让表头比数据行还厚
+//（实测表头 63px、数据行仅 22px，视觉上「表头比内容还挤」）。
+// 注：表头样式已收敛到 SortableHeader.vue，此处不再重复定义 .col-header（避免与组件样式打架）。
+:deep(.el-table__header-wrapper th.el-table__cell) {
+  padding: 6px 0;
 }
 
 // 密度切换：与工具栏按钮同高，不抢视觉

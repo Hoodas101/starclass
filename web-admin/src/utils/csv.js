@@ -60,18 +60,46 @@ export const buildHeaderIndex = (headers, columns) => {
   })
 }
 
-// 按表头行映射为对象数组（支持同义表头；返回未识别列与缺失必填列供界面提示）
+// 统计一行里命中已知列的数量（供表头行探测使用）
+const matchCount = (row, columns) => {
+  if (!Array.isArray(row)) return 0
+  const indexMap = buildHeaderIndex(row.map((c) => String(c == null ? '' : c)), columns)
+  return indexMap.filter((i) => i >= 0).length
+}
+
+/**
+ * 表头行探测：机构自带台账常见「第 1 行是标题、第 2 行才是列名」的结构。
+ * 此前固定把第 1 行当表头 → 一列都匹配不上 → 各列回退到「按列序猜」→ **整表错位一列**
+ * （实测：收据单号被写进备注列）。改为在前 scanLimit 行中取「命中已知列最多」的一行作表头。
+ * 阈值取 2：单列命中可能是巧合（标题里恰好含「姓名」二字），不足以判定为表头行。
+ * @returns {{index: number, matched: number}}
+ */
+export const detectHeaderRow = (grid, columns, scanLimit = 10) => {
+  const limit = Math.min(scanLimit, grid.length)
+  let best = { index: 0, matched: -1 }
+  for (let i = 0; i < limit; i += 1) {
+    const n = matchCount(grid[i], columns)
+    if (n > best.matched) best = { index: i, matched: n }
+    if (n === columns.length) break
+  }
+  if (best.matched < 2) return { index: 0, matched: Math.max(0, best.matched) }
+  return best
+}
+
+// 按表头行映射为对象数组（支持同义表头与标题行；返回未识别列与缺失必填列供界面提示）
 export const csvToObjects = (rows, columns) => {
-  if (!rows.length) return { objects: [], errors: ['文件为空'], unrecognized: [], missingRequired: [] }
-  const header = rows[0].map((h) => String(h == null ? '' : h).trim())
+  if (!rows.length) return { objects: [], errors: ['文件为空'], unrecognized: [], missingRequired: [], headerRowIndex: 0 }
+  const { index, matched } = detectHeaderRow(rows, columns)
+  const headerRowIndex = matched >= 2 ? index : 0
+  const header = rows[headerRowIndex].map((h) => String(h == null ? '' : h).trim())
   const indexMap = buildHeaderIndex(header, columns)
-  const matched = new Set(indexMap.filter((i) => i >= 0))
+  const matchedIdx = new Set(indexMap.filter((i) => i >= 0))
   // 未识别的表头列：非必填列匹配失败是静默的（学员建了、手机号却为空），必须显式提示
-  const unrecognized = header.filter((h, i) => h && !matched.has(i))
+  const unrecognized = header.filter((h, i) => h && !matchedIdx.has(i))
   const missingRequired = columns.filter((c, ci) => c.required && indexMap[ci] < 0).map((c) => c.label)
   const objects = []
   const errors = []
-  rows.slice(1).forEach((cells, ri) => {
+  rows.slice(headerRowIndex + 1).forEach((cells, ri) => {
     const obj = {}
     columns.forEach((col, ci) => {
       const idx = indexMap[ci]
@@ -80,12 +108,13 @@ export const csvToObjects = (rows, columns) => {
     const required = columns.filter((c) => c.required)
     const missing = required.filter((c) => !String(obj[c.key] ?? '').trim())
     if (missing.length) {
-      errors.push(`第 ${ri + 2} 行：缺少必填列「${missing.map((m) => m.label).join('、')}」`)
+      // 行号按原始文件行计算（含被跳过的标题行），便于用户回到表格里定位
+      errors.push(`第 ${headerRowIndex + ri + 2} 行：缺少必填列「${missing.map((m) => m.label).join('、')}」`)
     } else {
       objects.push(obj)
     }
   })
-  return { objects, errors, unrecognized, missingRequired }
+  return { objects, errors, unrecognized, missingRequired, headerRowIndex, header }
 }
 
 /**

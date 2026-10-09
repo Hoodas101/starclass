@@ -323,6 +323,77 @@ function formatDate(timestamp) {
 }
 
 /**
+ * 宽松日期解析：把外部台账里常见的多种日期写法统一为 YYYY-MM-DD。
+ *
+ * 背景（审计 2026-10-08）：机构自带的销售台账「购买日期」列在同一列内混用多种写法，
+ * 旧实现 `new Date(str + 'T12:00:00')` 对其中一部分解析失败后**静默回退为当前时间**，
+ * 导致整批销售记录的时间全部落在导入当天 —— 销售趋势、按月统计随之全错，界面上却看不出异常。
+ *
+ * 支持：YYYY-M-D / YYYY/M/D（非零填充）、M/D/YY 与 D/M/Y、Excel 日期序列号、
+ *      YYYYMMDD、中文「2026年1月5日」。
+ *
+ * @param {*} input
+ * @returns {{ok: boolean, value?: string, reason?: string}} 失败时 ok=false，由调用方决定
+ *          拒绝该行（而非静默兜底），保证数据错误在导入时就暴露。
+ */
+function normalizeDateInput(input) {
+  const raw = String(input == null ? '' : input).trim();
+  if (!raw) return { ok: false, reason: '日期为空' };
+
+  const pad = (n) => String(n).padStart(2, '0');
+  const verify = (y, m, d) => {
+    if (!(y >= 1900 && y <= 2999) || !(m >= 1 && m <= 12) || !(d >= 1 && d <= 31)) {
+      return { ok: false, reason: `日期不存在「${raw}」` };
+    }
+    // 用 UTC 反算校验真实存在（拦掉 2 月 30 日这类），避免被 Date 静默归一
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    if (dt.getUTCFullYear() !== y || dt.getUTCMonth() + 1 !== m || dt.getUTCDate() !== d) {
+      return { ok: false, reason: `日期不存在「${raw}」` };
+    }
+    return { ok: true, value: `${y}-${pad(m)}-${pad(d)}` };
+  };
+
+  // ① Excel 日期序列号（5 位纯数字）。基准必须是 1899-12-30 —— Excel 沿用「1900 年是闰年」
+  //    的历史设定，序列号 1 = 1900-01-01；若误用 1970-01-01 会产生 70 年偏差
+  //    （46023 会算成 2096-01-01 而非 2026-01-01）。
+  if (/^\d{5}$/.test(raw)) {
+    const serial = Number(raw);
+    if (serial >= 25569 && serial <= 2958465) {
+      const d = new Date(Date.UTC(1899, 11, 30) + serial * 86400000);
+      return verify(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+    }
+  }
+
+  // ② YYYYMMDD
+  if (/^\d{8}$/.test(raw)) {
+    return verify(Number(raw.slice(0, 4)), Number(raw.slice(4, 6)), Number(raw.slice(6, 8)));
+  }
+
+  // ③ YYYY-M-D / YYYY/M/D / YYYY.M.D（年份在前，无歧义）
+  const ymd = raw.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+  if (ymd) return verify(Number(ymd[1]), Number(ymd[2]), Number(ymd[3]));
+
+  // ④ M/D/YY（美式）或 D/M/Y：首位 > 12 时必然是「日」，否则按美式 M/D/Y 判定。
+  //    两段都 ≤ 12（如 5/12/25）存在固有无歧义，此处按美式处理 —— 依据是本机构原表该列
+  //    全部为美式写法；若其他客户以 D/M/Y 为主，可改为可配置项。
+  const slash = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/);
+  if (slash) {
+    const a = Number(slash[1]);
+    const b = Number(slash[2]);
+    let c = Number(slash[3]);
+    if (c < 100) c += 2000;
+    if (a > 12 && b <= 12) return verify(c, b, a);
+    return verify(c, a, b);
+  }
+
+  // ⑤ 中文写法：2026年1月5日
+  const cn = raw.match(/^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?$/);
+  if (cn) return verify(Number(cn[1]), Number(cn[2]), Number(cn[3]));
+
+  return { ok: false, reason: `无法识别的日期格式「${raw}」` };
+}
+
+/**
  * 会员卡到期时间计算
  * 次数卡有效天数为 0（不限有效期）时返回远期哨兵值（2100-01-01），
  * 避免“激活即过期”导致次数卡在扣课查询中永远匹配不到。
@@ -431,6 +502,7 @@ module.exports = {
   escapeLike,
   now,
   formatDate,
+  normalizeDateInput,
   calcCardExpiresAt,
   getWeekDayDate,
   parsePagination,
