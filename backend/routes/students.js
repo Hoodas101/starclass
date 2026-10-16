@@ -14,7 +14,7 @@ const crypto = require('crypto');
 const db = require('../db');
 // attendanceRate 别名 calcAttendanceRate：本文件 /:id/stats 内已有同名局部变量，
 // 直接解构会同名遮蔽。到场率口径全站唯一，必须复用而非另写公式。
-const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, escapeLike, now, formatDate, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, isAdminReq, JWT_SECRET: QR_SECRET, attendanceRate: calcAttendanceRate } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, escapeLike, now, formatDate, normalizeDateInput, parsePagination, isStaffReq, isCoachReq, hasPerm, getReqUser, isAdminReq, JWT_SECRET: QR_SECRET, attendanceRate: calcAttendanceRate } = require('../utils');
 const { parseItems } = require('../utils/items');
 // 流失阈值唯一来源（settings.churn_rules）——与 followups / growth 同源，
 // 避免同一学员在不同页面被判定为「流失」的时间不一致
@@ -261,6 +261,34 @@ router.post('/', (req, res) => {
 });
 
 /**
+ * 导入时的状态中文 → 系统枚举映射。
+ *
+ * 背景（审计 2026-10-16 · P1-3）：机构台账的「状态」列写的是「正常 / 流失 / 退款 / 暂停」，
+ * 旧实现原样入库，于是同一页出现三处口径不一致 —— 列表「状态」列渲染 students.status、
+ * 看板「在册成员」统计 s.status='active'、而列表的 status 筛选按**会员卡存在性**推断，
+ * 结果「筛『正常』返回 0 条」但列表里明明有状态为「正常」的学员。
+ */
+const STUDENT_STATUS_MAP = {
+  正常: 'active', 在读: 'active', 活跃: 'active',
+  流失: 'churn', 停课: 'churn',
+  退款: 'refunded', 已退费: 'refunded', 退费: 'refunded',
+  暂停: 'paused', 休学: 'paused',
+  已结束: 'graduated', 结束: 'graduated', 毕业: 'graduated', 结业: 'graduated',
+};
+const VALID_STUDENT_STATUS = ['active', 'paused', 'refunded', 'churn', 'graduated'];
+
+/**
+ * 导入行的「文件行号」：前端 csvToObjects 会把每条提交对象挂上原始文件行号 `_fileRow`
+ *（含被跳过的标题行）。此前后端一律用 `idx + 2` 按提交数组下标推算，而必填缺失行会被
+ * 前端先丢弃 —— 缺失行夹在中间时偏移逐行累积，用户按提示回 Excel 找不到那一行。
+ * 拿不到 `_fileRow` 时退回 `idx + 2`，兼容旧调用方。
+ */
+const fileRowOf = (r, idx) => {
+  const n = Number(r && r._fileRow);
+  return Number.isFinite(n) && n > 0 ? n : idx + 2;
+};
+
+/**
  * POST /api/students/import — 批量导入成员（CSV 解析后由前端提交 JSON）
  * Body: { rows: [{ name, gender, birthday, school, grade, level, parentName, phone, remark }] }
  * 返回 { success, created, failed: [{ row, reason }], unlinked, warnings: [{ row, name, phone, reason }],
@@ -292,7 +320,7 @@ router.post('/import', (req, res) => {
       rows.forEach((r, idx) => {
         const name = String(r.name || '').trim();
         if (!name) {
-          failed.push({ row: idx + 2, reason: '姓名不能为空' });
+          failed.push({ row: fileRowOf(r, idx), reason: '姓名不能为空' });
           return;
         }
         // 手机号先规范化再校验：Excel 复制来的号码常带空格、横线、括号、全角数字或 +86 前缀，
@@ -308,7 +336,14 @@ router.post('/import', (req, res) => {
         // 命中即跳过、不重复建档 —— 前端导入弹窗已明确承诺「姓名+手机号已存在的成员会被自动跳过」，
         // 后端必须真的做，否则就是假承诺，用户会放心地重复导入。
         const dup = findDuplicateStudents({ name, phone: phoneOk ? phone : '' });
-        let hit = phoneOk ? dup.list.find(x => x.strength === 'strong') : null;
+        // 手机号相同**且姓名也相同**才算「同一人录了两遍」；只有手机号相同、姓名不同的，
+        // 是同一家庭的多个子女（兄弟姐妹）—— 多孩家庭是少儿机构的常态，旧实现把亲兄妹
+        // 直接判成「重复录入」跳过（实测 22 组共用手机号，每组只进第一人）。
+        const strongHits = phoneOk ? dup.list.filter(x => x.strength === 'strong') : [];
+        const samePerson = strongHits.find(x => String(x.name || '').trim() === name) || null;
+        let hit = samePerson;
+        // 手机号命中但姓名不同 → 放行建档，并记 warning 明示（既不静默跳过，也不静默放行）
+        const siblingOf = hit ? null : (strongHits[0] || null);
         if (!hit) {
           // 手机号没命中时按姓名兜底：软删除（DELETE /:id）会把 parent_bindings 一并删除，
           // 已删学员因此再也查不到手机号，只能靠姓名找回 —— 否则「删错了再导一次」会凭空
@@ -319,7 +354,7 @@ router.post('/import', (req, res) => {
         if (hit) {
           const by = hit.strength === 'strong' ? '手机号' : '姓名';
           skipped.push({
-            row: idx + 2,
+            row: fileRowOf(r, idx),
             name,
             phone: phoneOk ? phone : phoneRaw,
             reason: isInactive(hit.id)
@@ -332,26 +367,44 @@ router.post('/import', (req, res) => {
         // 日期校验：建档（POST /）与修改（PUT /:id）都有 isValidDateStr，唯独导入路径缺失 →
         // 2018-02-30 被 SQLite date() 静默归一为 03-02（年龄错一天）、2018/1/5 令 date() 返回 NULL
         //（按年龄分班/统计时该学员凭空消失）。与既有判据同源，命中则记入 failed 且不影响其余行。
+        // 生日 / 入会日期改走与订单导入同源的宽松解析（normalizeDateInput）：
+        // 会员表实测 115 个非空生日里 65 个是 M/D/YY（如 5/1/15）、50 个是 YYYY/M/D（如 2021/6/17），
+        // 严格 YYYY-MM-DD 校验会把它们全部判失败（140 行只进 23 行）。归一后再用 isValidDateStr
+        // 做真实性终验（挡掉 2 月 30 日这类「格式对但不存在」的日期）。
         const birthdayRaw = String(r.birthday || '').trim();
-        if (birthdayRaw && !isValidDateStr(birthdayRaw)) {
-          failed.push({ row: idx + 2, name, reason: `生日「${birthdayRaw}」不是有效日期（格式 YYYY-MM-DD）` });
-          return;
+        let birthdayVal = '';
+        if (birthdayRaw) {
+          const bd = normalizeDateInput(birthdayRaw);
+          if (!bd.ok || !isValidDateStr(bd.value)) {
+            failed.push({ row: fileRowOf(r, idx), name, reason: `生日「${birthdayRaw}」不是有效日期` });
+            return;
+          }
+          birthdayVal = bd.value;
         }
         const joinRaw = String(r.joinDate || r.join_date || '').trim();
-        if (joinRaw && !isValidDateStr(joinRaw)) {
-          failed.push({ row: idx + 2, name, reason: `入会日期「${joinRaw}」不是有效日期（格式 YYYY-MM-DD）` });
-          return;
+        let joinNorm = '';
+        if (joinRaw) {
+          const jd = normalizeDateInput(joinRaw);
+          if (!jd.ok || !isValidDateStr(jd.value)) {
+            failed.push({ row: fileRowOf(r, idx), name, reason: `入会日期「${joinRaw}」不是有效日期` });
+            return;
+          }
+          joinNorm = jd.value;
         }
 
         const id = generateId('stu_');
         const t = now();
-        const statusVal = String(r.status || '').trim() || 'active';
+        // 状态映射到系统枚举：未知值记 warning 并回落 active，绝不静默写入非法值
+        const statusInput = String(r.status || '').trim();
+        const statusVal = STUDENT_STATUS_MAP[statusInput]
+          || (VALID_STUDENT_STATUS.includes(statusInput) ? statusInput : 'active');
+        const statusUnknown = !!statusInput && !STUDENT_STATUS_MAP[statusInput] && !VALID_STUDENT_STATUS.includes(statusInput);
         // 同建档路径：join_date 为 TEXT 列，绑字符串避免落成 '...0'（前端会解析失败显示 `-`）
-        const joinDateVal = String(joinRaw ? (new Date(joinRaw + 'T12:00:00').getTime() || t) : t);
+        const joinDateVal = String(joinNorm ? (new Date(joinNorm + 'T12:00:00').getTime() || t) : t);
         db.prepare(`
           INSERT INTO students (id, name, gender, birthday, school, grade, level, remark, status, join_date, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(id, name, String(r.gender || '').trim(), birthdayRaw, String(r.school || '').trim(),
+        `).run(id, name, String(r.gender || '').trim(), birthdayVal, String(r.school || '').trim(),
           String(r.grade || '').trim(), String(r.level || '').trim(), String(r.remark || '').trim(), statusVal, joinDateVal, t, t);
 
         if (phoneOk) {
@@ -381,9 +434,26 @@ router.post('/import', (req, res) => {
         // 学员本身已建成功，一律计入成功列表（手机号问题不改变成功/失败判定）；
         // 但家长绑定到底建没建必须如实标出，供前端提示老师补录。
         okCount.push({ name, phone: phoneOk ? phone : phoneRaw, parentLinked: phoneOk });
+        const warnPhone = phoneOk ? phone : phoneRaw;
+        if (siblingOf) {
+          warnings.push({
+            row: fileRowOf(r, idx),
+            name,
+            phone: warnPhone,
+            reason: `与成员「${siblingOf.name}」使用同一家长手机号，已按同一家庭的子女分别建档`,
+          });
+        }
+        if (statusUnknown) {
+          warnings.push({
+            row: fileRowOf(r, idx),
+            name,
+            phone: warnPhone,
+            reason: `状态「${statusInput}」不在系统枚举内，已按「正常」导入，请导入后在列表里修正`,
+          });
+        }
         if (!phoneOk) {
           warnings.push({
-            row: idx + 2,
+            row: fileRowOf(r, idx),
             name,
             phone: phoneRaw,
             reason: phoneRaw
@@ -466,30 +536,15 @@ router.get('/', (req, res) => {
     // mem_status 的 SELECT 列表里可直接数值内插——该处若改用 ? 绑定，参数会
     // 排到 WHERE 之前，与 project/keyword 的入参顺序错位。此处不存在注入面。
     const { churnDays } = getChurnRules(db);
-    if (status === 'active') {
-      where += " AND EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id AND mc.status = 'active' AND mc.expires_at > strftime('%s','now')*1000)";
-    } else if (status === 'paused') {
-      where += " AND EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id AND mc.status = 'paused')";
-    } else if (status === 'refunded') {
-      where += " AND EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id AND mc.status = 'refunded')";
-    } else if (status === 'graduated') {
-      // 已结束：持有过会员卡但当前无进行中/暂停/退费卡，且近期仍有出勤（区别于流失）
-      // 「近期」窗口 = churn_rules.churnDays，与下方 churn 分支共用同一阈值，
-      // 否则同一学员可能同时满足/都不满足 graduated 与 churn 两个互补判定。
-      where += ` AND EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id)
-        AND NOT EXISTS (SELECT 1 FROM member_cards mc2 WHERE mc2.student_id = s.id
-          AND (mc2.status = 'active' AND mc2.expires_at > strftime('%s','now')*1000
-            OR mc2.status IN ('paused','refunded')))
-        AND EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', 'localtime', ? || ' days'))`;
-      params.push(`-${churnDays}`);
-    } else if (status === 'churn') {
-      where += ` AND EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id)
-        AND NOT EXISTS (SELECT 1 FROM member_cards mc2 WHERE mc2.student_id = s.id
-          AND mc2.status = 'active' AND mc2.expires_at > strftime('%s','now')*1000)
-        AND NOT EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', 'localtime', ? || ' days'))`;
-      // 必须与上面的 ? 同序入参：两个分支互斥执行，各只推 1 个参数，
-      // 且都排在 project / keyword / 日期区间参数之前
-      params.push(`-${churnDays}`);
+    // 状态筛选与列表「状态」列、看板「在册成员」统计**同源**（都读 students.status）。
+    //
+    // 旧实现按「会员卡存在性」推断（active = 持有效卡），于是同一页出现三处口径不一致：
+    // 列表列渲染 students.status、统计卡统计 s.status='active'、筛选却看卡 —— 实测
+    // 「列头筛『正常』返回 0 条」，而列表里明明有状态为「正常」的学员。
+    // 持卡状态仍由返回体的 mem_status 字段承载（详情/导出消费），不再作为列表筛选条件。
+    if (status && VALID_STUDENT_STATUS.includes(status)) {
+      where += ' AND s.status = ?';
+      params.push(status);
     }
     if (project) {
       where += ` AND EXISTS (

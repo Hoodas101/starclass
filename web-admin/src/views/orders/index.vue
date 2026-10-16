@@ -105,6 +105,7 @@
               :priority="sortPriority(col.key)"
               :sortable="col.sortable !== false"
               @sort="(e) => onSortColumn(col.key, e)"
+              @resize="(w) => onResizeColumn(col.key, w)"
             />
           </template>
           <template #default="{ row, $index }">
@@ -423,6 +424,7 @@
       title="销售记录"
       :template-columns="importColumns"
       :import-fn="doImportOrders"
+      confirm-rules="收据单号已存在的订单会被自动跳过，不会重复入账；同一收据单号分多行登记的会分别入账并自动追加 -2/-3 后缀。"
     />
   </div>
 
@@ -468,7 +470,7 @@ import TableViewBar from '@/components/TableViewBar.vue'
 import SortableHeader from '@/components/SortableHeader.vue'
 // 多维表格：排序（三态/多列/空值末尾）、列宽（canvas 实测 + 手动微调）、视图（整套快照）
 import { sortRows, toggleSort, sortStateOf, sortPriorityOf } from '@/utils/tableSort'
-import { computeAutoWidths, resolveColumnWidths } from '@/utils/tableWidth'
+import { computeAutoWidths, resolveColumnWidths, headerExtra } from '@/utils/tableWidth'
 import { allViews, makeView, userViews, VIEW_ALL, VIEW_FILTERED } from '@/utils/tableView'
 // 金额统一走全站口径（整数元 + 千分位）：裸 toLocaleString() 未固定小数位，
 // 浮点累加误差会漏出 `¥3,029.9`，与同列 `¥4,997` 两种写法并存，用户会以为金额变了。
@@ -551,9 +553,14 @@ const openImport = () => {
 const doImportOrders = async (rows) => {
   const res = await importOrders({ rows })
   if (res.success > 0) loadOrders()
+  // 补齐 skipped / warnings 映射：此前只透传 success/failed，把「N 条已存在被跳过」与
+  // 「订单已入账但未开通会员卡」两类关键信息全部丢弃 —— 重复导入时用户只看到「全失败」，
+  // 完全无法理解原因（弹窗组件本身已支持展示这两类，学员导入就在用）。
   return {
     success: res.success || 0,
     failed: (res.failed || []).map((f) => `第 ${f.row} 行：${f.reason}`),
+    skipped: (res.skippedRows || []).map((s) => `第 ${s.row} 行：${s.reason || '订单号已存在，已跳过'}`),
+    warnings: (res.warnings || []).map((w) => `第 ${w.row} 行：${w.reason}`),
   }
 }
 
@@ -575,7 +582,8 @@ const orderColumnDefs = [
   { key: 'seq', label: '序号', minWidth: 54, align: 'center', sortable: false },
   { key: 'orderNo', label: '收据单号', minWidth: 150, tooltip: true },
   { key: 'student', label: t('learner'), minWidth: 100 },
-  { key: 'phone', label: '联系方式', minWidth: 116, tooltip: true },
+  // minWidth 130：11 位手机号在 116px 下会被省略号截断
+  { key: 'phone', label: '联系方式', minWidth: 130, tooltip: true },
   { key: 'item', label: '项目', minWidth: 120, tooltip: true },
   { key: 'amount', label: '购买金额', minWidth: 100, align: 'right' },
   { key: 'salesperson', label: '签单人', minWidth: 86, align: 'center' },
@@ -609,8 +617,6 @@ const customWidths = ref({})
 const autoColumnWidth = ref(true)
 const activeViewId = ref(VIEW_FILTERED)
 
-// 表头控件占位（P2-2）：排序箭头 + 优先级角标 + 列筛选触发器常驻占位，只量文字会截断短列名
-const colExtra = (col) => (col.sortable === false ? 0 : 26) + (col.filterable ? 20 : 0)
 
 // 单元格纯文本：供列宽实测（与模板渲染保持一致，否则量出的宽度对不上）
 const cellText = (col, row) => {
@@ -651,7 +657,7 @@ const autoWidths = computed(() => {
     return out
   }
   // 必须把 extra（表头排序箭头/筛选触发器占位）注入列定义，否则 P2-2 的预留不会生效
-  const colsWithExtra = cols.map((c) => ({ ...c, extra: colExtra(c) }))
+  const colsWithExtra = cols.map((c) => ({ ...c, extra: headerExtra(c) }))
   return computeAutoWidths(colsWithExtra, sortedOrders.value, { textOf: (col, row) => cellText(col, row) })
 })
 
@@ -759,6 +765,12 @@ const removeView = (id) => {
 // 「点了就生效」：列宽微调与自适应开关即时落盘
 const resetColumnWidths = () => {
   customWidths.value = {}
+  persistViews()
+}
+
+// 表头拖拽调列宽：与「字段设置 → 列宽」写同一份存储（customWidths），松手即落盘
+const onResizeColumn = (key, w) => {
+  customWidths.value = { ...customWidths.value, [key]: w }
   persistViews()
 }
 const onWidthsChange = (w) => {

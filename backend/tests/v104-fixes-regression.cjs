@@ -5,7 +5,8 @@
  *  1) 卡种更新接口补参数校验：validDays/totalClasses 显式传入必须为正整数；切换计费模式必须补齐必填项；
  *     仅传 price 时不误伤（部分更新语义）。
  *  2) 订单批量导入真正发卡：items 补 itemId → member_cards 落地；项目名查不到时记入 warnings 而非静默成功。
- *  3) 学员导入补日期校验：2018-02-30 / 2018/1/5 等非法日期拦截，合法行照常入库。
+ *  3) 学员导入日期校验：拦截「格式可识别但日期不存在」（如 2018-02-30）；常见写法（2018/1/5、M/D/YY、
+ *     Excel 序列号）按 2026-10-16 报告 P0-1 改为**接受并归一**为 YYYY-MM-DD。
  *  4) 删除学员清理孤儿家长账号：采集顺序在删绑定之前；多孩共用账号不误删；仅 phone_ 前缀。
  *  5) 家长端取卡口径与扣课口径统一：首页不展示「active 但已过期」的卡；会员中心补 display_status/is_usable。
  *
@@ -132,10 +133,15 @@ console.log('\n\x1b[1m[3] 学员导入日期校验（P1-3）\x1b[0m');
   const bad1 = db.prepare("SELECT COUNT(*) c FROM students WHERE name = '导入日期错1'").get().c;
   const bad2 = db.prepare("SELECT COUNT(*) c FROM students WHERE name = '导入日期错2'").get().c;
   const good = db.prepare("SELECT COUNT(*) c FROM students WHERE name = '导入日期对'").get().c;
-  rec('非法日期（2018-02-30）被拦截，未入库', bad1 === 0, `cnt=${bad1}`);
-  rec('非法日期（2018/1/5）被拦截，未入库', bad2 === 0, `cnt=${bad2}`);
+  // 注意（2026-10-16 报告 P0-1）：本用例原先断言「2018/1/5 被拦截」，但机构会员表实测
+  // 115 个非空生日里 50 个是 YYYY/M/D、65 个是 M/D/YY —— 拦截它们等于 140 行只进 23 行。
+  // 现改为与订单导入同源的宽松解析：常见写法**接受并归一**，只拦截「格式可识别但日期不存在」。
+  rec('不存在的日期（2018-02-30）被拦截，未入库', bad1 === 0, `cnt=${bad1}`);
+  rec('常见写法（2018/1/5）接受并归一入库', bad2 === 1, `cnt=${bad2}`);
+  const norm = db.prepare("SELECT birthday FROM students WHERE name = '导入日期错2'").get();
+  rec('归一结果为 2018-01-05', !!norm && norm.birthday === '2018-01-05', `birthday=${norm && norm.birthday}`);
   rec('合法行照常入库', good === 1, `cnt=${good}`);
-  rec('失败行给出定位原因', d && d.failed && d.failed.length === 2, `failed=${JSON.stringify(d && d.failed)}`);
+  rec('失败行给出定位原因', d && d.failed && d.failed.length === 1 && /不是有效日期/.test(d.failed[0].reason), `failed=${JSON.stringify(d && d.failed)}`);
 }
 
 // [4] 删除学员清理孤儿家长账号

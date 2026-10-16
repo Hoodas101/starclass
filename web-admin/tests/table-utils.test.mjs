@@ -170,25 +170,34 @@ console.log('\n[6] 视图模型（增强 4.1）')
 }
 
 // ===== [7] 集成接线检查（源码级）=====
-// 教训：工具层单测全绿，但视图里忘了把 colExtra 注入列定义 → P2-2 静默失效。
+// 教训：工具层单测全绿，但视图里忘了把表头占位注入列定义 → P2-2 静默失效。
 // 这类「接线漏了」的缺陷单测覆盖不到，用源码断言兜一层。
 console.log('\n[7] 集成接线检查')
 {
   const fs = await import('node:fs')
-  const views = ['../src/views/students/index.vue', '../src/views/orders/index.vue']
-  for (const v of views) {
-    const p = new URL(v, import.meta.url)
-    const src = fs.readFileSync(p, 'utf-8')
-    rec(`${v.split('/').slice(-2, -1)[0]}: computeAutoWidths 注入 extra（P2-2 生效）`,
-      /extra:\s*colExtra\(/.test(src), '未找到 extra: colExtra(...) 注入')
-    rec(`${v.split('/').slice(-2, -1)[0]}: 列宽绑定走 colWidths（非 col.width）`,
-      /:width="colWidths\[/.test(src) && !/:width="col\./.test(src), '仍在使用 col.width')
-    // 只断言 el-table-column 标签内没有 :sortable（SortableHeader 自己也有同名 prop，不能误伤）
-    rec(`${v.split('/').slice(-2, -1)[0]}: el-table-column 未挂自带 :sortable（避免双行表头）`,
-      !/<el-table-column[^>]*:sortable/s.test(src), 'el-table-column 上存在 :sortable')
-    rec(`${v.split('/').slice(-2, -1)[0]}: 已接入 TableViewBar 与 SortableHeader`,
-      /TableViewBar/.test(src) && /SortableHeader/.test(src), '组件未接入')
+  // 内联实现的两页 + 走 useTableKit 的三页
+  const inlineViews = ['students', 'orders']
+  const kitViews = ['trial', 'finance', 'growth']
+  for (const name of inlineViews) {
+    const src = fs.readFileSync(new URL(`../src/views/${name}/index.vue`, import.meta.url), 'utf-8')
+    rec(`${name}: 表头占位注入列定义（P2-2 生效）`, /extra:\s*headerExtra\(/.test(src), '未找到 extra: headerExtra(...)')
+    rec(`${name}: 列宽绑定走 colWidths（非 col.width）`, /:width="colWidths\[/.test(src) && !/:width="col\./.test(src), '仍在使用 col.width')
+    rec(`${name}: el-table-column 未挂自带 :sortable`, !/<el-table-column[^>]*:sortable/.test(src), 'el-table-column 上存在 :sortable')
+    rec(`${name}: 已接入 TableViewBar 与 SortableHeader`, /TableViewBar/.test(src) && /SortableHeader/.test(src), '组件未接入')
   }
+  for (const name of kitViews) {
+    const src = fs.readFileSync(new URL(`../src/views/${name}/index.vue`, import.meta.url), 'utf-8')
+    rec(`${name}: 走 useTableKit 且传 extraOf（P2-2 生效）`, /useTableKit\(/.test(src) && /extraOf:\s*headerExtra/.test(src), '未传 extraOf: headerExtra')
+    rec(`${name}: 列改数据驱动（v-for visibleDefs）`, /v-for="col in \w*[Vv]isible\w*"/.test(src), '仍为硬编码列')
+    // 只认「字面量 label="xxx"」；:label="col.label" 是绑定，不算硬编码
+    rec(`${name}: 无残留硬编码列`, !/<el-table-column[^>]*(?<!:)label="/.test(src), '仍有硬编码 label 列')
+    rec(`${name}: 已接入 TableViewBar 与 SortableHeader`, /TableViewBar/.test(src) && /SortableHeader/.test(src), '组件未接入')
+  }
+  // 表头占位口径唯一实现
+  const tw = fs.readFileSync(new URL('../src/utils/tableWidth.js', import.meta.url), 'utf-8')
+  rec('headerExtra 唯一实现在 utils/tableWidth.js', /export const headerExtra/.test(tw), '未找到实现')
+  const utk = fs.readFileSync(new URL('../src/composables/useTableKit.js', import.meta.url), 'utf-8')
+  rec('useTableKit 不再重复定义 headerExtra', !/export const headerExtra/.test(utk), '仍重复定义')
 }
 
 console.log(`\n结果汇总：PASS ${pass}  FAIL ${fail}`)

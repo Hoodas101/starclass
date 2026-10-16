@@ -13,8 +13,9 @@
           :prefix-icon="Search"
           clearable
           style="width: 220px"
-          @change="onSearch"
+          @input="onSearchDebounced"
           @clear="onSearch"
+          @keyup.enter="onSearch"
         />
       </div>
       <div class="toolbar-right">
@@ -125,6 +126,7 @@
               :priority="sortPriority(col.key)"
               :sortable="col.sortable !== false"
               @sort="(e) => onSortColumn(col.key, e)"
+              @resize="(w) => onResizeColumn(col.key, w)"
             />
           </template>
           <template #default="{ row, $index }">
@@ -576,6 +578,7 @@
       title="成员"
       :template-columns="importColumns"
       :import-fn="doImportStudents"
+      confirm-rules="姓名与家长手机号都相同的成员会被自动跳过，不会重复建档；同一家长手机号下的不同子女（兄弟姐妹）会分别建档。"
     />
 
     <!-- 导出确认弹窗 -->
@@ -604,7 +607,7 @@ import TableViewBar from '@/components/TableViewBar.vue'
 import SortableHeader from '@/components/SortableHeader.vue'
 // 多维表格：排序（三态/多列/空值末尾）、列宽（canvas 实测 + 手动微调）、视图（整套快照）
 import { sortRows, toggleSort, sortStateOf, sortPriorityOf } from '@/utils/tableSort'
-import { computeAutoWidths, resolveColumnWidths } from '@/utils/tableWidth'
+import { computeAutoWidths, resolveColumnWidths, headerExtra } from '@/utils/tableWidth'
 import { allViews, makeView, userViews, VIEW_ALL, VIEW_FILTERED } from '@/utils/tableView'
 import ImportCsvDialog from '@/components/ImportCsvDialog.vue'
 import { exportXlsx } from '@/utils/xlsx'
@@ -634,6 +637,14 @@ const syncUrl = () => {
 // 数据状态
 // ============================================
 const searchKeyword = ref('')
+
+// 搜索实时化（P2-11）：此前用 @change，只在回车/失焦时才触发，输入过程列表不动，
+// 新手会以为「搜索坏了」。改为 300ms 防抖实时搜索；回车与清空仍立即执行。
+let searchTimer = null
+const onSearchDebounced = () => {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => onSearch(), 300)
+}
 const filterStatus = ref('')
 const filterProject = ref('')
 const cardTypeOptions = ref([])
@@ -672,7 +683,8 @@ const studentColumnDefs = [
   // 因此只固定视觉锚点「姓名」，横向滚动时始终能定位到是哪一行。
   { key: 'info', label: '姓名', minWidth: 100, tooltip: true, fixed: 'left' },
   { key: 'memberNo', label: t('learner') + '编号', minWidth: 90, align: 'left' },
-  { key: 'phone', label: '联系方式', minWidth: 110, tooltip: true },
+  // minWidth 130：11 位手机号在 110px 下会被省略号截断（无 tooltip 时看不到全号）
+  { key: 'phone', label: '联系方式', minWidth: 130, tooltip: true },
   { key: 'age', label: '年龄', minWidth: 56, align: 'right' },
   { key: 'birthday', label: '出生日期', minWidth: 100, align: 'left' },
   { key: 'level', label: '训练级别', minWidth: 80, align: 'left' },
@@ -707,7 +719,9 @@ const projectFilters = computed(() => cardTypeOptions.value
 const DEFAULT_COLUMN_SETTINGS = {
   seq: true, info: true, memberNo: false, phone: true, age: true, level: true, project: true, remaining: true,
   expires: true, startDate: false, latestPurchase: false, purchaseCount: true,
-  spent: false, join: true, lastActivity: true, status: true, birthday: false,
+  spent: false, join: true, lastActivity: true, status: true,
+  // 出生日期默认显示：生日是少儿机构分班 / 年龄核算的依据，藏在「隐藏字段」里不合用
+  birthday: true,
 }
 const columnSettings = ref({ ...DEFAULT_COLUMN_SETTINGS })
 const colDialogRef = ref(null)
@@ -718,9 +732,6 @@ const customWidths = ref({})          // { [key]: px } 手动列宽
 const autoColumnWidth = ref(true)     // 列宽自适应开关
 const activeViewId = ref(VIEW_FILTERED)
 
-// 表头控件占位（P2-2）：排序箭头 + 优先级角标 + 列筛选触发器在表头里是常驻占位的，
-// 自适应列宽若只量文字，会把「序号」这类短列名截断（实测 th 50px 扣内边距后只剩 15px）
-const colExtra = (col) => (col.sortable === false ? 0 : 26) + (col.filterable ? 20 : 0)
 
 // 按用户设置的顺序渲染列（未保存顺序时保持默认定义顺序）
 const visibleCols = computed(() => {
@@ -745,7 +756,7 @@ const autoWidths = computed(() => {
     return out
   }
   // 必须把 extra（表头排序箭头/筛选触发器占位）注入列定义，否则 P2-2 的预留不会生效
-  const colsWithExtra = cols.map((c) => ({ ...c, extra: colExtra(c) }))
+  const colsWithExtra = cols.map((c) => ({ ...c, extra: headerExtra(c) }))
   return computeAutoWidths(colsWithExtra, filteredStudents.value, { textOf: (col, row) => cellText(col, row) })
 })
 
@@ -910,6 +921,12 @@ const removeView = (id) => {
 // 列宽一键复位（逐列手动微调的反操作）
 const resetColumnWidths = () => {
   customWidths.value = {}
+  persistViews()
+}
+
+// 表头拖拽调列宽：与「字段设置 → 列宽」写同一份存储（customWidths），松手即落盘
+const onResizeColumn = (key, w) => {
+  customWidths.value = { ...customWidths.value, [key]: w }
   persistViews()
 }
 

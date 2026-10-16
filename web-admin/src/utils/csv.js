@@ -107,10 +107,13 @@ export const csvToObjects = (rows, columns) => {
     })
     const required = columns.filter((c) => c.required)
     const missing = required.filter((c) => !String(obj[c.key] ?? '').trim())
+    // 原始文件行号（含被跳过的标题行）：随行提交给后端，让失败提示的行号 = 用户在 Excel 里看到的行号。
+    // 后端原先按「提交数组下标」推算，而必填缺失行会在这里被丢弃 —— 缺失行夹在中间时偏移逐行累积。
+    const fileRow = headerRowIndex + ri + 2
     if (missing.length) {
-      // 行号按原始文件行计算（含被跳过的标题行），便于用户回到表格里定位
-      errors.push(`第 ${headerRowIndex + ri + 2} 行：缺少必填列「${missing.map((m) => m.label).join('、')}」`)
+      errors.push(`第 ${fileRow} 行：缺少必填列「${missing.map((m) => m.label).join('、')}」`)
     } else {
+      obj._fileRow = fileRow
       objects.push(obj)
     }
   })

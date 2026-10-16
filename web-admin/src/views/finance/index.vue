@@ -49,71 +49,64 @@
       </div>
     </div>
 
-    <!-- 月度报表 -->
-    <div v-if="activeMode === 'monthly'" class="card table-container">
-      <ListErrorState v-if="!loadingMonthly && errorMonthly" :error="errorMonthly" @retry="loadMonthly" />
-      <el-table v-else :data="monthlyData" v-loading="loadingMonthly" size="small">
-        <el-table-column label="月份" prop="month" min-width="80" />
-        <el-table-column label="收入" min-width="120">
-          <template #default="{ row }">¥{{ fmt(row.revenue) }}</template>
+    <!-- 视图栏：报表三张表共用一套列配置（按 activeMode 切换列定义） -->
+    <div class="finance-viewbar">
+      <TableViewBar
+        :views="viewList"
+        :active-id="activeViewId"
+        @select="(id) => applyView(id)"
+        @create="(name) => createView(name)"
+        @rename="renameView"
+        @remove="removeView"
+      />
+      <ColumnSettingsDialog
+        title="报表字段设置"
+        :columns="financeDefs"
+        v-model:settings="financeSettings"
+        :defaults="FINANCE_DEFAULTS"
+        :widths="customWidths"
+        :auto-width="autoColumnWidth"
+        @update:widths="onWidthsChange"
+        @update:auto-width="onAutoWidthChange"
+        @reset-widths="resetWidths"
+      />
+    </div>
+
+    <!-- 明细表：三张报表同构（文本 + 金额），列由 financeDefs 驱动，接入排序 / 列宽 / 视图 -->
+    <div class="card table-container">
+      <ListErrorState v-if="!activeLoading && activeError" :error="activeError" @retry="reloadActive" />
+      <el-table v-else :data="financeSorted" v-loading="activeLoading" size="small">
+        <el-table-column
+          v-for="col in financeVisible"
+          :key="col.key"
+          :label="col.label"
+          :width="financeWidths[col.key] && financeWidths[col.key].width"
+          :min-width="financeWidths[col.key] && financeWidths[col.key].minWidth"
+          :align="col.align"
+        >
+          <template #header>
+            <SortableHeader
+              :label="col.label"
+              :state="sortState(col.key)"
+              :priority="sortPriority(col.key)"
+              @sort="(e) => onSort(col.key, e)"
+              @resize="(w) => onResize(col.key, w)"
+            />
+          </template>
+          <template #default="{ row }">
+            <strong v-if="col.strong">¥{{ fmt(row[col.key]) }}</strong>
+            <span
+              v-else-if="col.kind === 'signed'"
+              :class="{ positive: row[col.key] > 0, negative: row[col.key] < 0 }"
+            >¥{{ fmt(row[col.key]) }}</span>
+            <template v-else-if="col.kind === 'money'">¥{{ fmt(row[col.key]) }}</template>
+            <template v-else>{{ row[col.key] }}</template>
+          </template>
         </el-table-column>
-        <el-table-column label="优惠" min-width="100">
-          <template #default="{ row }">¥{{ fmt(row.discount) }}</template>
-        </el-table-column>
-        <el-table-column label="退款" min-width="100">
-          <template #default="{ row }">¥{{ fmt(row.refunded) }}</template>
-        </el-table-column>
-        <el-table-column label="净收入" min-width="120">
-          <template #default="{ row }"><strong>¥{{ fmt(row.netRevenue) }}</strong></template>
-        </el-table-column>
-        <el-table-column label="教师支出" min-width="120">
-          <template #default="{ row }">¥{{ fmt(row.coachPay) }}</template>
-        </el-table-column>
-        <el-table-column label="利润" min-width="120">
-          <template #default="{ row }"><span :class="{ positive: row.profit > 0, negative: row.profit < 0 }">¥{{ fmt(row.profit) }}</span></template>
-        </el-table-column>
-        <el-table-column label="订单数" prop="orderCount" min-width="80" />
       </el-table>
-      <div v-if="monthlyTotals" class="totals-row">
+      <div v-if="activeMode === 'monthly' && monthlyTotals" class="totals-row">
         <span>全年合计：收入 ¥{{ fmt(monthlyTotals.revenue) }} | 净收入 ¥{{ fmt(monthlyTotals.netRevenue) }} | 利润 ¥{{ fmt(monthlyTotals.profit) }} | 订单 {{ monthlyTotals.orderCount }} 笔</span>
       </div>
-    </div>
-
-    <!-- 按产品统计 -->
-    <div v-if="activeMode === 'product'" class="card table-container">
-      <ListErrorState v-if="!loadingProduct && errorProduct" :error="errorProduct" @retry="loadProduct" />
-      <el-table v-else :data="productList" v-loading="loadingProduct" size="small">
-        <el-table-column label="产品名称" prop="name" min-width="150" />
-        <el-table-column label="销售数量" prop="count" min-width="100" />
-        <el-table-column label="收入" min-width="120">
-          <template #default="{ row }">¥{{ fmt(row.revenue) }}</template>
-        </el-table-column>
-        <el-table-column label="退款" min-width="100">
-          <template #default="{ row }">¥{{ fmt(row.refunded) }}</template>
-        </el-table-column>
-        <el-table-column label="净收入" min-width="120">
-          <template #default="{ row }"><strong>¥{{ fmt(row.net) }}</strong></template>
-        </el-table-column>
-      </el-table>
-    </div>
-
-    <!-- 按销售统计 -->
-    <div v-if="activeMode === 'sales'" class="card table-container">
-      <ListErrorState v-if="!loadingSales && errorSales" :error="errorSales" @retry="loadSales" />
-      <el-table v-else :data="salesList" v-loading="loadingSales" size="small">
-        <el-table-column label="销售" prop="salesperson" min-width="100" />
-        <el-table-column label="订单数" prop="orderCount" min-width="100" />
-        <el-table-column label="总收入" min-width="120">
-          <template #default="{ row }">¥{{ fmt(row.revenue) }}</template>
-        </el-table-column>
-        <el-table-column label="退款" min-width="100">
-          <template #default="{ row }">¥{{ fmt(row.refunded) }}</template>
-        </el-table-column>
-        <el-table-column label="净收入" min-width="120">
-          <template #default="{ row }"><strong>¥{{ fmt(row.net) }}</strong></template>
-        </el-table-column>
-        <el-table-column label="VIP订单" prop="vipCount" min-width="80" />
-      </el-table>
     </div>
   </div>
 </template>
@@ -123,6 +116,10 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { getFinanceSummary, getFinanceMonthly, getFinanceByProduct, getFinanceBySales } from '@/api/modules'
 import { formatMoney } from '@/utils/format'
 import PageHeader from '@/components/PageHeader.vue'
+import SortableHeader from '@/components/SortableHeader.vue'
+import TableViewBar from '@/components/TableViewBar.vue'
+import ColumnSettingsDialog from '@/components/ColumnSettingsDialog.vue'
+import { useTableKit, headerExtra } from '@/composables/useTableKit'
 
 defineProps({ embedded: Boolean })
 
@@ -154,6 +151,85 @@ const loadingSales = ref(false)
 function fmt(n) {
   return formatMoney(n, { symbol: false, fallback: '0' })
 }
+
+// ── 多维表格：三张报表同构（文本 + 金额），共用一套列配置 ──
+// kind 驱动单元格渲染（money 带 ¥、signed 带涨跌色、text 原样、strong 加粗）
+const FINANCE_DEFS = {
+  monthly: [
+    { key: 'month', label: '月份', minWidth: 80, kind: 'text' },
+    { key: 'revenue', label: '收入', minWidth: 120, kind: 'money' },
+    { key: 'discount', label: '优惠', minWidth: 100, kind: 'money' },
+    { key: 'refunded', label: '退款', minWidth: 100, kind: 'money' },
+    { key: 'netRevenue', label: '净收入', minWidth: 120, kind: 'money', strong: true },
+    { key: 'coachPay', label: '教师支出', minWidth: 120, kind: 'money' },
+    { key: 'profit', label: '利润', minWidth: 120, kind: 'signed' },
+    { key: 'orderCount', label: '订单数', minWidth: 80, kind: 'text' },
+  ],
+  product: [
+    { key: 'name', label: '产品名称', minWidth: 150, kind: 'text' },
+    { key: 'count', label: '销售数量', minWidth: 100, kind: 'text' },
+    { key: 'revenue', label: '收入', minWidth: 120, kind: 'money' },
+    { key: 'refunded', label: '退款', minWidth: 100, kind: 'money' },
+    { key: 'net', label: '净收入', minWidth: 120, kind: 'money', strong: true },
+  ],
+  sales: [
+    { key: 'salesperson', label: '销售', minWidth: 100, kind: 'text' },
+    { key: 'orderCount', label: '订单数', minWidth: 100, kind: 'text' },
+    { key: 'revenue', label: '总收入', minWidth: 120, kind: 'money' },
+    { key: 'refunded', label: '退款', minWidth: 100, kind: 'money' },
+    { key: 'net', label: '净收入', minWidth: 120, kind: 'money', strong: true },
+    { key: 'vipCount', label: 'VIP订单', minWidth: 80, kind: 'text' },
+  ],
+}
+const FINANCE_DEFAULTS = Object.fromEntries(
+  Object.values(FINANCE_DEFS).flat().map((c) => [c.key, true])
+)
+
+const financeDefs = computed(() => FINANCE_DEFS[activeMode.value] || [])
+const financeRows = computed(() => ({
+  monthly: monthlyData.value,
+  product: productList.value,
+  sales: salesList.value,
+}[activeMode.value] || []))
+
+// 当前模式对应的加载/错误/重试（三张表各自一套，切模式时跟随）
+const activeLoading = computed(() => ({
+  monthly: loadingMonthly.value, product: loadingProduct.value, sales: loadingSales.value,
+}[activeMode.value] || false))
+const activeError = computed(() => ({
+  monthly: errorMonthly.value, product: errorProduct.value, sales: errorSales.value,
+}[activeMode.value] || ''))
+const reloadActive = () => ({
+  monthly: loadMonthly, product: loadProduct, sales: loadSales,
+}[activeMode.value] || loadMonthly)()
+
+const financeText = (col, row) => {
+  const v = row[col.key]
+  if (col.kind === 'money' || col.kind === 'signed') return `¥${fmt(v)}`
+  return v == null ? '' : String(v)
+}
+const financeSortValue = (key, row) => {
+  const col = financeDefs.value.find((c) => c.key === key)
+  const v = row[key]
+  if (col && (col.kind === 'money' || col.kind === 'signed')) return Number(v || 0)
+  return v
+}
+
+// 解构出顶层 ref：模板里可直接用（顶层 ref 会自动解包）
+const {
+  settings: financeSettings, visibleDefs: financeVisible, colWidths: financeWidths,
+  sortedRows: financeSorted, sortState, sortPriority, onSort, onResize,
+  customWidths, autoColumnWidth, onWidthsChange, onAutoWidthChange, resetWidths,
+  viewList, activeViewId, applyView, createView, renameView, removeView, load: loadTableKit,
+} = useTableKit({
+  settingsKey: 'finance_columns',
+  defs: () => financeDefs.value,
+  rows: financeRows,
+  textOf: financeText,
+  getValue: financeSortValue,
+  defaults: FINANCE_DEFAULTS,
+  extraOf: headerExtra,
+})
 
 function getDateRange() {
   const now = new Date()
@@ -252,7 +328,10 @@ function loadAll() {
   loadSales()
 }
 
-onMounted(() => loadAll())
+onMounted(() => {
+  loadTableKit()
+  loadAll()
+})
 </script>
 
 <style lang="scss" scoped>
@@ -301,4 +380,12 @@ onMounted(() => loadAll())
 }
 .positive { color: var(--t-success-text); }
 .negative { color: var(--t-danger-text); }
+
+.finance-viewbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
 </style>

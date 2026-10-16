@@ -21,6 +21,29 @@
       </div>
     </div>
 
+    <!-- 视图栏 + 字段设置：七个区块共用一套表格配置（按当前区块切换列定义） -->
+    <div class="growth-viewbar">
+      <TableViewBar
+        :views="growthViews"
+        :active-id="growthActiveView"
+        @select="(id) => growthApplyView(id)"
+        @create="(name) => growthCreateView(name)"
+        @rename="growthRenameView"
+        @remove="growthRemoveView"
+      />
+      <ColumnSettingsDialog
+        title="增长字段设置"
+        :columns="growthDefs"
+        v-model:settings="growthSettings"
+        :defaults="GROWTH_DEFAULTS"
+        :widths="growthCustomWidths"
+        :auto-width="growthAutoWidth"
+        @update:widths="growthOnWidths"
+        @update:auto-width="growthOnAutoWidth"
+        @reset-widths="growthResetWidths"
+      />
+    </div>
+
     <!-- 漏斗概览 -->
     <div class="funnel-cards">
       <div class="funnel-card" v-for="s in funnel.stages" :key="s.stage">
@@ -67,35 +90,40 @@
             </el-select>
           </div>
           <ListErrorState v-if="!leadLoading && errorLeads" :error="errorLeads" @retry="loadLeads" />
-          <el-table v-else :data="leads" v-loading="leadLoading" @row-click="openLeadDialog" row-class-name="clickable-row" size="small">
-            <el-table-column label="姓名" min-width="120">
+          <el-table v-else :data="growthSorted" v-loading="leadLoading" @row-click="openLeadDialog" row-class-name="clickable-row" size="small">
+            <el-table-column
+              v-for="col in growthVisible"
+              :key="col.key"
+              :label="col.label"
+              :width="growthWidths[col.key] && growthWidths[col.key].width"
+              :min-width="growthWidths[col.key] && growthWidths[col.key].minWidth"
+              :fixed="col.fixed"
+              :show-overflow-tooltip="col.tooltip"
+            >
+              <template #header>
+                <SortableHeader
+                  :label="col.label"
+                  :state="growthSortState(col.key)"
+                  :priority="growthSortPriority(col.key)"
+                  :sortable="col.sortable !== false"
+                  @sort="(e) => growthOnSort(col.key, e)"
+                  @resize="(w) => growthOnResize(col.key, w)"
+                />
+              </template>
               <template #default="{ row }">
-                <div class="lead-name-cell">
+                <div v-if="col.render === 'leadName'" class="lead-name-cell">
                   <EntityAvatar :name="row.name" size="sm" :tone="row.stage === 'deal' ? 'success' : row.stage === 'lost' ? 'neutral' : 'accent'" />
                   <span class="lead-name">{{ row.name }}</span>
                   <el-tag v-if="row.source === 'referral'" size="small" effect="light" type="warning" style="margin-left: 2px">转介绍</el-tag>
                 </div>
+                <StatusDot v-else-if="col.render === 'stage'" :tone="stageDotTone(row.stage)" :label="row.stageText" subtle />
+                <el-rate v-else-if="col.render === 'intent'" :model-value="row.intent_level" disabled :colors="['var(--t-warning)', 'var(--t-warning)', 'var(--t-warning)']" />
+                <template v-else-if="col.render === 'source'">{{ sourceText(row.source) }}</template>
+                <!-- next_follow_at 是未来时间，必须用 relativeDue：relativeTime 只处理过去
+                     （diff = now - ts），未来时间会落进 diff < 1 分钟的分支而恒显示「刚刚」。 -->
+                <template v-else-if="col.render === 'due'">{{ row.next_follow_at ? relativeDue(row.next_follow_at) : '—' }}</template>
+                <template v-else>{{ row[col.key] }}</template>
               </template>
-            </el-table-column>
-            <el-table-column label="电话" min-width="130" prop="phone" />
-            <el-table-column label="阶段" min-width="100">
-              <template #default="{ row }">
-                <StatusDot :tone="stageDotTone(row.stage)" :label="row.stageText" subtle />
-              </template>
-            </el-table-column>
-            <el-table-column label="意向度" min-width="140">
-              <template #default="{ row }">
-                <el-rate :model-value="row.intent_level" disabled :colors="['var(--t-warning)', 'var(--t-warning)', 'var(--t-warning)']" />
-              </template>
-            </el-table-column>
-            <el-table-column label="来源" min-width="100">
-              <template #default="{ row }">{{ sourceText(row.source) }}</template>
-            </el-table-column>
-            <el-table-column label="跟进人" min-width="100" prop="salesperson" />
-            <el-table-column label="下次跟进" min-width="130">
-              <!-- next_follow_at 是未来时间，必须用 relativeDue：relativeTime 只处理过去
-                   （diff = now - ts），未来时间会落进 diff < 1 分钟的分支而恒显示「刚刚」。 -->
-              <template #default="{ row }">{{ row.next_follow_at ? relativeDue(row.next_follow_at) : '—' }}</template>
             </el-table-column>
           </el-table>
           <div class="pagination-wrap">
@@ -160,30 +188,40 @@
             <el-button type="primary" :icon="Plus" @click="openFuDialog()">新建跟进</el-button>
           </div>
           <ListErrorState v-if="!fuLoading && errorFU" :error="errorFU" @retry="loadFollowUps" />
-          <el-table v-else :data="followUps" v-loading="fuLoading" row-class-name="clickable-row" @row-click="onFollowupTap" size="small">
-            <el-table-column label="跟进对象" min-width="150">
-              <template #default="{ row }">
-                <span class="lead-name">{{ row.target_name || '—' }}</span>
-                <el-tag v-if="row.target_type === 'lead'" size="small" effect="plain" type="warning" style="margin-left: 6px">线索</el-tag>
-                <el-tag v-else size="small" effect="plain" type="info" style="margin-left: 6px">成员</el-tag>
+          <el-table v-else :data="growthSorted" v-loading="fuLoading" row-class-name="clickable-row" @row-click="onFollowupTap" size="small">
+            <el-table-column
+              v-for="col in growthVisible"
+              :key="col.key"
+              :label="col.label"
+              :width="growthWidths[col.key] && growthWidths[col.key].width"
+              :min-width="growthWidths[col.key] && growthWidths[col.key].minWidth"
+              :show-overflow-tooltip="col.tooltip"
+            >
+              <template #header>
+                <SortableHeader
+                  :label="col.label"
+                  :state="growthSortState(col.key)"
+                  :priority="growthSortPriority(col.key)"
+                  :sortable="col.sortable !== false"
+                  @sort="(e) => growthOnSort(col.key, e)"
+                  @resize="(w) => growthOnResize(col.key, w)"
+                />
               </template>
-            </el-table-column>
-            <el-table-column label="电话" min-width="130" prop="phone" />
-            <el-table-column label="类型" min-width="100">
               <template #default="{ row }">
-                <el-tag :type="fuTagType(row.task_type)" size="small" effect="light">{{ row.taskTypeText }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="跟进原因" min-width="220" show-overflow-tooltip prop="reason" />
-            <el-table-column label="负责人" min-width="100" prop="owner" />
-            <el-table-column label="到期时间" min-width="130">
-              <template #default="{ row }">
-                <span :class="{ 'fu-overdue': row.status === 'pending' && Number(row.due_at) < Date.now() }">{{ relativeDue(row.due_at) }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" min-width="90">
-              <template #default="{ row }">
-                <StatusDot :tone="row.status === 'pending' ? 'warning' : row.status === 'done' ? 'success' : 'neutral'" :label="row.status === 'pending' ? '待办' : row.status === 'done' ? '已完成' : '已取消'" subtle />
+                <template v-if="col.render === 'target'">
+                  <span class="lead-name">{{ row.target_name || '—' }}</span>
+                  <el-tag v-if="row.target_type === 'lead'" size="small" effect="plain" type="warning" style="margin-left: 6px">线索</el-tag>
+                  <el-tag v-else size="small" effect="plain" type="info" style="margin-left: 6px">成员</el-tag>
+                </template>
+                <el-tag v-else-if="col.render === 'taskType'" :type="fuTagType(row.task_type)" size="small" effect="light">{{ row.taskTypeText }}</el-tag>
+                <span v-else-if="col.render === 'fuDue'" :class="{ 'fu-overdue': row.status === 'pending' && Number(row.due_at) < Date.now() }">{{ relativeDue(row.due_at) }}</span>
+                <StatusDot
+                  v-else-if="col.render === 'fuStatus'"
+                  :tone="row.status === 'pending' ? 'warning' : row.status === 'done' ? 'success' : 'neutral'"
+                  :label="row.status === 'pending' ? '待办' : row.status === 'done' ? '已完成' : '已取消'"
+                  subtle
+                />
+                <template v-else>{{ row[col.key] }}</template>
               </template>
             </el-table-column>
           </el-table>
@@ -195,40 +233,48 @@
 
       <template v-else-if="activeSection === 'renewal'">
         <div class="card table-container">
-          <el-table :data="renewalList" v-loading="renewalLoading" @row-click="(row) => goStudents(row.studentId)" row-class-name="clickable-row" size="small">
-            <el-table-column label="成员" min-width="140" prop="studentName" />
-            <el-table-column label="卡种" min-width="110" prop="cardType" />
-            <el-table-column label="到期时间" min-width="150">
-              <template #default="{ row }">{{ formatDate(row.expiresAt) }}</template>
-            </el-table-column>
-            <el-table-column label="剩余天数" min-width="100">
+          <el-table :data="growthSorted" v-loading="renewalLoading" @row-click="(row) => goStudents(row.studentId)" row-class-name="clickable-row" size="small">
+            <el-table-column
+              v-for="col in growthVisible"
+              :key="col.key"
+              :label="col.label"
+              :width="growthWidths[col.key] && growthWidths[col.key].width"
+              :min-width="growthWidths[col.key] && growthWidths[col.key].minWidth"
+              :fixed="col.fixed"
+            >
+              <template #header>
+                <SortableHeader
+                  :label="col.label"
+                  :state="growthSortState(col.key)"
+                  :priority="growthSortPriority(col.key)"
+                  :sortable="col.sortable !== false"
+                  @sort="(e) => growthOnSort(col.key, e)"
+                  @resize="(w) => growthOnResize(col.key, w)"
+                />
+              </template>
               <template #default="{ row }">
+                <template v-if="col.render === 'date'">{{ formatDate(row[col.key]) }}</template>
                 <StatusDot
+                  v-else-if="col.render === 'daysLeft'"
                   :tone="row.expired ? 'error' : row.daysLeft <= 7 ? 'warning' : 'neutral'"
                   :label="row.expired ? '已过期' : row.daysLeft + ' 天'"
                   subtle
                 />
-              </template>
-            </el-table-column>
-            <el-table-column label="近30天出勤" min-width="110" prop="recentAttendance" />
-            <el-table-column label="跟进状态" min-width="110">
-              <template #default="{ row }">
                 <StatusDot
+                  v-else-if="col.render === 'followUp'"
                   :tone="row.followUp ? 'success' : 'neutral'"
                   :label="row.followUp ? '跟进中' : '未跟进'"
                   subtle
                 />
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" min-width="120" fixed="right">
-              <template #default="{ row }">
                 <el-button
+                  v-else-if="col.render === 'renewAction'"
                   link
                   type="primary"
                   size="small"
                   :disabled="!!row.followUp"
                   @click.stop="quickFollowUp(row, 'renewal')"
                 >{{ row.followUp ? '已建' : '建跟进' }}</el-button>
+                <template v-else>{{ row[col.key] }}</template>
               </template>
             </el-table-column>
           </el-table>
@@ -238,40 +284,48 @@
 
       <template v-else-if="activeSection === 'lowclasses'">
         <div class="card table-container">
-          <el-table :data="lowClassList" v-loading="lowClassLoading" @row-click="(row) => goStudents(row.student_id)" row-class-name="clickable-row" size="small">
-            <el-table-column label="成员" min-width="140" prop="student_name" />
-            <el-table-column label="卡种" min-width="120" prop="card_type_name" />
-            <el-table-column label="剩余课时" min-width="100">
+          <el-table :data="growthSorted" v-loading="lowClassLoading" @row-click="(row) => goStudents(row.student_id)" row-class-name="clickable-row" size="small">
+            <el-table-column
+              v-for="col in growthVisible"
+              :key="col.key"
+              :label="col.label"
+              :width="growthWidths[col.key] && growthWidths[col.key].width"
+              :min-width="growthWidths[col.key] && growthWidths[col.key].minWidth"
+              :fixed="col.fixed"
+            >
+              <template #header>
+                <SortableHeader
+                  :label="col.label"
+                  :state="growthSortState(col.key)"
+                  :priority="growthSortPriority(col.key)"
+                  :sortable="col.sortable !== false"
+                  @sort="(e) => growthOnSort(col.key, e)"
+                  @resize="(w) => growthOnResize(col.key, w)"
+                />
+              </template>
               <template #default="{ row }">
                 <StatusDot
+                  v-if="col.render === 'lowRemaining'"
                   :tone="row.remaining_classes <= 2 ? 'error' : 'warning'"
                   :label="row.remaining_classes + ' 节'"
                   subtle
                 />
-              </template>
-            </el-table-column>
-            <el-table-column label="到期时间" min-width="150">
-              <template #default="{ row }">{{ formatDate(row.expires_at) }}</template>
-            </el-table-column>
-            <el-table-column label="近30天出勤" min-width="110" prop="recent_count" />
-            <el-table-column label="跟进状态" min-width="110">
-              <template #default="{ row }">
+                <template v-else-if="col.render === 'date'">{{ formatDate(row[col.key]) }}</template>
                 <StatusDot
+                  v-else-if="col.render === 'followUp'"
                   :tone="row.followUp ? 'success' : 'neutral'"
                   :label="row.followUp ? '跟进中' : '未跟进'"
                   subtle
                 />
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" min-width="120" fixed="right">
-              <template #default="{ row }">
                 <el-button
+                  v-else-if="col.render === 'lowAction'"
                   link
                   type="primary"
                   size="small"
                   :disabled="!!row.followUp"
                   @click.stop="quickFollowUp(row, 'low_class')"
                 >{{ row.followUp ? '已建' : '建跟进' }}</el-button>
+                <template v-else>{{ row[col.key] }}</template>
               </template>
             </el-table-column>
           </el-table>
@@ -281,22 +335,29 @@
 
       <template v-else-if="activeSection === 'churn'">
         <div class="card table-container">
-          <el-table :data="churnList" v-loading="churnLoading" @row-click="(row) => goStudents(row.studentId)" row-class-name="clickable-row" size="small">
-            <el-table-column label="成员" min-width="140" prop="name" />
-            <el-table-column label="最后出勤" min-width="140">
-              <template #default="{ row }">{{ row.lastAttendance }}</template>
-            </el-table-column>
-            <el-table-column label="停课天数" min-width="110">
-              <template #default="{ row }">{{ row.daysSince != null ? row.daysSince + ' 天' : '—' }}</template>
-            </el-table-column>
-            <el-table-column label="风险等级" min-width="110">
-              <template #default="{ row }">
-                <StatusDot :tone="row.risk === 'high' ? 'error' : 'warning'" :label="row.risk === 'high' ? '高' : '中'" subtle />
+          <el-table :data="growthSorted" v-loading="churnLoading" @row-click="(row) => goStudents(row.studentId)" row-class-name="clickable-row" size="small">
+            <el-table-column
+              v-for="col in growthVisible"
+              :key="col.key"
+              :label="col.label"
+              :width="growthWidths[col.key] && growthWidths[col.key].width"
+              :min-width="growthWidths[col.key] && growthWidths[col.key].minWidth"
+            >
+              <template #header>
+                <SortableHeader
+                  :label="col.label"
+                  :state="growthSortState(col.key)"
+                  :priority="growthSortPriority(col.key)"
+                  :sortable="col.sortable !== false"
+                  @sort="(e) => growthOnSort(col.key, e)"
+                  @resize="(w) => growthOnResize(col.key, w)"
+                />
               </template>
-            </el-table-column>
-            <el-table-column label="状态" min-width="110">
               <template #default="{ row }">
-                <StatusDot :tone="row.expired ? 'error' : 'neutral'" :label="row.expired ? '已过期' : '未续费'" subtle />
+                <template v-if="col.render === 'daysSince'">{{ row.daysSince != null ? row.daysSince + ' 天' : '—' }}</template>
+                <StatusDot v-else-if="col.render === 'churnRisk'" :tone="row.risk === 'high' ? 'error' : 'warning'" :label="row.risk === 'high' ? '高' : '中'" subtle />
+                <StatusDot v-else-if="col.render === 'churnExpired'" :tone="row.expired ? 'error' : 'neutral'" :label="row.expired ? '已过期' : '未续费'" subtle />
+                <template v-else>{{ row[col.key] }}</template>
               </template>
             </el-table-column>
           </el-table>
@@ -320,17 +381,30 @@
           </div>
         </div>
         <div class="card table-container">
-          <el-table :data="referrals.list" v-loading="referralLoading" size="small">
-            <el-table-column label="姓名" min-width="140" prop="name" />
-            <el-table-column label="电话" min-width="140" prop="phone" />
-            <el-table-column label="阶段" min-width="100">
-              <template #default="{ row }">
-                <StatusDot :tone="stageDotTone(row.stage)" :label="row.stageText" subtle />
+          <el-table :data="growthSorted" v-loading="referralLoading" size="small">
+            <el-table-column
+              v-for="col in growthVisible"
+              :key="col.key"
+              :label="col.label"
+              :width="growthWidths[col.key] && growthWidths[col.key].width"
+              :min-width="growthWidths[col.key] && growthWidths[col.key].minWidth"
+              :show-overflow-tooltip="col.tooltip"
+            >
+              <template #header>
+                <SortableHeader
+                  :label="col.label"
+                  :state="growthSortState(col.key)"
+                  :priority="growthSortPriority(col.key)"
+                  :sortable="col.sortable !== false"
+                  @sort="(e) => growthOnSort(col.key, e)"
+                  @resize="(w) => growthOnResize(col.key, w)"
+                />
               </template>
-            </el-table-column>
-            <el-table-column label="备注" min-width="200" prop="note" show-overflow-tooltip />
-            <el-table-column label="录入时间" min-width="150">
-              <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
+              <template #default="{ row }">
+                <StatusDot v-if="col.render === 'stage'" :tone="stageDotTone(row.stage)" :label="row.stageText" subtle />
+                <template v-else-if="col.render === 'date'">{{ formatDate(row[col.key]) }}</template>
+                <template v-else>{{ row[col.key] }}</template>
+              </template>
             </el-table-column>
           </el-table>
         </div>
@@ -344,42 +418,44 @@
             <span class="sug-count">共 {{ suggestions.length }} 条建议</span>
           </div>
           <ListErrorState v-if="!sugLoading && errorSug" :error="errorSug" @retry="loadSuggestions" />
-          <el-table v-else :data="suggestions" v-loading="sugLoading" @row-click="(row) => openLeadDialog(row)" row-class-name="clickable-row" size="small">
-            <el-table-column label="姓名" min-width="130">
+          <el-table v-else :data="growthSorted" v-loading="sugLoading" @row-click="(row) => openLeadDialog(row)" row-class-name="clickable-row" size="small">
+            <el-table-column
+              v-for="col in growthVisible"
+              :key="col.key"
+              :label="col.label"
+              :width="growthWidths[col.key] && growthWidths[col.key].width"
+              :min-width="growthWidths[col.key] && growthWidths[col.key].minWidth"
+              :fixed="col.fixed"
+              :show-overflow-tooltip="col.tooltip"
+            >
+              <template #header>
+                <SortableHeader
+                  :label="col.label"
+                  :state="growthSortState(col.key)"
+                  :priority="growthSortPriority(col.key)"
+                  :sortable="col.sortable !== false"
+                  @sort="(e) => growthOnSort(col.key, e)"
+                  @resize="(w) => growthOnResize(col.key, w)"
+                />
+              </template>
               <template #default="{ row }">
-                <div class="lead-name-cell">
+                <div v-if="col.render === 'leadName'" class="lead-name-cell">
                   <EntityAvatar :name="row.name" size="sm" :tone="row.stage === 'deal' ? 'success' : row.stage === 'lost' ? 'neutral' : 'accent'" />
                   <span class="lead-name">{{ row.name }}</span>
                   <el-tag v-if="row.source === 'referral'" size="small" effect="light" type="warning" style="margin-left: 2px">转介绍</el-tag>
                 </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="阶段" min-width="100">
-              <template #default="{ row }">
-                <StatusDot :tone="stageDotTone(row.stage)" :label="row.stageText" subtle />
-              </template>
-            </el-table-column>
-            <el-table-column label="优先级" min-width="100">
-              <template #default="{ row }">
-                <el-tag :type="sugTagType(row.priority)" size="small" effect="light">{{ sugPriorityLabel(row.priority) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="证据（已观测事实）" min-width="280">
-              <template #default="{ row }">
-                <div class="evi-chips">
+                <StatusDot v-else-if="col.render === 'stage'" :tone="stageDotTone(row.stage)" :label="row.stageText" subtle />
+                <el-tag v-else-if="col.render === 'priority'" :type="sugTagType(row.priority)" size="small" effect="light">{{ sugPriorityLabel(row.priority) }}</el-tag>
+                <div v-else-if="col.render === 'evidence'" class="evi-chips">
                   <el-tag v-for="(ev, i) in row.evidence" :key="i" size="small" effect="plain" type="info">{{ ev.label }}</el-tag>
                 </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="建议动作" min-width="260" show-overflow-tooltip>
-              <template #default="{ row }">{{ row.suggestedAction }}</template>
-            </el-table-column>
-            <el-table-column label="操作" min-width="130" fixed="right">
-              <template #default="{ row }">
-                <el-button v-if="row.suggestedNextStage" type="primary" link size="small" @click.stop="moveStage(row, row.suggestedNextStage)">
-                  推进到「{{ stageOptions.find((s) => s.value === row.suggestedNextStage)?.label }}」
-                </el-button>
-                <el-button v-else link size="small" @click.stop="openLeadDialog(row)">查看</el-button>
+                <template v-else-if="col.render === 'suggestAction'">
+                  <el-button v-if="row.suggestedNextStage" type="primary" link size="small" @click.stop="moveStage(row, row.suggestedNextStage)">
+                    推进到「{{ stageOptions.find((s) => s.value === row.suggestedNextStage)?.label }}」
+                  </el-button>
+                  <el-button v-else link size="small" @click.stop="openLeadDialog(row)">查看</el-button>
+                </template>
+                <template v-else>{{ row[col.key] }}</template>
               </template>
             </el-table-column>
           </el-table>
@@ -551,6 +627,10 @@ import EntityAvatar from '@/components/EntityAvatar.vue'
 import StatusDot from '@/components/StatusDot.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import SortableHeader from '@/components/SortableHeader.vue'
+import TableViewBar from '@/components/TableViewBar.vue'
+import ColumnSettingsDialog from '@/components/ColumnSettingsDialog.vue'
+import { useTableKit, headerExtra } from '@/composables/useTableKit'
 
 const router = useRouter()
 const activeSection = ref('leads')
@@ -1059,6 +1139,148 @@ const sugOnlyActionable = ref(false)
 const sugTagType = (p) => ({ urgent: 'danger', high: 'warning', normal: 'info', low: '', none: 'success' }[p] || 'info')
 const sugPriorityLabel = (p) => ({ urgent: '紧急', high: '高', normal: '普通', low: '低', none: '无需跟进' }[p] || p)
 
+// ============================================
+// 多维表格：排序 / 列宽 / 视图（与学员档案、销售表同一套能力）
+// 七个区块共用**一个** kit：同一时刻只渲染一个区块，visibleDefs/sortedRows 恒与当前区块一致。
+// render 字段驱动单元格渲染（各区块单元格差异大，逐列声明渲染类型）。
+// 注意：列显隐/列宽按「列 key」共享 —— 同名 key（如 phone）在多个区块会一起显隐或同宽。
+// 这是有意的：七套独立配置对使用者是负担，且同名列语义本就相同（都是「电话」）。
+// ============================================
+const GROWTH_DEFS = {
+  leads: [
+    { key: 'name', label: '姓名', minWidth: 120, render: 'leadName' },
+    { key: 'phone', label: '电话', minWidth: 130, render: 'text' },
+    { key: 'stage', label: '阶段', minWidth: 100, render: 'stage' },
+    { key: 'intent_level', label: '意向度', minWidth: 140, render: 'intent' },
+    { key: 'source', label: '来源', minWidth: 100, render: 'source' },
+    { key: 'salesperson', label: '跟进人', minWidth: 100, render: 'text' },
+    { key: 'next_follow_at', label: '下次跟进', minWidth: 130, render: 'due' },
+  ],
+  followups: [
+    { key: 'target_name', label: '跟进对象', minWidth: 150, render: 'target' },
+    { key: 'phone', label: '电话', minWidth: 130, render: 'text' },
+    { key: 'task_type', label: '类型', minWidth: 100, render: 'taskType' },
+    { key: 'reason', label: '跟进原因', minWidth: 220, tooltip: true, render: 'text' },
+    { key: 'owner', label: '负责人', minWidth: 100, render: 'text' },
+    { key: 'due_at', label: '到期时间', minWidth: 130, render: 'fuDue' },
+    { key: 'status', label: '状态', minWidth: 90, render: 'fuStatus' },
+  ],
+  renewal: [
+    { key: 'studentName', label: '成员', minWidth: 140, render: 'text' },
+    { key: 'cardType', label: '卡种', minWidth: 110, render: 'text' },
+    { key: 'expiresAt', label: '到期时间', minWidth: 150, render: 'date' },
+    { key: 'daysLeft', label: '剩余天数', minWidth: 100, render: 'daysLeft' },
+    { key: 'recentAttendance', label: '近30天出勤', minWidth: 110, render: 'text' },
+    { key: 'followUp', label: '跟进状态', minWidth: 110, render: 'followUp' },
+    { key: 'actions', label: '操作', minWidth: 120, fixed: 'right', sortable: false, render: 'renewAction' },
+  ],
+  lowclasses: [
+    { key: 'student_name', label: '成员', minWidth: 140, render: 'text' },
+    { key: 'card_type_name', label: '卡种', minWidth: 120, render: 'text' },
+    { key: 'remaining_classes', label: '剩余课时', minWidth: 100, render: 'lowRemaining' },
+    { key: 'expires_at', label: '到期时间', minWidth: 150, render: 'date' },
+    { key: 'recent_count', label: '近30天出勤', minWidth: 110, render: 'text' },
+    { key: 'followUp', label: '跟进状态', minWidth: 110, render: 'followUp' },
+    { key: 'actions', label: '操作', minWidth: 120, fixed: 'right', sortable: false, render: 'lowAction' },
+  ],
+  churn: [
+    { key: 'name', label: '成员', minWidth: 140, render: 'text' },
+    { key: 'lastAttendance', label: '最后出勤', minWidth: 140, render: 'text' },
+    { key: 'daysSince', label: '停课天数', minWidth: 110, render: 'daysSince' },
+    { key: 'risk', label: '风险等级', minWidth: 110, render: 'churnRisk' },
+    { key: 'expired', label: '状态', minWidth: 110, render: 'churnExpired' },
+  ],
+  referrals: [
+    { key: 'name', label: '姓名', minWidth: 140, render: 'text' },
+    { key: 'phone', label: '电话', minWidth: 140, render: 'text' },
+    { key: 'stage', label: '阶段', minWidth: 100, render: 'stage' },
+    { key: 'note', label: '备注', minWidth: 200, tooltip: true, render: 'text' },
+    { key: 'created_at', label: '录入时间', minWidth: 150, render: 'date' },
+  ],
+  suggestions: [
+    { key: 'name', label: '姓名', minWidth: 130, render: 'leadName' },
+    { key: 'stage', label: '阶段', minWidth: 100, render: 'stage' },
+    { key: 'priority', label: '优先级', minWidth: 100, render: 'priority' },
+    // 证据是标签数组，排序无意义
+    { key: 'evidence', label: '证据（已观测事实）', minWidth: 280, render: 'evidence', sortable: false },
+    { key: 'suggestedAction', label: '建议动作', minWidth: 260, tooltip: true, render: 'text' },
+    { key: 'actions', label: '操作', minWidth: 130, fixed: 'right', sortable: false, render: 'suggestAction' },
+  ],
+}
+const GROWTH_DEFAULTS = Object.fromEntries(
+  Object.values(GROWTH_DEFS).flat().map((c) => [c.key, true])
+)
+
+const growthDefs = computed(() => GROWTH_DEFS[activeSection.value] || [])
+const growthRows = computed(() => ({
+  leads: leads.value,
+  followups: followUps.value,
+  renewal: renewalList.value,
+  lowclasses: lowClassList.value,
+  churn: churnList.value,
+  referrals: referrals.list,
+  suggestions: suggestions.value,
+}[activeSection.value] || []))
+
+// 单元格纯文本：供列宽实测（与模板渲染保持一致）
+const growthText = (col, row) => {
+  switch (col.render) {
+    case 'leadName': return row.name || ''
+    case 'stage': return row.stageText || ''
+    case 'intent': return '★'.repeat(Number(row.intent_level) || 0)
+    case 'source': return sourceText(row.source)
+    case 'due': return row.next_follow_at ? relativeDue(row.next_follow_at) : ''
+    case 'target': return row.target_name || ''
+    case 'taskType': return row.taskTypeText || ''
+    case 'fuDue': return relativeDue(row.due_at)
+    case 'fuStatus': return row.status === 'pending' ? '待办' : row.status === 'done' ? '已完成' : '已取消'
+    case 'date': return formatDate(row[col.key])
+    case 'daysLeft': return row.expired ? '已过期' : `${row.daysLeft} 天`
+    case 'followUp': return row.followUp ? '跟进中' : '未跟进'
+    case 'renewAction': case 'lowAction': return ''
+    case 'daysSince': return row.daysSince != null ? `${row.daysSince} 天` : ''
+    case 'churnRisk': return row.risk === 'high' ? '高' : '中'
+    case 'churnExpired': return row.expired ? '已过期' : '未续费'
+    case 'priority': return sugPriorityLabel(row.priority)
+    case 'evidence': return (row.evidence || []).map((e) => e.label).join(' ')
+    case 'suggestAction': return ''
+    default: return row[col.key] == null ? '' : String(row[col.key])
+  }
+}
+// 排序取值：金额/数量/时间按数值或时间戳，其余按文本（中文走拼音序）
+const growthSortValue = (key, row) => {
+  switch (key) {
+    case 'intent_level': return Number(row.intent_level || 0)
+    case 'daysLeft': return Number(row.daysLeft || 0)
+    case 'daysSince': return row.daysSince == null ? null : Number(row.daysSince)
+    case 'recentAttendance': case 'recent_count': return Number(row[key] || 0)
+    case 'next_follow_at': return row.next_follow_at || null
+    case 'due_at': return row.due_at || null
+    case 'expiresAt': case 'expires_at': return row[key] || null
+    case 'created_at': return row.created_at || null
+    default: return growthText({ key, render: (GROWTH_DEFS[activeSection.value] || []).find((c) => c.key === key)?.render }, row)
+  }
+}
+
+const {
+  settings: growthSettings, visibleDefs: growthVisible, colWidths: growthWidths,
+  sortedRows: growthSorted, sortState: growthSortState, sortPriority: growthSortPriority,
+  onSort: growthOnSort, onResize: growthOnResize,
+  customWidths: growthCustomWidths, autoColumnWidth: growthAutoWidth,
+  onWidthsChange: growthOnWidths, onAutoWidthChange: growthOnAutoWidth, resetWidths: growthResetWidths,
+  viewList: growthViews, activeViewId: growthActiveView,
+  applyView: growthApplyView, createView: growthCreateView, renameView: growthRenameView,
+  removeView: growthRemoveView, load: growthLoadKit,
+} = useTableKit({
+  settingsKey: 'growth_columns',
+  defs: () => growthDefs.value,
+  rows: growthRows,
+  textOf: growthText,
+  getValue: growthSortValue,
+  defaults: GROWTH_DEFAULTS,
+  extraOf: headerExtra,
+})
+
 const loadSuggestions = async () => {
   errorSug.value = ''
   sugLoading.value = true
@@ -1186,6 +1408,7 @@ const doExport = async (range) => {
 }
 
 onMounted(() => {
+  growthLoadKit()
   loadFunnel(); loadLeads(); loadRenewal(); loadLowClasses(); loadChurn(); loadReferrals(); loadFollowUps()
 })
 
@@ -1471,5 +1694,14 @@ watch(activeSection, (v) => {
   flex: 1;
   color: var(--t-text-1);
   word-break: break-all;
+}
+
+.growth-viewbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
 }
 </style>

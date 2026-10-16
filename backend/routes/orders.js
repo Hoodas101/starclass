@@ -313,6 +313,16 @@ router.post('/', (req, res) => {
  * 兼容会计负数写法 (100.00) → -100。
  * @returns {{ok: boolean, value?: number, raw: string}}
  */
+/**
+ * 导入行的「文件行号」：前端 csvToObjects 会给每条提交对象挂上原始文件行号 `_fileRow`
+ *（含被跳过的标题行）。此前后端用 `idx + 2` 按提交数组下标推算，而必填缺失行会被前端先丢弃，
+ * 缺失行夹在中间时偏移逐行累积，用户按提示回 Excel 找不到那一行。
+ */
+const fileRowOf = (r, idx) => {
+  const n = Number(r && r._fileRow);
+  return Number.isFinite(n) && n > 0 ? n : idx + 2;
+};
+
 function parseMoneyLoose(input) {
   const raw = String(input == null ? '' : input).trim();
   if (!raw) return { ok: false, raw };
@@ -359,6 +369,9 @@ router.post('/import', (req, res) => {
     // orders.order_no 是 UNIQUE 列：重复导入同一份文件时若不先查重，会直接撞唯一约束抛异常，
     // 整批回滚并返回 500，用户既不知道哪几行重复、其余行也一起丢。先查后跳，属正常业务分支。
     const orderNoExists = db.prepare('SELECT 1 FROM orders WHERE order_no = ? LIMIT 1');
+    // 本批内各收据单号出现次数：用于区分「批内同单号多明细行」（加后缀入账）与
+    // 「跨批重复导入」（跳过），见下方单号分支
+    const batchOrderNos = new Map();
 
     // 整批导入单事务提交：任一行出现未预期异常即整体回滚，避免半批订单入库。
     // 行级校验失败只记入 failed 不影响其余行；校验通过的行走 settleOrder，
@@ -369,25 +382,47 @@ router.post('/import', (req, res) => {
         const phone = String(r.phone || '').trim();
         const itemName = String(r.itemName || '').trim();
         if (!studentName || !itemName) {
-          failed.push({ row: idx + 2, reason: '成员姓名与项目必填' });
+          failed.push({ row: fileRowOf(r, idx), reason: '成员姓名与项目必填' });
           return;
         }
         // 金额走宽松解析：台账里「¥2,699.00」「￥29.90」「199元」都要能吃下；
         // 失败时把原值回显，用户才知道是哪个写法不被接受。
+        // 金额允许 0：赠品 / 0 元体验单是真实销售记录（实测 26销售 有 4 行 ¥0.00 被整行拒绝）
         const amountParsed = parseMoneyLoose(r.amount);
-        if (!amountParsed.ok || !(amountParsed.value > 0)) {
+        if (!amountParsed.ok || amountParsed.value < 0) {
           const shown = String(r.amount == null ? '' : r.amount).trim();
-          failed.push({ row: idx + 2, reason: `金额需为大于 0 的数字（当前值「${shown || '空'}」）` });
+          failed.push({ row: fileRowOf(r, idx), reason: `金额需为不小于 0 的数字（当前值「${shown || '空'}」）` });
           return;
         }
         const amount = amountParsed.value;
 
         // 仅对导入文件显式提供了 orderNo 的行查重：orderNo 为空时走下方随机生成逻辑，
         // 生成的订单号天然唯一，无法也无需查重。命中即跳过该行，不影响其余行与本批事务。
+        // 收据单号在台账里常「一笔收款分多行登记」（实测 16 组重复单号共 20 行）。
+        // 批内重复 = 同一笔业务的多个明细行 → 追加 -2/-3 后缀全部入账并记 warning；
+        // 跨批重复（单号已在库中）= 真的重复导入 → 照旧跳过并明示。
         const rawOrderNo = String(r.orderNo || '').trim();
-        if (rawOrderNo && orderNoExists.get(rawOrderNo)) {
-          skipped.push({ row: idx + 2, orderNo: rawOrderNo, reason: '订单号已存在，已跳过' });
-          return;
+        let finalOrderNo = rawOrderNo;
+        if (rawOrderNo) {
+          const seen = (batchOrderNos.get(rawOrderNo) || 0) + 1;
+          batchOrderNos.set(rawOrderNo, seen);
+          // 只有「本批内首次出现」才查库判跨批重复：批内第 2 行起，第 1 行已在本事务里插入，
+          // 直接查库会把同批的多明细行误判成「订单号已存在」而全部跳过。
+          if (seen === 1 && orderNoExists.get(rawOrderNo)) {
+            skipped.push({ row: fileRowOf(r, idx), orderNo: rawOrderNo, reason: '订单号已存在，已跳过' });
+            return;
+          }
+          if (seen > 1) {
+            // 后缀值也要避开库里已存在的号（上次导入可能已生成过 0854197-2）
+            let n = seen;
+            let candidate = `${rawOrderNo}-${n}`;
+            while (orderNoExists.get(candidate)) { n += 1; candidate = `${rawOrderNo}-${n}`; }
+            finalOrderNo = candidate;
+            warnings.push({
+              row: fileRowOf(r, idx),
+              reason: `订单号「${rawOrderNo}」与本批其他行重复，本行已按「${finalOrderNo}」入账`,
+            });
+          }
         }
 
         // 匹配成员：优先姓名+电话，其次姓名
@@ -404,7 +439,7 @@ router.post('/import', (req, res) => {
           student = db.prepare(`SELECT s.id, s.name FROM students s WHERE s.name = ? AND ${ACTIVE_STUDENT_SQL} ORDER BY s.created_at DESC LIMIT 1`).get(studentName);
         }
         if (!student) {
-          failed.push({ row: idx + 2, reason: `未找到成员「${studentName}」` });
+          failed.push({ row: fileRowOf(r, idx), reason: `未找到成员「${studentName}」` });
           return;
         }
 
@@ -417,17 +452,17 @@ router.post('/import', (req, res) => {
         if (String(r.paidDate == null ? '' : r.paidDate).trim()) {
           const pd = normalizeDateInput(r.paidDate);
           if (!pd.ok) {
-            failed.push({ row: idx + 2, reason: `购买日期无法识别：${pd.reason}` });
+            failed.push({ row: fileRowOf(r, idx), reason: `购买日期无法识别：${pd.reason}` });
             return;
           }
           const ms = new Date(pd.value + 'T12:00:00').getTime();
           if (!Number.isFinite(ms)) {
-            failed.push({ row: idx + 2, reason: `购买日期无法识别：${pd.reason || '解析失败'}` });
+            failed.push({ row: fileRowOf(r, idx), reason: `购买日期无法识别：${pd.reason || '解析失败'}` });
             return;
           }
           paidTs = ms;
         }
-        const orderNo = rawOrderNo || `ORD${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        const orderNo = finalOrderNo || `ORD${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
         // 按项目名反查卡种：导入的 items 此前缺 itemId，grantOrderBenefits 两个循环都在
         // `if (!item.itemId) continue` 处整体跳过 → 发卡与积分静默不发，而订单入账、接口仍返回成功
         //（典型「账实相符但权益丢失」）。命中则写 itemType:'membershipCard' + itemId；查不到不静默成功，记入 warnings。
@@ -441,7 +476,7 @@ router.post('/import', (req, res) => {
           totalPrice: amount,
         }];
         if (!cardType) {
-          warnings.push({ row: idx + 2, reason: `项目「${itemName}」在产品库中不存在，订单已入账但未开通会员卡，请手工补发` });
+          warnings.push({ row: fileRowOf(r, idx), reason: `项目「${itemName}」在产品库中不存在，订单已入账但未开通会员卡，请手工补发` });
         }
         insertOrder.run(id, orderNo, student.id, student.name, JSON.stringify(items), amount, amount, String(r.salesperson || '').trim(), String(r.remark || '').trim(), t, t);
         const order = {

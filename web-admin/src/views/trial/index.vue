@@ -11,63 +11,90 @@
       </div>
       <div class="toolbar-right">
         <el-button :icon="Refresh" @click="loadData">刷新</el-button>
+        <ColumnSettingsDialog
+          title="试听字段设置"
+          :columns="TRIAL_COLUMNS"
+          v-model:settings="trialSettings"
+          :defaults="TRIAL_DEFAULTS"
+          :widths="customWidths"
+          :auto-width="autoColumnWidth"
+          @update:widths="onWidthsChange"
+          @update:auto-width="onAutoWidthChange"
+          @reset-widths="resetWidths"
+        />
       </div>
     </div>
+
+    <!-- 视图栏：筛选 + 排序 + 字段顺序 + 列宽 的整套快照 -->
+    <TableViewBar
+      :views="viewList"
+      :active-id="activeViewId"
+      @select="(id) => applyView(id, (f) => { status.value = f.status || ''; loadData() })"
+      @create="(name) => createView(name, { status: status.value })"
+      @rename="renameView"
+      @remove="removeView"
+    />
 
     <div class="card table-container">
       <ListErrorState v-if="!loading && error" :error="error" @retry="loadData" />
       <template v-else>
-        <el-table :data="list" v-loading="loading" size="small">
-          <el-table-column label="提交时间" min-width="140">
-            <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
-          </el-table-column>
-          <el-table-column :label="$t('learner')" min-width="130">
-            <template #default="{ row }">
-              <div class="trial-name">{{ row.student_name || '-' }}</div>
-              <div v-if="studentMeta(row)" class="trial-sub">{{ studentMeta(row) }}</div>
+        <!-- 列改由 kt.visibleDefs 驱动，接入排序 / 列宽 / 视图（与学员档案、销售表同一套能力） -->
+        <el-table :data="sortedRows" v-loading="loading" size="small">
+          <el-table-column
+            v-for="col in visibleDefs"
+            :key="col.key"
+            :label="col.label"
+            :width="colWidths[col.key] && colWidths[col.key].width"
+            :min-width="colWidths[col.key] && colWidths[col.key].minWidth"
+            :align="col.align"
+            :fixed="col.fixed"
+            :show-overflow-tooltip="col.tooltip"
+          >
+            <template #header>
+              <SortableHeader
+                :label="col.label"
+                :state="sortState(col.key)"
+                :priority="sortPriority(col.key)"
+                :sortable="col.sortable !== false"
+                @sort="(e) => onSort(col.key, e)"
+                @resize="(w) => onResize(col.key, w)"
+              />
             </template>
-          </el-table-column>
-          <el-table-column label="家长 / 电话" min-width="170">
             <template #default="{ row }">
-              <div>{{ row.parent_name || '—' }}</div>
-              <div class="trial-sub">{{ row.parent_phone || '—' }}</div>
-            </template>
-          </el-table-column>
-          <el-table-column label="意向课程" min-width="130" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.course_name || '未指定' }}</template>
-          </el-table-column>
-          <el-table-column label="期望时间" min-width="150">
-            <template #default="{ row }">{{ preferredText(row) }}</template>
-          </el-table-column>
-          <el-table-column label="备注" min-width="180" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.note || '—' }}</template>
-          </el-table-column>
-          <el-table-column label="状态" min-width="100">
-            <template #default="{ row }">
-              <StatusDot :tone="statusTone(row.status)" :label="statusText(row.status)" subtle />
-            </template>
-          </el-table-column>
-          <el-table-column label="处理结果" min-width="180" show-overflow-tooltip>
-            <template #default="{ row }">
-              <span v-if="row.status === 'pending'">—</span>
-              <span v-else>{{ row.handle_note || (row.status === 'assigned' ? '已安排试听' : '已拒绝') }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" min-width="130" fixed="right">
-            <template #default="{ row }">
-              <template v-if="row.status === 'pending'">
-                <el-button type="primary" link size="small" @click.stop="openAssignDialog(row)">安排</el-button>
-                <el-button type="danger" link size="small" @click.stop="handleReject(row)">拒绝</el-button>
+              <template v-if="col.key === 'createdAt'">{{ formatTime(row.created_at) }}</template>
+              <template v-else-if="col.key === 'student'">
+                <div class="trial-name">{{ row.student_name || '-' }}</div>
+                <div v-if="studentMeta(row)" class="trial-sub">{{ studentMeta(row) }}</div>
               </template>
-              <!-- 已安排的试听：可一键转正式学员，打通「试听 → 学员 → 开卡」主链路 -->
-              <el-button
-                v-else-if="row.status === 'assigned'"
-                type="primary"
-                link
-                size="small"
-                @click.stop="openConvertDialog(row)"
-              >转正式学员</el-button>
-              <span v-else class="trial-sub">{{ row.status === 'assigned' ? '已安排' : '已处理' }}</span>
+              <template v-else-if="col.key === 'parent'">
+                <div>{{ row.parent_name || '—' }}</div>
+                <div class="trial-sub">{{ row.parent_phone || '—' }}</div>
+              </template>
+              <template v-else-if="col.key === 'course'">{{ row.course_name || '未指定' }}</template>
+              <template v-else-if="col.key === 'preferred'">{{ preferredText(row) }}</template>
+              <template v-else-if="col.key === 'note'">{{ row.note || '—' }}</template>
+              <template v-else-if="col.key === 'status'">
+                <StatusDot :tone="statusTone(row.status)" :label="statusText(row.status)" subtle />
+              </template>
+              <template v-else-if="col.key === 'handle'">
+                <span v-if="row.status === 'pending'">—</span>
+                <span v-else>{{ row.handle_note || (row.status === 'assigned' ? '已安排试听' : '已拒绝') }}</span>
+              </template>
+              <template v-else-if="col.key === 'actions'">
+                <template v-if="row.status === 'pending'">
+                  <el-button type="primary" link size="small" @click.stop="openAssignDialog(row)">安排</el-button>
+                  <el-button type="danger" link size="small" @click.stop="handleReject(row)">拒绝</el-button>
+                </template>
+                <!-- 已安排的试听：可一键转正式学员，打通「试听 → 学员 → 开卡」主链路 -->
+                <el-button
+                  v-else-if="row.status === 'assigned'"
+                  type="primary"
+                  link
+                  size="small"
+                  @click.stop="openConvertDialog(row)"
+                >转正式学员</el-button>
+                <span v-else class="trial-sub">{{ row.status === 'assigned' ? '已安排' : '已处理' }}</span>
+              </template>
             </template>
           </el-table-column>
         </el-table>
@@ -206,6 +233,10 @@ import { useRouter } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusDot from '@/components/StatusDot.vue'
+import SortableHeader from '@/components/SortableHeader.vue'
+import TableViewBar from '@/components/TableViewBar.vue'
+import ColumnSettingsDialog from '@/components/ColumnSettingsDialog.vue'
+import { useTableKit, headerExtra } from '@/composables/useTableKit'
 import {
   getTrialList,
   updateTrial,
@@ -238,6 +269,59 @@ const page = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
 const error = ref('')
+
+// ── 多维表格：排序 / 列宽 / 视图（与学员档案、销售表同一套能力，见 composables/useTableKit）──
+const TRIAL_COLUMNS = [
+  { key: 'createdAt', label: '提交时间', minWidth: 140 },
+  { key: 'student', label: $t('learner'), minWidth: 130 },
+  { key: 'parent', label: '家长 / 电话', minWidth: 170 },
+  { key: 'course', label: '意向课程', minWidth: 130, tooltip: true },
+  { key: 'preferred', label: '期望时间', minWidth: 150 },
+  { key: 'note', label: '备注', minWidth: 180, tooltip: true },
+  { key: 'status', label: '状态', minWidth: 100 },
+  { key: 'handle', label: '处理结果', minWidth: 180, tooltip: true },
+  // 操作列固定右侧且不可排序（按位次排序无意义）
+  { key: 'actions', label: '操作', minWidth: 130, fixed: 'right', sortable: false },
+]
+const TRIAL_DEFAULTS = Object.fromEntries(TRIAL_COLUMNS.map((c) => [c.key, true]))
+
+// 单元格纯文本：供列宽实测（与模板渲染保持一致，否则量出的宽度对不上）
+const trialText = (col, row) => {
+  switch (col.key) {
+    case 'createdAt': return formatTime(row.created_at)
+    case 'student': return row.student_name || ''
+    case 'parent': return `${row.parent_name || ''} ${row.parent_phone || ''}`.trim()
+    case 'course': return row.course_name || '未指定'
+    case 'preferred': return preferredText(row)
+    case 'note': return row.note || ''
+    case 'status': return statusText(row.status)
+    case 'handle': return row.status === 'pending' ? '' : (row.handle_note || '')
+    default: return ''
+  }
+}
+const trialSortValue = (key, row) => {
+  switch (key) {
+    case 'createdAt': return row.created_at || null
+    case 'parent': return row.parent_name || ''
+    case 'handle': return row.handle_note || ''
+    default: return trialText({ key }, row)
+  }
+}
+
+// 解构出顶层 ref：模板里可直接用（顶层 ref 会自动解包），避免到处写 `kt.xxx.value`
+const {
+  settings: trialSettings, visibleDefs, colWidths, sortedRows, sortState, sortPriority, onSort, onResize,
+  customWidths, autoColumnWidth, onWidthsChange, onAutoWidthChange, resetWidths,
+  viewList, activeViewId, applyView, createView, renameView, removeView, load: loadTableKit,
+} = useTableKit({
+  settingsKey: 'trial_columns',
+  defs: () => TRIAL_COLUMNS,
+  rows: computed(() => list.value),
+  textOf: trialText,
+  getValue: trialSortValue,
+  defaults: TRIAL_DEFAULTS,
+  extraOf: headerExtra,
+})
 
 const loadData = async () => {
   error.value = ''
@@ -493,7 +577,10 @@ const submitConvert = async () => {
   }
 }
 
-onMounted(loadData)
+onMounted(() => {
+  loadTableKit()
+  loadData()
+})
 </script>
 
 <style scoped>

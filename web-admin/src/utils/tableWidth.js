@@ -24,6 +24,13 @@ const measure = (text, font) => {
   return measureCtx.measureText(s).width
 }
 
+/**
+ * 表头控件占位像素：排序箭头 + 优先级角标 + 列筛选触发器。
+ * 自适应列宽若只量文字，短列名（「序号」「状态」）会被 ellipsis 截断 —— 这是全站统一口径，
+ * 学员档案 / 销售表 / 增长中心 / 试听 / 报表共用一处，避免各页各写一份再各自跑偏。
+ */
+export const headerExtra = (col) => (col.sortable === false ? 0 : 26) + (col.filterable ? 20 : 0)
+
 /** 该列是否被手动指定了列宽 */
 export const isCustomWidth = (customWidths, key) => {
   const w = customWidths && customWidths[key]
