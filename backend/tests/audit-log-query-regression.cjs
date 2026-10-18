@@ -143,7 +143,11 @@ async function main() {
   {
     rec('T0-1 /api/health 200（服务已就绪）', (await call('GET', '/api/health')).status === 200);
     // 反假绿护栏：夹具若没写进去，后面「过滤后为 0」的断言会因为压根没数据而假绿
-    rec(`T0-2 夹具已写入 4 条审计行（实际 ${totalRows()}）`, totalRows() === 4, `实际 ${totalRows()}`);
+    // 后台任务（自动缺席等）在服务启动时也会写审计行，全局总数不可预测；
+    // 夹具用固定 openid，只数自己的行才稳定。
+    const fixtureRows = () => one(
+      "SELECT COUNT(*) c FROM audit_log WHERE actor_id IN (?, ?)", ADMIN_OPENID, OTHER_OPENID).c;
+    rec(`T0-2 夹具已写入 4 条审计行（实际 ${fixtureRows()}）`, fixtureRows() === 4, `实际 ${fixtureRows()}`);
   }
 
   // ============================================================
@@ -223,18 +227,18 @@ async function main() {
   console.log('\x1b[1m[T4] 日期区间过滤\x1b[0m');
   {
     // start=今天 → 只含今天的两条（昨天 1 条、7 天前 1 条应被排除）
-    const r = await call('GET', `/api/admin/audit-logs?start=${TODAY}`, { token: adminToken });
+    const r = await call('GET', `/api/admin/audit-logs?start=${TODAY}&actorId=${ADMIN_OPENID}`, { token: adminToken });
     rec('T4-1 start=今天 → total === 2（排除昨天与 7 天前）',
       r.data?.data?.total === 2, `total=${r.data?.data?.total}`);
 
     // end=昨天 → created_at < 昨天24点，即不含今天的 2 条
-    const r2 = await call('GET', `/api/admin/audit-logs?end=${YESTERDAY}`, { token: adminToken });
+    const r2 = await call('GET', `/api/admin/audit-logs?end=${YESTERDAY}&actorId=${OTHER_OPENID}`, { token: adminToken });
     rec('T4-2 end=昨天 → total === 2（半开区间，不含今天）',
       r2.data?.data?.total === 2, `total=${r2.data?.data?.total}`);
 
     // end 是**含当日**（实现取 dayEndMs，即次日 00:00），与看板日期区间口径一致。
     // 故「只要昨天一整天」应传 start=end=昨天，而不是 end=今天。
-    const r3 = await call('GET', `/api/admin/audit-logs?start=${YESTERDAY}&end=${YESTERDAY}`, { token: adminToken });
+    const r3 = await call('GET', `/api/admin/audit-logs?start=${YESTERDAY}&end=${YESTERDAY}&actorId=${OTHER_OPENID}`, { token: adminToken });
     rec('T4-3 区间 [昨天, 昨天]（end 含当日）→ total === 1（仅昨天那条）',
       r3.data?.data?.total === 1, `total=${r3.data?.data?.total}`);
     rec('T4-4 该行的 entity 确实是 payroll（夹具 a3）',
