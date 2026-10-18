@@ -209,7 +209,7 @@
       ref="exportDialogRef"
       title="导出员工数据"
       description="员工列表为当前全员快照，不支持按时间筛选；确认后将导出全部员工。"
-      @confirm="doExport"
+      @confirm="(range, done) => doExport(range).finally(done)"
     />
 </template>
 

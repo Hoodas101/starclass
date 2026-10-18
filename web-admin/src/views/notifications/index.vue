@@ -150,7 +150,7 @@
       ref="exportDialogRef"
       title="导出通知记录"
       description="选择时间范围后确认导出，留空导出全部通知。"
-      @confirm="doExport"
+      @confirm="(range, done) => doExport(range).finally(done)"
     />
 </template>
 

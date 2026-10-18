@@ -5,13 +5,9 @@
     <!-- 顶部操作栏 -->
     <div class="toolbar">
       <div class="toolbar-left">
-                <el-radio-group v-model="filterStatus" size="default" @change="onFilterChange">
-          <el-radio-button value="">全部</el-radio-button>
-          <el-radio-button value="paid">已收款</el-radio-button>
-          <el-radio-button value="pending">待支付</el-radio-button>
-          <el-radio-button value="refunded">已退款</el-radio-button>
-          <el-radio-button value="cancelled">已取消</el-radio-button>
-        </el-radio-group>
+        <!-- 状态筛选只保留表头「状态」列的漏斗一处：
+             此前这里还有一个 radio 写同一个 filterStatus，两处选中态互不同步，
+             屏幕会同时出现两种「当前筛选」。 -->
       </div>
       <div class="toolbar-right">
         <el-date-picker
@@ -101,6 +97,7 @@
           <template #header>
             <SortableHeader
               :label="col.label"
+              :align="col.align"
               :state="sortState(col.key)"
               :priority="sortPriority(col.key)"
               :sortable="col.sortable !== false"
@@ -174,10 +171,14 @@
         label-position="left"
       >
         <el-form-item :label="t('learner')" prop="studentId">
+          <!-- 远程搜索：此前只预加载前 100 名，第 101 名之后的学员根本搜不到、无法开单 -->
           <el-select
             v-model="createForm.studentId"
             filterable
-            placeholder="选择/搜索成员"
+            remote
+            :remote-method="loadStudentOptions"
+            :loading="studentOptionsLoading"
+            placeholder="输入姓名或手机号搜索成员"
             style="width: 100%"
           >
             <el-option
@@ -194,7 +195,7 @@
             <el-option
               v-for="c in cardTypes"
               :key="c.id"
-              :label="`${c.name}（${c.valid_days}天/${c.total_classes}次）¥${c.price}`"
+              :label="`${c.name}（${c.valid_days}天/${c.total_classes}次）${formatMoney(c.price)}`"
               :value="c.id"
             />
           </el-select>
@@ -310,6 +311,17 @@
           <div class="refund-rule-reason">{{ refundPreview.reason }}</div>
         </div>
 
+        <!-- 规则预览失败：明确告知并禁止提交，避免「静默变全额」 -->
+        <el-alert
+          v-if="refundPreviewFailed"
+          type="error"
+          :closable="false"
+          show-icon
+          title="退费规则加载失败"
+          description="无法计算应退金额，已禁用提交。请重试，或改用「自定义」手动填写金额后再确认。"
+          style="margin-bottom: 10px"
+        />
+
         <div class="refund-row">
           <span class="refund-label">退款方式</span>
           <el-radio-group v-model="refundMode" size="small">
@@ -333,7 +345,7 @@
       </div>
       <template #footer>
         <el-button @click="refundDialogVisible = false">取消</el-button>
-        <el-button type="danger" :loading="submitting" @click="confirmRefund">确认退款 {{ formatMoney(refundFinal) }}</el-button>
+        <el-button type="danger" :loading="submitting" :disabled="refundPreviewFailed && !(refundFinal > 0)" @click="confirmRefund">确认退款 {{ formatMoney(refundFinal) }}</el-button>
       </template>
     </el-dialog>
 
@@ -433,7 +445,7 @@
       ref="exportDialogRef"
       title="导出销售记录"
       description="选择时间范围后确认导出；留空导出全部销售记录。"
-      @confirm="doExport"
+      @confirm="(range, done) => doExport(range).finally(done)"
     />
 </template>
 
@@ -457,8 +469,10 @@ import {
   cancelOrder,
   payOrder,
   getStudents,
+  getStudentOptions,
   getCardTypes,
   getSettings,
+  saveSettings,
   getExport,
   getStaffOptions
 } from '@/api/modules'
@@ -694,13 +708,14 @@ const saveColumns = async (settings) => {
     await persistColumns(settings)
     ElMessage.success('字段设置已保存')
   } catch (e) {
-    // 拦截器已提示
+    // 这里不是请求错误（拦截器管不到），必须自己提示：否则保存失败也照常关弹窗
+    ElMessage.error('字段设置保存失败，请重试')
   }
 }
 
 // ==== 视图：筛选 + 排序 + 字段顺序 + 列宽 的整套快照 ====
 const views = ref([])
-const viewList = computed(() => allViews(views.value))
+const viewList = computed(() => allViews(views.value, { __all__: '全部订单' }))
 
 const currentSnapshot = () => ({
   filters: { status: filterStatus.value, range: dateRange.value || null },
@@ -738,7 +753,9 @@ const applyView = (id) => {
   dateRange.value = (v.filters && v.filters.range) || null
   sorts.value = Array.isArray(v.sorts) ? v.sorts : []
   customWidths.value = v.widths || {}
-  if (Array.isArray(v.order) && v.order.length) columnSettings.value = { ...columnSettings.value, order: v.order }
+  // 空数组同样要应用：它代表「回到默认列定义顺序」。此前只在非空时写入，
+  // 于是切到「全部」视图后仍保留着上一次的自定义列序。
+  if (Array.isArray(v.order)) columnSettings.value = { ...columnSettings.value, order: v.order }
   onFilterChange()
   persistViews()
 }
@@ -880,6 +897,22 @@ const loadOrders = async () => {
 const createDialogVisible = ref(false)
 const createFormRef = ref(null)
 const studentOptions = ref([])
+const studentOptionsLoading = ref(false)
+
+// 远程搜索学员：合并已有选项，避免搜索后已选中的标签丢失
+const loadStudentOptions = async (query = '') => {
+  studentOptionsLoading.value = true
+  try {
+    const res = await getStudentOptions({ q: query })
+    const map = new Map(studentOptions.value.map((o) => [o.id, o]))
+    ;(res?.list || []).forEach((o) => map.set(o.id, o))
+    studentOptions.value = [...map.values()]
+  } catch (e) {
+    // 无权限或网络异常时保留现状
+  } finally {
+    studentOptionsLoading.value = false
+  }
+}
 const cardTypes = ref([])
 const staffOptions = ref([])
 
@@ -915,8 +948,7 @@ const openCreateDialog = async () => {
     remark: ''
   })
   try {
-    const [stuRes, cardRes] = await Promise.all([getStudents({ page: 1, pageSize: 100 }), getCardTypes()])
-    studentOptions.value = stuRes.list || []
+    const [, cardRes] = await Promise.all([loadStudentOptions(''), getCardTypes()])
     cardTypes.value = (cardRes.list || []).filter((c) => c.is_active !== 0)
   } catch (e) {
     // 拦截器已提示
@@ -965,12 +997,15 @@ const refundOrder = ref(null)
 const refundMode = ref('rule')
 const refundAmount = ref(0)
 const refundPreview = ref(null)
+// 退费规则预览是否失败：失败时必须禁用提交，绝不能降级成「全额退款」
+const refundPreviewFailed = ref(false)
 
 const openRefundDialog = async (order) => {
   refundOrder.value = order
   refundMode.value = 'rule'
   refundAmount.value = 0
   refundPreview.value = null
+  refundPreviewFailed.value = false
   refundDialogVisible.value = true
   try {
     const preview = await refundPreviewApi(order.id)
@@ -981,8 +1016,11 @@ const openRefundDialog = async (order) => {
     if (preview.mode === 'full') refundMode.value = 'full'
     else refundMode.value = 'rule'
   } catch (e) {
-    // 预览失败时降级为全额
-    refundMode.value = 'full'
+    // 绝不能降级成「全额退款」：员工照着按钮点下去就是资金事故。
+    // 改为自定义模式 + 金额 0 + 标记失败（提交按钮禁用），逼用户重试或手动填。
+    refundMode.value = 'custom'
+    refundAmount.value = 0
+    refundPreviewFailed.value = true
   }
 }
 

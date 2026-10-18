@@ -222,7 +222,7 @@
       ref="exportDialogRef"
       title="导出项目数据"
       description="导出当前筛选结果（含年龄筛选）；项目档案无时间维度，时间范围不参与筛选。"
-      @confirm="doExport"
+      @confirm="(range, done) => doExport(range).finally(done)"
     />
 </template>
 

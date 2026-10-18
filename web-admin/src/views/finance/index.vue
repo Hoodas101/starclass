@@ -21,6 +21,7 @@
         </el-select>
       </div>
       <div class="toolbar-right">
+        <el-button :icon="Download" @click="doExport">导出</el-button>
         <el-button type="primary" @click="loadAll">刷新</el-button>
       </div>
     </div>
@@ -69,6 +70,7 @@
         @update:widths="onWidthsChange"
         @update:auto-width="onAutoWidthChange"
         @reset-widths="resetWidths"
+        @save="onSettingsSave"
       />
     </div>
 
@@ -87,6 +89,7 @@
           <template #header>
             <SortableHeader
               :label="col.label"
+              :align="col.align"
               :state="sortState(col.key)"
               :priority="sortPriority(col.key)"
               @sort="(e) => onSort(col.key, e)"
@@ -115,6 +118,9 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { getFinanceSummary, getFinanceMonthly, getFinanceByProduct, getFinanceBySales } from '@/api/modules'
 import { formatMoney } from '@/utils/format'
+import { exportXlsx } from '@/utils/xlsx'
+import { Download } from '@element-plus/icons-vue'
+import dayjs from 'dayjs'
 import PageHeader from '@/components/PageHeader.vue'
 import SortableHeader from '@/components/SortableHeader.vue'
 import TableViewBar from '@/components/TableViewBar.vue'
@@ -203,6 +209,28 @@ const reloadActive = () => ({
   monthly: loadMonthly, product: loadProduct, sales: loadSales,
 }[activeMode.value] || loadMonthly)()
 
+const FINANCE_MODE_LABEL = { monthly: '月度报表', product: '产品收入', sales: '销售业绩' }
+
+// 导出当前视图：可见列 + 当前排序结果。金额列输出**纯数字**（不带 ¥ / 千分位），
+// 便于 Excel 直接求和做账；其余列原样输出。
+const doExport = () => {
+  const cols = financeVisible.value
+  const rows = financeSorted.value
+  if (!cols.length || !rows.length) {
+    ElMessage.warning('当前视图暂无可导出的数据')
+    return
+  }
+  const headers = cols.map((c) => c.label)
+  const data = rows.map((row) => cols.map((c) => {
+    const v = row[c.key]
+    if (c.kind === 'money' || c.kind === 'signed') return Number(v || 0)
+    return v == null ? '' : v
+  }))
+  const mode = FINANCE_MODE_LABEL[activeMode.value] || '报表'
+  exportXlsx(`财务报表_${mode}_${dayjs().format('YYYYMMDD')}`, headers, data, { sheetName: mode })
+  ElMessage.success(`已导出 ${data.length} 行`)
+}
+
 const financeText = (col, row) => {
   const v = row[col.key]
   if (col.kind === 'money' || col.kind === 'signed') return `¥${fmt(v)}`
@@ -220,7 +248,7 @@ const {
   settings: financeSettings, visibleDefs: financeVisible, colWidths: financeWidths,
   sortedRows: financeSorted, sortState, sortPriority, onSort, onResize,
   customWidths, autoColumnWidth, onWidthsChange, onAutoWidthChange, resetWidths,
-  viewList, activeViewId, applyView, createView, renameView, removeView, load: loadTableKit,
+  viewList, activeViewId, applyView, createView, renameView, removeView, load: loadTableKit, onSettingsSave,
 } = useTableKit({
   settingsKey: 'finance_columns',
   defs: () => financeDefs.value,
@@ -229,6 +257,7 @@ const {
   getValue: financeSortValue,
   defaults: FINANCE_DEFAULTS,
   extraOf: headerExtra,
+  viewLabels: { __all__: '全部报表' },
 })
 
 function getDateRange() {

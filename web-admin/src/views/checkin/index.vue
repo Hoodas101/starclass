@@ -174,7 +174,7 @@
       :title="`导出${$t('checkin')}数据`"
       description="选择时间范围后确认导出，未选择时默认导出选中日期。"
       default-shortcut="today"
-      @confirm="doExport"
+      @confirm="(range, done) => doExport(range).finally(done)"
     />
 </template>
 
@@ -355,7 +355,7 @@ const doExport = async (range) => {
 
 // 切换成员签到状态（循环：待签到 → 已签到 → 迟到 → 请假 → 待签到）
 const toggleStudentStatus = (student) => {
-  const statusOrder = ['pending', 'present', 'late', 'absent']
+  const statusOrder = ['pending', 'present', 'late', 'absent', 'leave']
   const currentIndex = statusOrder.indexOf(student.status)
   const nextIndex = (currentIndex + 1) % statusOrder.length
   student.status = statusOrder[nextIndex]
@@ -383,7 +383,8 @@ const confirmCheckin = async () => {
   try {
     await ElMessageBox.confirm(
       pendingCount > 0
-        ? `有 ${pendingCount} 名${$t('learner')}尚未操作，将按「已签到」保存。确认提交签到结果？`
+        // `$t` 只存在于模板作用域；script 里必须走 store 的 t()
+        ? `有 ${pendingCount} 名${settingsStore.t('learner')}尚未操作，将按「已签到」保存。确认提交签到结果？`
         : '确认提交当前签到结果？',
       '确认签到',
       { type: 'warning', confirmButtonText: '确认提交', cancelButtonText: '取消' }

@@ -68,7 +68,11 @@ router.use((req, res, next) => {
   return res.status(403).json({ code: 403, data: null, message: '仅管理员可修改设置' });
 });
 
-const KEYS = ['org_info', 'points_rules', 'notification_rules', 'refund_rules', 'leave_rules', 'uniform_price', 'service_phone', 'students_columns', 'orders_columns', 'term_scheme', 'term_overrides', 'churn_rules'];
+// 表格列配置（*_columns）是「一个键 = 一整个对象」的覆盖语义，前端负责「重读 + 合并 + 写回」。
+// growth/trial/finance 三个键是 v1.0.7 多维表格扩展新增的 —— 此前只加了前端 key，
+// 后端白名单没跟上，写入被静默忽略、读取也拿不到，表现为「字段设置保存后刷新就丢」。
+const COLUMN_KEYS = ['students_columns', 'orders_columns', 'growth_columns', 'trial_columns', 'finance_columns'];
+const KEYS = ['org_info', 'points_rules', 'notification_rules', 'refund_rules', 'leave_rules', 'uniform_price', 'service_phone', ...COLUMN_KEYS, 'term_scheme', 'term_overrides', 'churn_rules'];
 
 // 推送规则规范默认值（DEFAULT_NOTIFICATION_RULES）已上移至 utils/reminders.js：
 // 存储为空/畸形时兜底返回，保证设置页可读可配、定时任务有默认档位，且两处共用同一份。
@@ -150,8 +154,8 @@ router.get('/', (req, res) => {
         service_phone: result.service_phone || '',
         term_scheme: result.term_scheme,
         term_overrides: result.term_overrides,
-        students_columns: result.students_columns,
-        orders_columns: result.orders_columns,
+        // 表格列配置供教练/销售的列表页使用，非经营敏感项；五处口径一致
+        ...Object.fromEntries(COLUMN_KEYS.map((k) => [k, result[k]])),
       }));
     }
     res.json(success(result));
@@ -184,6 +188,9 @@ router.put('/', (req, res) => {
       service_phone: '客服电话',
       students_columns: '成员表格字段',
       orders_columns: '销售表格字段',
+      growth_columns: '增长中心表格字段',
+      trial_columns: '试听预约表格字段',
+      finance_columns: '财务报表表格字段',
       term_scheme: '称呼方案',
       term_overrides: '称呼自定义',
       churn_rules: '流失与召回规则',
@@ -275,7 +282,14 @@ router.get('/export', (req, res) => {
       return res.status(429).json({ code: 429, data: null, message: '导出进行中，请稍后再试' });
     }
     try {
-    const payload = exportData(req.query.modules, { dateFrom: from, dateTo: to });
+    // 必须带上操作者：导出是全量 PII 下载，审计行 actor_id 为空等于无从追溯是谁导出的
+    const exportActor = getActor(req);
+    const payload = exportData(req.query.modules, {
+      dateFrom: from,
+      dateTo: to,
+      actorId: exportActor.id,
+      actorRole: exportActor.role,
+    });
     const json = JSON.stringify(payload);
     const ts = new Date();
     const stamp = `${ts.getFullYear()}${String(ts.getMonth() + 1).padStart(2, '0')}${String(ts.getDate()).padStart(2, '0')}-${String(ts.getHours()).padStart(2, '0')}${String(ts.getMinutes()).padStart(2, '0')}`;

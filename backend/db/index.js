@@ -43,6 +43,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_orders_student ON orders(student_id, status);
   CREATE INDEX IF NOT EXISTS idx_leave_parent ON leave_requests(parent_openid, status);
   CREATE INDEX IF NOT EXISTS idx_leave_student_schedule ON leave_requests(student_id, schedule_id);
+  -- 提醒任务对每张待提醒卡/每场课都要 SELECT 1 FROM notifications WHERE template_id = ?
+  -- 没有索引就是全表扫描：通知表按「每场课 × 每位家长」增长（约 1–2 万行/年），
+  -- 几十张卡 = 几十次全扫，每日 09:00 的任务会同步卡住主线程。
+  CREATE INDEX IF NOT EXISTS idx_notifications_template ON notifications(template_id);
+  -- 订单列表默认 ORDER BY created_at DESC，无索引时每页都要全表排序
+  CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
 `);
 console.log('[DB] 索引检查完成');
 

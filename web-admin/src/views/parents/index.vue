@@ -174,7 +174,7 @@
       ref="exportDialogRef"
       :title="`导出${t('learner')}数据`"
       :description="`选择时间范围后确认导出；留空导出全部${t('learner')}。`"
-      @confirm="doExport"
+      @confirm="(range, done) => doExport(range).finally(done)"
     />
 </template>
 

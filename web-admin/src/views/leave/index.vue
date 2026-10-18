@@ -92,7 +92,16 @@
     <el-dialog v-model="applyVisible" title="登记请假" class="dlg-md">
       <el-form label-width="80px" label-position="left">
         <el-form-item label="成员" required>
-          <el-select v-model="applyForm.studentId" filterable placeholder="选择/搜索成员" style="width: 100%" @change="onApplyStudentChange">
+          <el-select
+            v-model="applyForm.studentId"
+            filterable
+            remote
+            :remote-method="loadStudentOptions"
+            :loading="studentOptionsLoading"
+            placeholder="输入姓名或手机号搜索成员"
+            style="width: 100%"
+            @change="onApplyStudentChange"
+          >
             <el-option v-for="s in studentOptions" :key="s.id" :label="`${s.name}${s.parent_phone ? '（' + s.parent_phone + '）' : ''}`" :value="s.id" />
           </el-select>
         </el-form-item>
@@ -116,7 +125,7 @@
       ref="exportDialogRef"
       title="导出请假数据"
       description="选择时间范围后确认导出，留空导出全部请假记录。"
-      @confirm="doExport"
+      @confirm="(range, done) => doExport(range).finally(done)"
     />
 </template>
 
@@ -127,7 +136,7 @@ const props = defineProps({
 import { ref, onMounted } from 'vue'
 import { Download } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
-import { getLeaves, approveLeave, applyLeave, getStudents, getSchedules } from '@/api/modules'
+import { getLeaves, approveLeave, applyLeave, getStudentOptions, getSchedules } from '@/api/modules'
 import { exportXlsx } from '@/utils/xlsx'
 import { fetchAllPages } from '@/utils/fetchAll'
 import ExportDialog from '@/components/ExportDialog.vue'
@@ -147,6 +156,22 @@ const applyVisible = ref(false)
 const applySubmitting = ref(false)
 const scheduleLoading = ref(false)
 const studentOptions = ref([])
+const studentOptionsLoading = ref(false)
+
+// 远程搜索学员：合并已有选项，避免搜索后已选中的标签丢失
+const loadStudentOptions = async (query = '') => {
+  studentOptionsLoading.value = true
+  try {
+    const res = await getStudentOptions({ q: query })
+    const map = new Map(studentOptions.value.map((o) => [o.id, o]))
+    ;(res?.list || []).forEach((o) => map.set(o.id, o))
+    studentOptions.value = [...map.values()]
+  } catch (e) {
+    // 无权限或网络异常时保留现状
+  } finally {
+    studentOptionsLoading.value = false
+  }
+}
 const scheduleOptions = ref([])
 const applyForm = ref({ studentId: '', scheduleId: '', reason: '' })
 
@@ -154,12 +179,8 @@ const openApplyDialog = async () => {
   applyForm.value = { studentId: '', scheduleId: '', reason: '' }
   scheduleOptions.value = []
   applyVisible.value = true
-  if (!studentOptions.value.length) {
-    try {
-      const res = await getStudents({ page: 1, pageSize: 200 })
-      studentOptions.value = res.list || []
-    } catch (e) { /* 拦截器已提示 */ }
-  }
+  // 只预取首批；其余靠下拉的远程搜索（此前硬上限 200，第 201 名学员无法登记请假）
+  if (!studentOptions.value.length) await loadStudentOptions('')
 }
 
 // 切换成员后拉取其可见排期（供选择要请假的那节课）

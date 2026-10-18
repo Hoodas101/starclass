@@ -190,7 +190,16 @@ const statusText = (s) => statusOptions.find((o) => o.value === s)?.label || s |
 
 // 筛选条件
 const filters = reactive({ studentId: '', classId: '', teacherId: '', status: '' })
-const dateRange = ref([])
+// 默认近 30 天：留空会让后端对**全部考勤**做无日期条件的扫描 + 临时 B-tree 排序，
+// 数据累积后每次打开都要 100ms+，导出时还会被 fetchAllPages 连续触发。
+const defaultRange = () => {
+  const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const end = new Date()
+  const start = new Date()
+  start.setDate(start.getDate() - 29)
+  return [fmt(start), fmt(end)]
+}
+const dateRange = ref(defaultRange())
 
 const studentOptions = ref([])
 const courseOptions = ref([])

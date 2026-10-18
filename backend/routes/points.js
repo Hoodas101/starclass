@@ -7,6 +7,7 @@
  * GET  /api/points/ranking  — 排行榜
  */
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, isAdminReq, isStaffReq, canViewStudentData, recordAudit } = require('../utils');
@@ -218,7 +219,8 @@ router.get('/ranking', (req, res) => {
 
     const list = db.prepare(`
       SELECT p.student_id, p.student_name, p.balance AS balance,
-        COALESCE(SUM(CASE WHEN pl.created_at >= ? AND pl.type = 'earn' THEN pl.amount ELSE 0 END), 0) AS points
+        -- checkin 是签到积分（最大的来源），只算 earn 会让活跃学员在排行榜上全是 0
+        COALESCE(SUM(CASE WHEN pl.created_at >= ? AND pl.type IN ('earn', 'checkin') THEN pl.amount ELSE 0 END), 0) AS points
       FROM points p
       LEFT JOIN point_logs pl ON pl.student_id = p.student_id
       GROUP BY p.student_id
@@ -281,6 +283,42 @@ function getSharePointsRule() {
 }
 
 /**
+ * 分享凭证（2026-10-17）
+ *
+ * 此前 `POST /api/points/share` 没有任何凭证：任一登录用户每周调一次即可白拿积分，
+ * 而积分可兑换实物/课程，等于可脚本化套现。
+ *
+ * 现要求「先申请一次性凭证 → 再凭凭证领取」：凭证与 openid + 自然周绑定，10 分钟过期、
+ * 只能用一次。它能挡掉「直接打领取接口」的批量刷分，并让每次领取可追溯到具体凭证。
+ *
+ * 局限（如实记录）：微信不提供「分享成功」回调，所以这仍是客户端自证 —— 凭证本身
+ * 不能证明用户真的分享了。若要强证明，需改为「分享链接被**他人**打开后才计入」。
+ */
+const SHARE_TICKETS = new Map();
+const SHARE_TICKET_TTL = 10 * 60 * 1000;
+
+function pruneShareTickets(ts) {
+  if (SHARE_TICKETS.size < 500) return;
+  for (const [k, v] of SHARE_TICKETS) if (v.expiresAt < ts) SHARE_TICKETS.delete(k);
+}
+
+/** POST /api/points/share/ticket — 申请分享凭证（分享动作发起前调用） */
+router.post('/share/ticket', (req, res) => {
+  try {
+    const openid = getOpenId(req);
+    if (!openid) return res.status(401).json(safeFail('未登录'));
+    const ts = Date.now();
+    pruneShareTickets(ts);
+    const weekKey = Math.floor(ts / (7 * 86400000));
+    const ticket = crypto.randomBytes(16).toString('hex');
+    SHARE_TICKETS.set(ticket, { openid, weekKey, expiresAt: ts + SHARE_TICKET_TTL, used: false });
+    res.json(success({ ticket, expiresAt: ts + SHARE_TICKET_TTL }));
+  } catch (err) {
+    res.status(500).json(safeFail('操作失败，请稍后重试'));
+  }
+});
+
+/**
  * POST /api/points/share — 分享训练获得积分（每周 1 次，积分数读设置项，未配置回退 20，幂等）
  * 家长分享小程序/训练页面成功后调用
  */
@@ -291,6 +329,14 @@ router.post('/share', (req, res) => {
 
     const weekKey = Math.floor(Date.now() / (7 * 86400000));
     const refId = `share_${openid}_${weekKey}`;
+
+    // 分享凭证：必须由 /share/ticket 签发，且与本人、本自然周绑定，单次有效
+    const { ticket } = req.body || {};
+    const tk = typeof ticket === 'string' ? SHARE_TICKETS.get(ticket) : null;
+    if (!tk || tk.used || tk.expiresAt < Date.now() || tk.openid !== openid || tk.weekKey !== weekKey) {
+      return res.json(fail('分享凭证无效或已过期，请重新发起分享'));
+    }
+    tk.used = true;
 
     // 积分取值改为读设置项 points_rules（原先硬编码 20，管理员在设置页改了不生效）
     const amount = getSharePointsRule();

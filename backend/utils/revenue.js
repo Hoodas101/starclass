@@ -48,6 +48,10 @@ function deriveOrderLine(card) {
   if (!order) return null;
   const orderTotal = Number(order.total_amount) || 0;
   const orderPayable = Number(order.payable_amount) || 0;
+  // 实付为 0 的订单（赠卡 / 全免 / 核销）没有可结转的收入。
+  // 此前折扣比例在 payable=0 时条件为假 → 回落成 1，于是赠卡按**标价**结转，
+  // 合同负债直接变负。推导不出实付价就不结转，宁可不记也不虚增收入。
+  if (orderTotal > 0 && orderPayable <= 0) return null;
   const discountRatio = (orderTotal > 0 && orderPayable > 0 && orderPayable < orderTotal)
     ? orderPayable / orderTotal : 1;
   // 必须走 utils/items：双重编码（数组元素本身是 JSON 字符串）时直接取字段恒为 undefined
@@ -94,10 +98,10 @@ function deriveUnitPrice(card) {
  *   · schedule_id 用固定格式 `timecard:<cardId>`，与课时结转行（schedule_id 是真排期 id）
  *     天然隔离 —— revertRevenueRecognition(scheduleId, studentId) 只会按真排期 id 删除，
  *     绝不会误删时效卡的摊销行；
- *   · 同卡只保留一行：每次把 amount UPDATE 为**累计应结转额**（不是本次增量），
- *     重复执行 delta ≤ 0 时不做任何写入，因此多次运行结果收敛、可安全重跑。
- *     财务侧按 recognized_at 落区间聚合：这里每次更新都把 recognized_at 推到 asOf，
- *     使该卡已确认收入整体落在最近一次摊销所在期间（合同负债总量口径始终正确）。
+ *   · 只追加「本次增量」行：已结转额取该卡所有行的 SUM，delta ≤ 0 时不写入，
+ *     因此重复执行结果收敛、可安全重跑。
+ *     **不能**把既有行 UPDATE 成累计额并改写 recognized_at —— 财务按 recognized_at
+ *     落区间聚合，那样等于每天把历史确认收入搬到当天，已出账月报会逐日缩水。
  *   · classes 写 0（时效卡不消耗课时），basis 写明摊销公式便于审计核对。
  *
  * 表不存在（迁移 017 未执行）时静默跳过，绝不让调用方报错。
@@ -117,6 +121,9 @@ function recognizeTimeCardRevenue(asOfDate) {
       AND order_id IS NOT NULL AND order_id <> ''
       AND activated_at IS NOT NULL AND expires_at IS NOT NULL
       AND expires_at > activated_at
+      -- 已退卡/已作废的卡不再参与摊销：退卡会把 expires_at 置为当前时刻，
+      -- 若不过滤状态，elapsed 被夹满 → 次日日任务把已退款订单重新确认成 100% 收入。
+      AND status NOT IN ('refunded', 'cancelled')
   `).all();
 
   let recognized = 0;
@@ -133,24 +140,26 @@ function recognizeTimeCardRevenue(asOfDate) {
       const shouldRecognize = Math.round(paid.lineTotal * elapsedMs / totalMs);
 
       const scheduleId = `timecard:${card.id}`;
-      const existing = db.prepare(
-        'SELECT id, amount FROM revenue_recognitions WHERE schedule_id = ? AND student_id = ?'
-      ).get(scheduleId, card.student_id);
-      const already = existing ? (Number(existing.amount) || 0) : 0;
+      // 只按 schedule_id 查：`timecard:<cardId>` 本身已经唯一。
+      // 带上 student_id 会让「时效卡转让」（member_cards.student_id 变更）查不到旧行，
+      // 于是为同一订单再插一行，同一笔收款被确认两次收入。
+      // 已结转额 = 该卡所有摊销行之和（历史数据是「一行累计」，求和同样成立）
+      const already = Number(db.prepare(
+        'SELECT COALESCE(SUM(amount), 0) AS s FROM revenue_recognitions WHERE schedule_id = ?'
+      ).get(scheduleId).s) || 0;
       const delta = shouldRecognize - already;
       if (delta <= 0) continue; // 已结转额不小于应结转额：无新增，保持幂等
 
-      const basis = `时效卡按时间摊销: 实付${paid.lineTotal}元 × 已过${Math.round(elapsedMs / 86400000)}天 / 总${Math.round(totalMs / 86400000)}天; order=${paid.orderId}; card=${card.id}`;
-      if (existing) {
-        db.prepare('UPDATE revenue_recognitions SET amount = ?, recognized_at = ?, basis = ? WHERE id = ?')
-          .run(shouldRecognize, asOf, basis, existing.id);
-      } else {
-        db.prepare(`
-          INSERT INTO revenue_recognitions (id, order_id, student_id, schedule_id, attendance_id,
-            course_id, course_name, classes, amount, recognized_at, basis, created_at)
-          VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, ?, ?, ?, ?)
-        `).run(generateId('rr_'), paid.orderId, card.student_id, scheduleId, shouldRecognize, asOf, basis, asOf);
-      }
+      // 只插「本次增量」行，绝不改写既有行的 recognized_at。
+      // 旧实现把唯一一行 UPDATE 成累计额并把 recognized_at 推到当天 ——
+      // 财务按 recognized_at 落区间聚合，等于每天把这张卡的历史确认收入整体搬到「今天」，
+      // 上月/上季度的已出账报表会逐日缩水直至归零。
+      const basis = `时效卡摊销增量: 累计应结转${shouldRecognize}元(实付${paid.lineTotal}元 × 已过${Math.round(elapsedMs / 86400000)}天 / 总${Math.round(totalMs / 86400000)}天); order=${paid.orderId}; card=${card.id}`;
+      db.prepare(`
+        INSERT INTO revenue_recognitions (id, order_id, student_id, schedule_id, attendance_id,
+          course_id, course_name, classes, amount, recognized_at, basis, created_at)
+        VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, ?, ?, ?, ?)
+      `).run(generateId('rr_'), paid.orderId, card.student_id, scheduleId, delta, asOf, basis, asOf);
       recognized++;
       amount += delta;
     }

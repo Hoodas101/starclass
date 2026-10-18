@@ -73,13 +73,13 @@
 
       <div v-if="importResult" class="import-result" :class="(importResult.failed.length || importWarnings.length) ? 'has-failed' : 'ok'">
         <p>
-          导入完成：成功 {{ importResult.success }} 条，失败 {{ importResult.failed.length }} 条<template v-if="importSkipped.length">，另有 {{ importSkipped.length }} 条已存在被跳过</template><template v-if="importWarnings.length">，另有 {{ importWarnings.length }} 条未建立家长绑定</template>。
+          导入完成：成功 {{ importResult.success }} 条，失败 {{ importResult.failed.length }} 条<template v-if="importSkipped.length">，另有 {{ importSkipped.length }} 条已存在被跳过</template><template v-if="importWarnings.length">，另有 {{ importWarnings.length }} 条提示</template>。
         </p>
         <div v-for="(f, i) in importResult.failed.slice(0, 6)" :key="i" class="preview-error-item">{{ f }}</div>
         <div v-for="(s, i) in importSkipped.slice(0, 6)" :key="'s' + i" class="preview-warn-item">{{ s }}</div>
         <div v-if="importSkipped.length > 6" class="preview-warn-item">… 其余 {{ importSkipped.length - 6 }} 条因已存在被跳过略</div>
         <div v-for="(w, i) in importWarnings.slice(0, 6)" :key="'w' + i" class="preview-warn-item">{{ w }}</div>
-        <div v-if="importWarnings.length > 6" class="preview-warn-item">… 其余 {{ importWarnings.length - 6 }} 条未建立家长绑定略</div>
+        <div v-if="importWarnings.length > 6" class="preview-warn-item">… 其余 {{ importWarnings.length - 6 }} 条提示略</div>
       </div>
     </div>
 
@@ -87,8 +87,8 @@
       <el-button @click="visible = false">关闭</el-button>
       <el-button
         type="primary"
-        :loading="importing"
-        :disabled="!previewRows.length"
+        :loading="importing || parsing"
+        :disabled="!previewRows.length || parsing"
         @click="doImport"
       >开始导入</el-button>
     </template>
@@ -115,6 +115,7 @@ const visible = ref(false)
 const previewRows = ref([])
 const parseErrors = ref([])
 const importing = ref(false)
+const parsing = ref(false) // 文件解析中：期间禁用「开始导入」，避免提交上一份文件的预览
 const importResult = ref(null)
 // 表头诊断信息（未识别列 / 缺失必填列 / 实际表头 / 使用的工作表 / 文件编码）
 const headerDiag = ref(null)
@@ -137,17 +138,33 @@ const open = () => {
   headerDiag.value = null
   sheetOptions.value = []
   selectedSheets.value = []
+  parsing.value = false
 }
 
 const downloadTemplate = () => {
   exportXlsx(`${props.title}导入模板`, props.templateColumns.map((c) => c.label), [[]], { sheetName: '模板' })
 }
 
+// 选文件的递增序号：快速连选时只接纳「最后一次」的解析结果，避免慢回调覆盖新文件的预览
+let parseSeq = 0
+
 const handleFile = (file) => {
+  const seq = ++parseSeq
+  const stale = () => seq !== parseSeq
+  // 解析一开始就清空旧预览：否则新文件还没解析完时点「开始导入」，提交的是**上一个文件**的数据
+  previewRows.value = []
+  parseErrors.value = []
+  importResult.value = null
+  headerDiag.value = null
+  sheetOptions.value = []
+  selectedSheets.value = []
+  parsing.value = true
+
   const lower = (file.name || '').toLowerCase()
   if (lower.endsWith('.csv') || lower.endsWith('.tsv') || lower.endsWith('.txt')) {
     const reader = new FileReader()
     reader.onload = () => {
+      if (stale()) return
       // 先解码再解析：固定 readAsText(file,'utf-8') 会把 GBK 文件读成乱码，而乱码字符非空，
       // 姓名列照样通过必填校验并入库。改为 UTF-8 优先、GBK 兜底，无法识别则明确报错。
       const { text, encoding, garbled } = decodeTextFile(reader.result)
@@ -157,6 +174,7 @@ const handleFile = (file) => {
       }
       const rows = parseCsv(text)
       const parsed = csvToObjects(rows, props.templateColumns)
+      parsing.value = false
       applyParsed(parsed, { encoding, header: parsed.header || [] })
     }
     reader.readAsArrayBuffer(file)
@@ -167,6 +185,7 @@ const handleFile = (file) => {
   reader.onload = async (e) => {
     try {
       const XLSX = await import('xlsx')
+      if (stale()) return
       const wb = XLSX.read(e.target.result, { type: 'array' })
       // 以「网格」而非对象模式读取：对象模式固定把第 1 行当表头，而机构台账常是
       // 「第 1 行标题 + 第 2 行列名」，会一列都匹配不上并导致整表错位一列。
@@ -177,8 +196,10 @@ const handleFile = (file) => {
         const r = csvToObjects(grid, props.templateColumns)
         return { name, rows: grid.length, importable: r.objects.length, parsed: r }
       })
+      if (stale()) return
       const usable = sheetOptions.value.filter((o) => o.importable > 0)
       selectedSheets.value = usable.map((o) => o.name)
+      parsing.value = false
       if (!usable.length) {
         // 一张都解析不出数据时仍要给出诊断（缺失必填列 / 未识别列 / 表头行）
         const first = sheetOptions.value[0]
@@ -188,6 +209,8 @@ const handleFile = (file) => {
       }
       applySelection()
     } catch (err) {
+      if (stale()) return
+      parsing.value = false
       ElMessage.error('Excel 解析失败：' + (err && err.message ? err.message : err))
     }
   }
@@ -204,6 +227,8 @@ const applySelection = () => {
     merged.objects.push(...p.objects)
     // 错误信息带表名前缀：多表合并后用户才知道该去哪张表改
     merged.errors.push(...p.errors.map((e) => `[${o.name}] ${e}`))
+    // 未识别列必须一并合并：csvToObjects 对未匹配字段填空字符串，不提示就等于静默丢列
+    merged.unrecognized.push(...p.unrecognized.map((u) => (chosen.length > 1 ? `[${o.name}] ${u}` : u)))
     if (!merged.header.length) merged.header = p.header
     if (!merged.headerRowIndex && p.headerRowIndex) merged.headerRowIndex = p.headerRowIndex
     if (p.missingRequired.length) merged.missingRequired = p.missingRequired

@@ -51,6 +51,8 @@ const SUITES = [
   ['v104-fixes-regression.cjs', 'v1.0.4 修复项（卡种校验/导入发卡/日期校验/孤儿账号/取卡口径）回归'],
   ['v105-fixes-regression.cjs', 'v1.0.6 修复项（金额宽松解析/日期三格式/join_date 文本形态）回归'],
   ['v106-fixes-regression.cjs', 'v1.0.7 修复项（生日宽松解析/状态映射/兄弟姐妹/行号/0 元/同单号后缀）回归'],
+  ['security-regression.cjs', '安全回归（免密登录/模拟支付默认关、越权、导出脱敏、头像类型）'],
+  ['business-regression.cjs', '业务口径回归（0 元单/时效卡摊销/转让/积分过期/暂停卡回补）'],
   ['card-expiry-regression.cjs', 'P1-8 会员卡过期流转'],
   ['dashboard-charts-regression.cjs', 'P1-13 看板图表聚合'],
   ['sales-export-regression.cjs', 'P1-18 销售导出单品统计'],

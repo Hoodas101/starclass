@@ -396,9 +396,12 @@ router.post('/import', (req, res) => {
         const t = now();
         // 状态映射到系统枚举：未知值记 warning 并回落 active，绝不静默写入非法值
         const statusInput = String(r.status || '').trim();
-        const statusVal = STUDENT_STATUS_MAP[statusInput]
+        // 必须用 hasOwn 查自有键：直接下标访问会命中原型链（status 写成 constructor / toString /
+        // __proto__ 时返回函数或对象），绑进 SQLite 会抛错 → 整批事务回滚、接口 500。
+        const mappedStatus = Object.hasOwn(STUDENT_STATUS_MAP, statusInput) ? STUDENT_STATUS_MAP[statusInput] : '';
+        const statusVal = mappedStatus
           || (VALID_STUDENT_STATUS.includes(statusInput) ? statusInput : 'active');
-        const statusUnknown = !!statusInput && !STUDENT_STATUS_MAP[statusInput] && !VALID_STUDENT_STATUS.includes(statusInput);
+        const statusUnknown = !!statusInput && !mappedStatus && !VALID_STUDENT_STATUS.includes(statusInput);
         // 同建档路径：join_date 为 TEXT 列，绑字符串避免落成 '...0'（前端会解析失败显示 `-`）
         const joinDateVal = String(joinNorm ? (new Date(joinNorm + 'T12:00:00').getTime() || t) : t);
         db.prepare(`
@@ -501,7 +504,9 @@ router.post('/import', (req, res) => {
       success: okCount.length,
       failed,
       created: okCount.length,
-      unlinked: warnings.length,
+      // 只统计「学员建成了但家长绑定没建」的行 —— warnings 里还有兄弟姐妹、状态回落等提示，
+      // 直接取 warnings.length 会把「已绑定」的行也算成未绑定（审计记录与界面提示都会失真）。
+      unlinked: okCount.filter((x) => !x.parentLinked).length,
       warnings,
       skipped: skipped.length,
       skippedRows: skipped,
@@ -661,8 +666,12 @@ router.get('/options', (req, res) => {
       where += ' AND s.name LIKE ?';
       params.push(`%${q}%`);
     }
+    // parent_phone 供「开单 / 登记请假」的远程搜索下拉区分同名学员
+    // （同名不同孩子时，只看姓名无法判断该选哪一个）
     const list = db.prepare(`
-      SELECT s.id, s.name, s.member_no
+      SELECT s.id, s.name, s.member_no,
+        (SELECT pb.parent_phone FROM parent_bindings pb WHERE pb.student_id = s.id
+          ORDER BY pb.is_main DESC LIMIT 1) AS parent_phone
       FROM students s ${where}
       ORDER BY s.created_at DESC LIMIT 50
     `).all(...params);
@@ -854,8 +863,12 @@ router.get('/:id', requireAuth, (req, res) => {
     const bind = db.prepare('SELECT 1 FROM parent_bindings WHERE student_id = ? AND parent_openid = ?').get(id, req.openid);
     if (!bind && !canViewStudents(req)) return res.status(403).json(safeFail('无权访问该成员信息'));
 
-    // 绑定家长
-    const parents = db.prepare('SELECT parent_name, parent_phone, relation, is_main FROM parent_bindings WHERE student_id = ?').all(id);
+    // 绑定家长：员工可见全部监护人；家长只应看到自己这一条。
+    // 此前不分角色一律返回，会把同一孩子的另一位家长（离异/分居/祖辈）姓名与手机号
+    // 泄露给当前家长 —— 而手机号在本系统是登录凭证，等于顺手交出了对方账号。
+    const parents = canViewStudents(req)
+      ? db.prepare('SELECT parent_name, parent_phone, relation, is_main FROM parent_bindings WHERE student_id = ?').all(id)
+      : db.prepare('SELECT parent_name, parent_phone, relation, is_main FROM parent_bindings WHERE student_id = ? AND parent_openid = ?').all(id, req.openid);
     // 会员卡（仅返回基本信息）
     const cards = db.prepare(`
       SELECT id, order_id, card_type_name, total_classes, remaining_classes, expires_at, status,

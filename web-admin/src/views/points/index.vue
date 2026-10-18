@@ -172,7 +172,7 @@
       ref="exportDialogRef"
       title="导出积分数据"
       :description="exportDescription"
-      @confirm="doExportByAction"
+      @confirm="(range, done) => doExportByAction(range).finally(done)"
     />
 </template>
 

@@ -14,7 +14,7 @@
       </div>
       <div class="toolbar-right">
         <el-select v-model="filterTeacher" placeholder="全部教师" clearable style="width: 140px" @change="loadSchedules">
-          <el-option v-for="t in teachers" :key="t.id" :label="t.name" :value="t.id" />
+          <el-option v-for="t in coachOptions" :key="t.id" :label="t.name" :value="t.id" />
         </el-select>
         <el-select v-model="filterClassroom" placeholder="全部场地" clearable style="width: 140px" @change="loadSchedules">
           <el-option v-for="c in classrooms" :key="c.id" :label="c.name" :value="c.id" />
@@ -256,7 +256,7 @@
 
         <el-form-item label="授课教师" prop="teacherId">
           <el-select v-model="scheduleForm.teacherId" placeholder="选择教师" clearable style="width: 100%">
-            <el-option v-for="t in teachers" :key="t.id" :label="t.name" :value="t.id" />
+            <el-option v-for="t in coachOptions" :key="t.id" :label="t.name" :value="t.id" />
           </el-select>
         </el-form-item>
 
@@ -420,7 +420,7 @@
       ref="exportDialogRef"
       title="导出排期数据"
       description="选择时间范围后确认导出，未选择时默认导出当前周。"
-      @confirm="doExport"
+      @confirm="(range, done) => doExport(range).finally(done)"
     />
 
     <!-- 周期排课规则管理（增量 P1-7）：此前规则只能新建、不能改/停用 -->
@@ -500,7 +500,7 @@
         </el-form-item>
         <el-form-item label="授课教师">
           <el-select v-model="ruleForm.teacherId" clearable placeholder="待定" style="width: 100%">
-            <el-option v-for="t in teachers" :key="t.id" :label="t.name" :value="t.id" />
+            <el-option v-for="t in coachOptions" :key="t.id" :label="t.name" :value="t.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="场地">
@@ -577,6 +577,9 @@ const submitting = ref(false)
 // 基础资源
 // ============================================
 const teachers = ref([])
+// teachers 表同表混装教练与销售（role=sales 是招生顾问）。排课只能选教练，
+// 否则「授课教师」会混进销售，教练课时统计与薪资口径随之被污染。
+const coachOptions = computed(() => teachers.value.filter((t) => (t.role || 'coach') !== 'sales'))
 const classrooms = ref([])
 const courses = ref([])
 
@@ -710,6 +713,14 @@ const loadSchedules = async () => {
     } else if (viewMode.value === 'month') {
       params.startDate = anchorDate.value.startOf('month').format('YYYY-MM-DD')
       params.endDate = anchorDate.value.endOf('month').format('YYYY-MM-DD')
+      params.page = 1
+      params.pageSize = 500
+    } else if (viewMode.value === 'day') {
+      // 日视图必须带日期区间：否则后端按 date ASC 返回全库最早 20 条，
+      // 前端再按当天过滤 → 当天有课也显示空白，用户会以为「这天没排课」。
+      const d = anchorDate.value.format('YYYY-MM-DD')
+      params.startDate = d
+      params.endDate = d
       params.page = 1
       params.pageSize = 500
     } else {
@@ -957,7 +968,9 @@ const defaultForm = () => ({
   teacherId: '',
   classroomId: '',
   date: dayjs().format('YYYY-MM-DD'),
-  timeRange: [dayjs('09:00', 'HH:mm'), dayjs('10:30', 'HH:mm')],
+  // 组件配了 value-format="HH:mm"，v-model 就是字符串数组；
+  // dayjs('09:00','HH:mm') 在未注册 customParseFormat 时是 Invalid Date，默认值等于没有。
+  timeRange: ['09:00', '10:30'],
   repeat: 'none',
   weekDays: [1, 3, 5],
   intervalDays: 2,
@@ -993,7 +1006,7 @@ const openEditDialog = async (row) => {
     teacherId: row.teacher_id || '',
     classroomId: row.classroom_id || '',
     date: row.date || dayjs().format('YYYY-MM-DD'),
-    timeRange: [dayjs(row.start_time || '09:00', 'HH:mm'), dayjs(row.end_time || '10:30', 'HH:mm')],
+    timeRange: [row.start_time || '09:00', row.end_time || '10:30'],
     repeat: 'none',
     weekDays: [1, 3, 5],
     intervalDays: 2,
@@ -1122,6 +1135,13 @@ const removeStudent = async (s) => {
   }
 }
 
+// 兼容两种 v-model 形态：dayjs 对象 / 'HH:mm' 字符串
+const toHHmm = (v) => {
+  if (!v) return ''
+  if (typeof v === 'string') return v.slice(0, 5)
+  return typeof v.format === 'function' ? v.format('HH:mm') : String(v)
+}
+
 const submitSchedule = async () => {
   if (!scheduleFormRef.value) return
   const valid = await scheduleFormRef.value.validate().catch(() => false)
@@ -1133,8 +1153,11 @@ const submitSchedule = async () => {
     teacherId: scheduleForm.teacherId,
     classroomId: scheduleForm.classroomId,
     date: scheduleForm.date,
-    startTime: scheduleForm.timeRange[0].format('HH:mm'),
-    endTime: scheduleForm.timeRange[1].format('HH:mm'),
+    // el-time-picker 配了 value-format="HH:mm" 时，v-model 是**字符串数组**；
+    // 只有未配 value-format 时才是 dayjs 对象。此前一律调 .format()，对字符串抛 TypeError，
+    // 且这段在 try 之前 —— 用户点「确认排期」完全无反应（无 loading、无提示、不发请求）。
+    startTime: toHHmm(scheduleForm.timeRange[0]),
+    endTime: toHHmm(scheduleForm.timeRange[1]),
     maxStudents: scheduleForm.maxStudents,
     remark: scheduleForm.remark,
     groupCourseId: scheduleForm.groupCourseId,
@@ -1329,8 +1352,8 @@ const submitRuleEdit = async () => {
   }
   const payload = {
     week_day: ruleForm.weekDay,
-    start_time: ruleForm.timeRange[0],
-    end_time: ruleForm.timeRange[1],
+    start_time: toHHmm(ruleForm.timeRange[0]),
+    end_time: toHHmm(ruleForm.timeRange[1]),
     teacher_id: ruleForm.teacherId || '',
     classroom_id: ruleForm.classroomId || '',
     max_students: ruleForm.maxStudents,

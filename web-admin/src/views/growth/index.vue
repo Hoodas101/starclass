@@ -26,8 +26,8 @@
       <TableViewBar
         :views="growthViews"
         :active-id="growthActiveView"
-        @select="(id) => growthApplyView(id)"
-        @create="(name) => growthCreateView(name)"
+        @select="(id) => growthApplyView(id, (f) => { if (f.section) activeSection.value = f.section })"
+        @create="(name) => growthCreateView(name, { section: activeSection.value })"
         @rename="growthRenameView"
         @remove="growthRemoveView"
       />
@@ -41,6 +41,7 @@
         @update:widths="growthOnWidths"
         @update:auto-width="growthOnAutoWidth"
         @reset-widths="growthResetWidths"
+        @save="growthOnSettingsSave"
       />
     </div>
 
@@ -103,6 +104,7 @@
               <template #header>
                 <SortableHeader
                   :label="col.label"
+                  :align="col.align"
                   :state="growthSortState(col.key)"
                   :priority="growthSortPriority(col.key)"
                   :sortable="col.sortable !== false"
@@ -200,6 +202,7 @@
               <template #header>
                 <SortableHeader
                   :label="col.label"
+                  :align="col.align"
                   :state="growthSortState(col.key)"
                   :priority="growthSortPriority(col.key)"
                   :sortable="col.sortable !== false"
@@ -245,6 +248,7 @@
               <template #header>
                 <SortableHeader
                   :label="col.label"
+                  :align="col.align"
                   :state="growthSortState(col.key)"
                   :priority="growthSortPriority(col.key)"
                   :sortable="col.sortable !== false"
@@ -296,6 +300,7 @@
               <template #header>
                 <SortableHeader
                   :label="col.label"
+                  :align="col.align"
                   :state="growthSortState(col.key)"
                   :priority="growthSortPriority(col.key)"
                   :sortable="col.sortable !== false"
@@ -346,6 +351,7 @@
               <template #header>
                 <SortableHeader
                   :label="col.label"
+                  :align="col.align"
                   :state="growthSortState(col.key)"
                   :priority="growthSortPriority(col.key)"
                   :sortable="col.sortable !== false"
@@ -393,6 +399,7 @@
               <template #header>
                 <SortableHeader
                   :label="col.label"
+                  :align="col.align"
                   :state="growthSortState(col.key)"
                   :priority="growthSortPriority(col.key)"
                   :sortable="col.sortable !== false"
@@ -431,6 +438,7 @@
               <template #header>
                 <SortableHeader
                   :label="col.label"
+                  :align="col.align"
                   :state="growthSortState(col.key)"
                   :priority="growthSortPriority(col.key)"
                   :sortable="col.sortable !== false"
@@ -601,7 +609,7 @@
       ref="exportDialogRef"
       title="导出增长数据"
       description="选择时间范围后确认导出，留空导出全部数据。"
-      @confirm="doExport"
+      @confirm="(range, done) => doExport(range).finally(done)"
     />
 </template>
 
@@ -1270,7 +1278,7 @@ const {
   onWidthsChange: growthOnWidths, onAutoWidthChange: growthOnAutoWidth, resetWidths: growthResetWidths,
   viewList: growthViews, activeViewId: growthActiveView,
   applyView: growthApplyView, createView: growthCreateView, renameView: growthRenameView,
-  removeView: growthRemoveView, load: growthLoadKit,
+  removeView: growthRemoveView, load: growthLoadKit, onSettingsSave: growthOnSettingsSave,
 } = useTableKit({
   settingsKey: 'growth_columns',
   defs: () => growthDefs.value,
@@ -1279,6 +1287,7 @@ const {
   getValue: growthSortValue,
   defaults: GROWTH_DEFAULTS,
   extraOf: headerExtra,
+  viewLabels: { __all__: '全部线索' },
 })
 
 const loadSuggestions = async () => {

@@ -27,8 +27,14 @@ function computeExpiry(ts) {
  * @param {number} nowTs 当前毫秒戳
  */
 function expirePoints(db, nowTs) {
+  // 只回收到期**获得**的积分。
+  // 退款/取消会把赠分流水 type 从 earn 翻成 refund（amount 仍为正、expire_at 仍保留），
+  // 不过滤 type 的话，这笔「已经因退款被收回」的赠分到期后会被再扣一次，
+  // 把学员后来新赚的积分也清掉。
   const logs = db.prepare(
-    "SELECT id, student_id, amount FROM point_logs WHERE expired = 0 AND expire_at IS NOT NULL AND expire_at <= ?"
+    `SELECT id, student_id, amount FROM point_logs
+     WHERE expired = 0 AND expire_at IS NOT NULL AND expire_at <= ?
+       AND type IN ('earn', 'checkin')`
   ).all(nowTs);
 
   let expiredTotal = 0;

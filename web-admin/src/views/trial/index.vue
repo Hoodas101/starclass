@@ -21,6 +21,7 @@
           @update:widths="onWidthsChange"
           @update:auto-width="onAutoWidthChange"
           @reset-widths="resetWidths"
+          @save="onSettingsSave"
         />
       </div>
     </div>
@@ -53,6 +54,7 @@
             <template #header>
               <SortableHeader
                 :label="col.label"
+                :align="col.align"
                 :state="sortState(col.key)"
                 :priority="sortPriority(col.key)"
                 :sortable="col.sortable !== false"
@@ -246,11 +248,18 @@ import {
   convertTrial,
 } from '@/api/modules'
 import { usePerm } from '@/composables/usePerm'
+import { useSettingsStore } from '@/store/settings'
 
 // 转化链路要调 POST /students（后端限管理员），故入口仅对管理员开放，
 // 避免销售角色点进去必然 403
 const isAdmin = computed(() => usePerm().role.value === 'admin')
 const router = useRouter()
+
+// `$t` 是 main.js 挂在 app.config.globalProperties 上的，**只在模板里可用**。
+// 在 <script setup> 顶层引用会直接 ReferenceError，整个页面 setup 崩溃（表现为白屏）。
+// 需要称呼时一律走 store 的 t()。
+const settingsStore = useSettingsStore()
+const T = (key) => settingsStore.t(key)
 
 // 状态枚举与后端一致（backend/routes/trial.js）：
 // apply 写入 'pending'；PUT /:id 按 action 置为 'assigned'（assign）或 'rejected'（reject）。
@@ -273,7 +282,7 @@ const error = ref('')
 // ── 多维表格：排序 / 列宽 / 视图（与学员档案、销售表同一套能力，见 composables/useTableKit）──
 const TRIAL_COLUMNS = [
   { key: 'createdAt', label: '提交时间', minWidth: 140 },
-  { key: 'student', label: $t('learner'), minWidth: 130 },
+  { key: 'student', label: T('learner'), minWidth: 130 },
   { key: 'parent', label: '家长 / 电话', minWidth: 170 },
   { key: 'course', label: '意向课程', minWidth: 130, tooltip: true },
   { key: 'preferred', label: '期望时间', minWidth: 150 },
@@ -312,7 +321,7 @@ const trialSortValue = (key, row) => {
 const {
   settings: trialSettings, visibleDefs, colWidths, sortedRows, sortState, sortPriority, onSort, onResize,
   customWidths, autoColumnWidth, onWidthsChange, onAutoWidthChange, resetWidths,
-  viewList, activeViewId, applyView, createView, renameView, removeView, load: loadTableKit,
+  viewList, activeViewId, applyView, createView, renameView, removeView, load: loadTableKit, onSettingsSave,
 } = useTableKit({
   settingsKey: 'trial_columns',
   defs: () => TRIAL_COLUMNS,
@@ -321,9 +330,13 @@ const {
   getValue: trialSortValue,
   defaults: TRIAL_DEFAULTS,
   extraOf: headerExtra,
+  viewLabels: { __all__: '全部预约' },
 })
 
+let loadSeq = 0
 const loadData = async () => {
+  // 请求序号：慢网下快速切换状态筛选时，先发的请求可能后返回并覆盖新数据
+  const seq = ++loadSeq
   error.value = ''
   loading.value = true
   try {
@@ -332,15 +345,17 @@ const loadData = async () => {
       pageSize: pageSize.value,
       status: status.value || undefined,
     })
+    if (seq !== loadSeq) return
     list.value = res?.list || []
     total.value = res?.total || 0
   } catch (e) {
+    if (seq !== loadSeq) return
     // 列表加载失败：写 error 状态由 ListErrorState 呈现并提供重试（拦截器已提示业务/网络错误）
     error.value = e?.message || '加载试听预约失败'
     list.value = []
     total.value = 0
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 

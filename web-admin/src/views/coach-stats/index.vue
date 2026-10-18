@@ -280,7 +280,7 @@
       title="导出数据"
       :description="exportDescription"
       default-shortcut="month"
-      @confirm="doExport"
+      @confirm="(range, done) => doExport(range).finally(done)"
     />
 </template>
 

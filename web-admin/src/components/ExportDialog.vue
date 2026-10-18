@@ -71,15 +71,18 @@ const applyDefaultShortcut = (key) => {
   return map[key] || null
 }
 
-const confirm = async () => {
+const confirm = () => {
   if (exporting.value) return
   exporting.value = true
-  try {
-    await emit('confirm', range.value ? [...range.value] : null)
-    visible.value = false
-  } finally {
+  // 把「完成」回调交给父级：父级在导出真正结束时调用它，弹窗才会关闭。
+  // 此前写的是 `await emit('confirm', ...)` —— emit 不返回父级 Promise，
+  // await 立即通过，弹窗在导出**开始瞬间**就关闭、按钮「导出中…」形同虚设，
+  // 用户会重复点击触发重复请求与重复下载。
+  const done = () => {
     exporting.value = false
+    visible.value = false
   }
+  emit('confirm', range.value ? [...range.value] : null, done)
 }
 
 const onClosed = () => {

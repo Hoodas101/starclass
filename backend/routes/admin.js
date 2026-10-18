@@ -121,7 +121,7 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     // 今日收入（已支付订单）
     const todayRevenueRow = db.prepare(`
       SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND paid_at >= ? AND paid_at < ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?${spSql}
     `).get(dayStartMs(today), dayEndMs(today), ...spParams);
     const todayRevenue = todayRevenueRow?.total || 0;
 
@@ -132,7 +132,7 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const yesterday = formatDate(yd.getTime());
     const yesterdayRevenueRow = db.prepare(`
       SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND paid_at >= ? AND paid_at < ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?${spSql}
     `).get(dayStartMs(yesterday), dayEndMs(yesterday), ...spParams);
     const yesterdayRevenue = yesterdayRevenueRow?.total || 0;
     const pct = (cur, prev) => (prev > 0 ? Math.round(((cur - prev) / prev) * 1000) / 10 : null);
@@ -143,7 +143,7 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const weekStart = formatDate(weekStartMs);
     const weekRevenueRow = db.prepare(`
       SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND paid_at >= ? AND paid_at < ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?${spSql}
     `).get(dayStartMs(weekStart), dayEndMs(today), ...spParams);
     const weekRevenue = weekRevenueRow?.total || 0;
 
@@ -153,7 +153,7 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const prevWeekEnd = formatDate(weekStartMs - 86400000);
     const prevWeekRevenueRow = db.prepare(`
       SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND paid_at >= ? AND paid_at < ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?${spSql}
     `).get(dayStartMs(prevWeekStart), dayEndMs(prevWeekEnd), ...spParams);
     const prevWeekRevenue = prevWeekRevenueRow?.total || 0;
 
@@ -161,11 +161,11 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const monthStart = today.slice(0, 7); // YYYY-MM
     const monthRevenueRow = db.prepare(`
       SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at < ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?${spSql}
     `).get(monthStartMs(monthStart), nextMonthStartMs(monthStart), ...spParams);
     const monthRefundRow = db.prepare(`
       SELECT COALESCE(SUM(refunded_amount), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND refunded_amount > 0 AND updated_at >= ? AND updated_at < ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND refunded_amount > 0 AND COALESCE(NULLIF(last_refunded_at,0), updated_at) >= ? AND COALESCE(NULLIF(last_refunded_at,0), updated_at) < ?${spSql}
     `).get(monthStartMs(monthStart), nextMonthStartMs(monthStart), ...spParams);
     const monthRevenue = (monthRevenueRow?.total || 0) - (monthRefundRow?.total || 0);
 
@@ -174,24 +174,24 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const prevMonthStart = `${prevMonthKey.getFullYear()}-${String(prevMonthKey.getMonth() + 1).padStart(2, '0')}`;
     const prevMonthRevenueRow = db.prepare(`
       SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND paid_at >= ? AND paid_at < ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?${spSql}
     `).get(monthStartMs(prevMonthStart), nextMonthStartMs(prevMonthStart), ...spParams);
     const prevMonthRefundRow = db.prepare(`
       SELECT COALESCE(SUM(refunded_amount), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND refunded_amount > 0 AND updated_at >= ? AND updated_at < ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND refunded_amount > 0 AND COALESCE(NULLIF(last_refunded_at,0), updated_at) >= ? AND COALESCE(NULLIF(last_refunded_at,0), updated_at) < ?${spSql}
     `).get(monthStartMs(prevMonthStart), nextMonthStartMs(prevMonthStart), ...spParams);
     const prevMonthRevenue = (prevMonthRevenueRow?.total || 0) - (prevMonthRefundRow?.total || 0);
 
     // 本年 / 去年收入
     const yearRevenueRow = db.prepare(`
       SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND paid_at >= ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ?${spSql}
     `).get(yearStartMs(today.slice(0, 4)), ...spParams);
     const yearRevenue = yearRevenueRow?.total || 0;
     const prevYear = String(Number(today.slice(0, 4)) - 1);
     const prevYearRevenueRow = db.prepare(`
       SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND paid_at >= ? AND paid_at < ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?${spSql}
     `).get(yearStartMs(prevYear), yearStartMs(today.slice(0, 4)), ...spParams);
     const prevYearRevenue = prevYearRevenueRow?.total || 0;
 
@@ -199,7 +199,7 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const monthSales = db.prepare(`
       SELECT TRIM(salesperson) AS salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND TRIM(COALESCE(salesperson, '')) != '' AND paid_at >= ? AND paid_at < ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND TRIM(COALESCE(salesperson, '')) != '' AND paid_at >= ? AND paid_at < ?${spSql}
       GROUP BY TRIM(salesperson) ORDER BY amount DESC LIMIT 10
     `).all(monthStartMs(monthStart), nextMonthStartMs(monthStart), ...spParams);
 
@@ -207,7 +207,7 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const weekSales = db.prepare(`
       SELECT TRIM(salesperson) AS salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND TRIM(COALESCE(salesperson, '')) != ''
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND TRIM(COALESCE(salesperson, '')) != ''
         AND paid_at >= ? AND paid_at < ?${spSql}
       GROUP BY TRIM(salesperson) ORDER BY amount DESC LIMIT 10
     `).all(dayStartMs(weekStart), dayEndMs(today), ...spParams);
@@ -216,7 +216,7 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const yearSales = db.prepare(`
       SELECT TRIM(salesperson) AS salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND TRIM(COALESCE(salesperson, '')) != '' AND paid_at >= ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND TRIM(COALESCE(salesperson, '')) != '' AND paid_at >= ?${spSql}
       GROUP BY TRIM(salesperson) ORDER BY amount DESC LIMIT 10
     `).all(yearStartMs(today.slice(0, 4)), ...spParams);
 
@@ -224,7 +224,7 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     const oneToOneRow = db.prepare(`
       SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total, COUNT(*) as count
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND is_1v1 = 1 AND paid_at >= ? AND paid_at < ?${spSql}
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND is_1v1 = 1 AND paid_at >= ? AND paid_at < ?${spSql}
     `).get(monthStartMs(monthStart), nextMonthStartMs(monthStart), ...spParams);
     const oneToOne = { amount: oneToOneRow?.total || 0, count: oneToOneRow?.count || 0 };
 
@@ -596,7 +596,7 @@ router.get('/charts', dashboardGuard, (req, res) => {
       SELECT date(paid_at/1000, 'unixepoch', 'localtime') AS d,
              COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) AS total
       FROM orders
-      WHERE status IN ('paid', 'refunded') AND paid_at >= ? AND paid_at <= ?
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at <= ?
       GROUP BY d
     `).all(Date.now() - 60 * 86400000, Date.now() + 86400000).map((r) => [r.d, r.total]));
 
@@ -703,7 +703,7 @@ router.get('/export', adminOnly, (req, res) => {
         const dayFrom = startDate;
         const dayTo = endDate;
         // 金额口径：含已全额退款订单并冲减退款额（与看板 KPI 一致）
-        const where = `WHERE status IN ('paid', 'refunded') AND paid_at >= ? AND paid_at < ?`;
+        const where = `WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?`;
         // 产品统计另用窄口径：退款是订单级的，无法分摊到具体商品项，
         // 纳入已全额退款订单会高估单品销量，故单品统计仍只取未退款订单的毛额。
         const wherePaid = `WHERE status = 'paid' AND paid_at >= ? AND paid_at < ?`;

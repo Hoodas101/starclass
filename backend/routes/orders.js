@@ -281,9 +281,15 @@ router.post('/', (req, res) => {
 
       // 建单即确定应收金额，status='paid' 时还会立即结算建卡发积分；
       // overrideAmount 可绕过项目标价任意定价，必须留痕（保留原始 totalAmount，让「被人为改过价」在审计里可见）
-      const auditAfter = { orderNo, studentId, totalAmount, payableAmount, status };
+      const auditAfter = { orderNo, studentId, totalAmount, discountAmount, payableAmount, status };
       if (overrideAmount !== undefined && isFinite(Number(overrideAmount)) && Number(overrideAmount) >= 0) {
         auditAfter.overridden = true;
+      }
+      // 零价单（赠品 / 体验课 / 销售自主让价）单独打标：不需要审批，但必须可追溯。
+      // 打标后审计页可按 zeroAmount / zeroAmountPaid 精确筛出「一分钱没收却发了权益」的单子。
+      if (payableAmount === 0) {
+        auditAfter.zeroAmount = true;
+        if (status === 'paid') auditAfter.zeroAmountPaid = true;
       }
       recordAudit(db, {
         entity: 'order',
@@ -372,6 +378,11 @@ router.post('/import', (req, res) => {
     // 本批内各收据单号出现次数：用于区分「批内同单号多明细行」（加后缀入账）与
     // 「跨批重复导入」（跳过），见下方单号分支
     const batchOrderNos = new Map();
+    // 本批中被判定为「导入前已存在」的单号：该单号在本批的**后续行也要一起跳过**。
+    // 否则重导同一份多行同号文件时，首行被跳过、第 2 行起却当成「批内首次重复」去生成
+    // 一个尚不存在的后缀（R001-2 已存在就试 -3、-4…）并再次入账 —— 订单、流水、卡与积分
+    // 全部重复一遍。
+    const batchSkippedNos = new Set();
 
     // 整批导入单事务提交：任一行出现未预期异常即整体回滚，避免半批订单入库。
     // 行级校验失败只记入 failed 不影响其余行；校验通过的行走 settleOrder，
@@ -406,9 +417,15 @@ router.post('/import', (req, res) => {
         if (rawOrderNo) {
           const seen = (batchOrderNos.get(rawOrderNo) || 0) + 1;
           batchOrderNos.set(rawOrderNo, seen);
+          // 整组跳过：本批中该单号已被判定为「导入前已存在」，后续同号行不再入账
+          if (batchSkippedNos.has(rawOrderNo)) {
+            skipped.push({ row: fileRowOf(r, idx), orderNo: rawOrderNo, reason: '订单号已存在，已跳过' });
+            return;
+          }
           // 只有「本批内首次出现」才查库判跨批重复：批内第 2 行起，第 1 行已在本事务里插入，
           // 直接查库会把同批的多明细行误判成「订单号已存在」而全部跳过。
           if (seen === 1 && orderNoExists.get(rawOrderNo)) {
+            batchSkippedNos.add(rawOrderNo);
             skipped.push({ row: fileRowOf(r, idx), orderNo: rawOrderNo, reason: '订单号已存在，已跳过' });
             return;
           }
@@ -566,8 +583,10 @@ router.post('/:id/pay', (req, res) => {
     // funds received. Therefore it is DISABLED BY DEFAULT in production
     // (fail-closed). Set SIMULATED_PAY_DISABLED=0 to re-enable it explicitly
     // (local dev / demo only). Admins are never affected.
-    const simulatedPayEnabled = process.env.SIMULATED_PAY_DISABLED === '0'
-      || (process.env.SIMULATED_PAY_DISABLED === undefined && process.env.NODE_ENV !== 'production');
+    // 只认显式开启：此前「未设置 SIMULATED_PAY_DISABLED 且非 production」也算开启，
+    // 而日常启动脚本（start-all.sh / npm start）根本不设 NODE_ENV —— 等于默认开放，
+    // 家长可以零成本把自己的待支付订单置为已付并发卡发分。
+    const simulatedPayEnabled = process.env.SIMULATED_PAY_DISABLED === '0';
     if (!isAdminReq(req) && !simulatedPayEnabled) {
       return res.status(403).json(safeFail('该机构未开放自助支付，请联系机构收银'));
     }
@@ -997,6 +1016,26 @@ router.post('/:id/cancel', (req, res) => {
           }
         }
         db.prepare("UPDATE payments SET status = 'refunded' WHERE order_id = ?").run(id);
+        // 已付订单的「取消」在资金上就是一次全额退款：必须落退款额与退款时间。
+        // 否则该单会从财务口径（status IN ('paid','refunded')）里整体消失 ——
+        // 原支付月份的收入被静默改写，且没有任何退款行抵消。
+        db.prepare(`
+          UPDATE orders SET status = 'refunded', refunded_amount = payable_amount,
+            last_refunded_at = ?, updated_at = ?
+          WHERE id = ?
+        `).run(currentTime, currentTime, id);
+        // 冲销该单已确认的收入结转：不删会出现「已收归零、已确认保留」→ 合同负债为负。
+        // 表由迁移 017 建立，老库可能不存在 —— 先判存在，不存在时静默跳过（与退款路径同口径）。
+        try {
+          const hasRecognitionTable = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'revenue_recognitions'"
+          ).get();
+          if (hasRecognitionTable) {
+            db.prepare('DELETE FROM revenue_recognitions WHERE order_id = ?').run(id);
+          }
+        } catch (e) {
+          console.error('[orders cancel] 冲销结转记录失败', e && e.message);
+        }
         // Cancelling a paid order rolls back money — same audit as refund
         recordAudit(db, {
           entity: 'order',
@@ -1005,7 +1044,7 @@ router.post('/:id/cancel', (req, res) => {
           actorId: getOpenId(req),
           actorRole: req.userRole || '',
           before: { status: 'paid', payable_amount: fresh.payable_amount },
-          after: { status: 'cancelled' },
+          after: { status: 'refunded', refunded_amount: fresh.payable_amount },
         });
       } else {
         // 取消未支付订单：无资金回滚，但仍是状态变更，留痕以便追溯「谁取消了谁的单」

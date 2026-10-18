@@ -24,7 +24,7 @@ import { allViews, makeView, userViews, VIEW_ALL, VIEW_FILTERED } from '@/utils/
  * @param {object} opts.defaults 默认列显隐
  * @param {Function} [opts.extraOf] (col) => 表头控件占位像素
  */
-export const useTableKit = ({ settingsKey, defs, rows, textOf, getValue, defaults = {}, extraOf }) => {
+export const useTableKit = ({ settingsKey, defs, rows, textOf, getValue, defaults = {}, extraOf, viewLabels }) => {
   const settings = ref({ ...defaults })
   const sorts = ref([])
   const customWidths = ref({})
@@ -128,7 +128,16 @@ export const useTableKit = ({ settingsKey, defs, rows, textOf, getValue, default
     persist()
   }
 
-  const viewList = computed(() => allViews(views.value))
+  /**
+   * 字段设置「保存」：把弹窗草稿合并进 settings 后立即落盘。
+   * 三个页签此前都没接 `@save`，导致「改了列显隐/顺序，点保存并刷新就丢」。
+   */
+  const onSettingsSave = (next) => {
+    if (next && typeof next === 'object') settings.value = { ...settings.value, ...next }
+    persist()
+  }
+
+  const viewList = computed(() => allViews(views.value, viewLabels))
 
   const currentSnapshot = (filters) => ({
     filters: filters || {},
@@ -149,7 +158,8 @@ export const useTableKit = ({ settingsKey, defs, rows, textOf, getValue, default
     if (!v) return
     sorts.value = Array.isArray(v.sorts) ? v.sorts : []
     customWidths.value = v.widths || {}
-    if (Array.isArray(v.order) && v.order.length) settings.value = { ...settings.value, order: v.order }
+    // 空数组同样要应用：它代表「回到默认列定义顺序」
+    if (Array.isArray(v.order)) settings.value = { ...settings.value, order: v.order }
     if (typeof applySnapshot === 'function') applySnapshot(v.filters || {})
     persist()
   }
@@ -176,7 +186,7 @@ export const useTableKit = ({ settingsKey, defs, rows, textOf, getValue, default
     sorts, sortState, sortPriority, onSort,
     customWidths, autoColumnWidth, onResize, resetWidths, onWidthsChange, onAutoWidthChange,
     views, viewList, activeViewId, applyView, createView, renameView, removeView,
-    load, persist,
+    load, persist, onSettingsSave,
   }
 }
 

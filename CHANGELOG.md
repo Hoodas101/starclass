@@ -5,6 +5,53 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.0.8] - 2026-10-18
+
+自 v1.0.7 起做了**四路独立审计**（安全 / 业务口径 / 前端流程 / 性能）与一轮全流程测试报告修复，
+共确认缺陷 43 条，本轮修复 27 条，并新增 3 个回归套件。
+
+### 安全（多数为默认值放开的漏洞）
+- **P0 家长手机号免密登录默认开启**：`PARENT_PHONE_LOGIN` 按 `NODE_ENV` 推断，而日常启动脚本不设
+  `NODE_ENV` → 生产实例实际运行在「非 production」分支。任何人知道手机号即可免口令登录该家长。
+  改为只认显式 `PARENT_PHONE_LOGIN=true`。
+- **P1 家长自助「模拟支付」默认开启** → 改为只认显式 `SIMULATED_PAY_DISABLED=0`。
+- 排期列表 / 今日课表对家长返回 `s.*`，泄露内部 `remark` → 白名单化。
+- 学员详情把同一孩子的其他监护人手机号返回给家长 → 家长只读自己那条。
+- 头像上传从不校验文件头 → 按 magic bytes 判定，非 JPG/PNG/GIF/WEBP 直接拒。
+- 数据导出含 `users.password` 哈希与 `token_version`、审计 `actor_id` 为空 → 剔除并传入操作者。
+- 家长可自助暂停/恢复会员卡（等价「冻结时间」，可无限续期）→ 仅 admin/coach。
+- 分享积分无凭证可脚本化刷分 → 新增 `POST /api/points/share/ticket`，一次性、绑定 openid+自然周。
+- 零价建单/置已付：不审批、但要留痕 → 审计新增 `zeroAmount` / `zeroAmountPaid` 标记。
+
+### 业务口径（账不平 / 数据错）
+- **时效卡退费后日任务把已退订单重新确认成 100% 收入**（摊销取卡没过滤 status）。
+- **取消已付订单不留退款记录、不冲销结转** → 原月收入凭空消失、合同负债为负。
+- 0 元单（赠卡/核销）按标价结转收入；积分过期把已退款赠分再扣一次；时效卡转让后同一订单确认两次。
+- 时效卡摊销改写 `recognized_at`，把历史月份收入搬到当天 → 改为只追加增量行。
+- 退卡追加退款漏写 `last_refunded_at`；看板退款按 `updated_at` 归集（与财务报表不同源）。
+- 看板 16 处营收查询补齐 `revenue_excluded` / 退款载体行排除；积分排行榜漏计签到积分。
+- 暂停卡撤销签到时课时不回补、流水反被删 → 允许 `paused` 回补。
+
+### 前端流程
+- **P0 排期「日视图」几乎永远空白**（`day` 分支不带日期）。
+- **P0 退款预览失败静默降级为「全额退款」** → 改为禁用提交 + 红字告警。
+- **P0 停用周期规则勾「并取消 N 场」实际一场不取消**（`cascade` 放请求体、后端读 query）。
+- **P1 订单页所有表格设置保存全部静默失败**（`saveSettings` 未导入，`ReferenceError` 被空 catch 吞掉）。
+- **P1 签到页无法把学员标为「请假」**；新建成员可重复点击导致重复档案。
+- 排期默认时间段是 `Invalid Date`（`dayjs('09:00','HH:mm')` 未注册 customParseFormat）。
+- 开单 / 请假下拉此前只加载前 100 / 200 名学员 → 改远程搜索；`/students/options` 补 `parent_phone`。
+- 导出弹窗「导出中…」是假的（`await emit()` 不等待父级 Promise）→ 改为父级回调驱动。
+- 金额口径统一（此前同屏出现 `¥4997` 与 `¥4,997`）；删除与表头漏斗重复的订单状态 radio。
+
+### 性能
+- 补 `idx_notifications_template`（提醒任务逐条全表扫描）、`idx_orders_created`（订单列表默认排序）。
+- 上课记录页默认近 30 天时间窗（此前留空 = 全表扫描 + 临时 B-tree 排序）。
+
+### 测试
+- 新增 `backend/tests/security-regression.cjs`（21 项）、`backend/tests/business-regression.cjs`（11 项）。
+- 新增 `web-admin/tests/static-checks.test.mjs`（13 项源码断言：`$t` 作用域、`@save` 接线、`:align`、`timeRange.format`）。
+- 后端 **40/40 套件**、前端 **62 + 13 项**、构建通过。
+
 ## [1.0.7] - 2026-10-17
 
 用机构真实台账（会员表 150 行 / 销售表 3 个工作表 579 行）实测 v1.0.6，修复 15 项问题。

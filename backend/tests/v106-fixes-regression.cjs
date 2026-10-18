@@ -175,6 +175,51 @@ console.log('\n\x1b[1m[6] P2-8 同单号多行 → 后缀入账\x1b[0m');
     d2.success === 0 && (d2.skipped || 0) === 1, `success=${d2.success} skipped=${d2.skipped} rows=${JSON.stringify(d2.skippedRows)}`);
 }
 
+// ===== [7] 审计修复：重导幂等 / unlinked 口径 / 状态映射原型链 =====
+console.log('\n\x1b[1m[7] 审计修复项\x1b[0m');
+{
+  // 7.1 多行同号文件「整批重放」必须整组跳过（此前首行跳过、后续行生成新后缀再入账一遍）
+  const batch = [
+    { studentName: '订单客户', itemName: '套餐A', amount: '100', paidDate: '2026/5/1', orderNo: 'REPLAY1', _fileRow: 2 },
+    { studentName: '订单客户', itemName: '套餐B', amount: '200', paidDate: '2026/5/1', orderNo: 'REPLAY1', _fileRow: 3 },
+    { studentName: '订单客户', itemName: '套餐C', amount: '300', paidDate: '2026/5/1', orderNo: 'REPLAY1', _fileRow: 4 },
+  ];
+  const first = importOrders(batch);
+  const beforeCnt = db.prepare("SELECT COUNT(*) c FROM orders WHERE order_no LIKE 'REPLAY1%'").get().c;
+  rec('首次导入：三行全部入账（含 -2/-3 后缀）', first.success === 3 && beforeCnt === 3, `success=${first.success} cnt=${beforeCnt}`);
+
+  const replay = importOrders(batch);
+  const afterCnt = db.prepare("SELECT COUNT(*) c FROM orders WHERE order_no LIKE 'REPLAY1%'").get().c;
+  rec('★ 整批重放：一条都不新增（此前会多出 REPLAY1-4）', afterCnt === beforeCnt, `before=${beforeCnt} after=${afterCnt}`);
+  rec('★ 整批重放：三行全部计入 skipped', replay.success === 0 && (replay.skipped || 0) === 3, `success=${replay.success} skipped=${replay.skipped}`);
+
+  // 7.2 unlinked 只统计真正未绑定家长的行（兄弟姐妹 / 状态回落这类 warning 不应计入）
+  const sib = importStudents([
+    { name: '家长甲', phone: '13611110000', _fileRow: 2 },
+    { name: '家长乙', phone: '13611110000', _fileRow: 3 }, // 同手机号不同姓名 → 兄弟姐妹，家长已绑定
+  ]);
+  rec('兄弟姐妹行已建立家长绑定', sib.success === 2, `success=${sib.success}`);
+  rec('★ unlinked 不把兄弟姐妹算成未绑定', sib.unlinked === 0, `unlinked=${sib.unlinked} warnings=${JSON.stringify((sib.warnings || []).map((w) => w.reason))}`);
+
+  const noPhone = importStudents([{ name: '无手机号', _fileRow: 2 }]);
+  rec('无手机号行才计入 unlinked', noPhone.unlinked === 1, `unlinked=${noPhone.unlinked}`);
+
+  // 7.3 状态映射必须只认自有键：constructor / __proto__ 不能把函数当状态绑进 SQLite
+  let protoOk = true;
+  try {
+    const r = importStudents([
+      { name: '原型链甲', status: 'constructor', _fileRow: 2 },
+      { name: '原型链乙', status: '__proto__', _fileRow: 3 },
+    ]);
+    const st = (n) => { const x = db.prepare('SELECT status FROM students WHERE name = ?').get(n); return x && x.status; };
+    protoOk = r.success === 2 && st('原型链甲') === 'active' && st('原型链乙') === 'active';
+    rec('★ 状态写成 constructor/__proto__ 不崩且回落 active', protoOk, `success=${r.success} 甲=${st('原型链甲')} 乙=${st('原型链乙')}`);
+    rec('原型链值也记入 warning', (r.warnings || []).filter((w) => /不在系统枚举内/.test(w.reason)).length === 2, JSON.stringify((r.warnings || []).map((w) => w.reason)));
+  } catch (e) {
+    rec('★ 状态写成 constructor/__proto__ 不崩且回落 active', false, String(e && e.message));
+  }
+}
+
 console.log(`\n\x1b[1m结果汇总：PASS ${pass}  FAIL ${fail}\x1b[0m`);
 db.close();
 process.exit(fail > 0 ? 1 : 0);

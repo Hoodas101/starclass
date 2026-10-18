@@ -16,14 +16,14 @@ let _wxAccessTokenExpire = 0;
 
 // alias / permissions 列已收编至 migrations/011
 
-// 家长「手机号免密登录/自助注册」开关：
-// - 显式设置 PARENT_PHONE_LOGIN=true/false 时以设置为准；
-// - 未设置时：非生产环境默认开（兼容小程序家长端旧路径与冒烟测试），生产环境默认关，
-//   防止知道手机号即可免凭证登录任意家长账号（账号接管面）。
+// 家长「手机号免密登录/自助注册」开关：只认显式开启（PARENT_PHONE_LOGIN=true）。
 // 微信一键登录（带 code）不受此开关影响，仍走 openid 路径。
-const PARENT_PHONE_LOGIN = process.env.PARENT_PHONE_LOGIN
-  ? process.env.PARENT_PHONE_LOGIN === 'true'
-  : process.env.NODE_ENV !== 'production';
+//
+// 此前「未设置时按 NODE_ENV 推断」——但日常启动脚本（start-all.sh / npm start / 桌面图标）
+// 都不设 NODE_ENV，于是生产实例实际运行在「非 production」分支，家长免密登录默认开启：
+// 任何人只要知道家长手机号，POST /api/auth/login 不带口令即可拿到该家长的 JWT，
+// 读取其孩子的档案/课表/订单/积分。默认必须是关闭的，开发要开就写进 .env。
+const PARENT_PHONE_LOGIN = process.env.PARENT_PHONE_LOGIN === 'true';
 
 /**
  * 员工是否仍在使用系统默认口令（→ 登录后必须改密）。
@@ -82,9 +82,14 @@ router.post('/upload/avatar', (req, res) => {
     if (buf.length > 2 * 1024 * 1024) return res.json(fail('图片不能超过 2MB'));
     if (buf.length < 100) return res.json(fail('图片数据为空'));
 
+    // 必须按**文件头**判定类型：此前 detectImageType 写好了却没人调用，
+    // 任意二进制都能以固定 .png 扩展名落盘、再由 /uploads 以 image/png 对外提供。
+    const ext = detectImageType(buf);
+    if (!ext) return res.json(fail('只支持 JPG / PNG / GIF / WEBP 格式的图片'));
+
     const dir = path.join(__dirname, '../uploads/avatars');
     fs.mkdirSync(dir, { recursive: true });
-    const name = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`;
+    const name = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
     fs.writeFileSync(path.join(dir, name), buf);
     res.json(success({ url: '/uploads/avatars/' + name }));
   } catch (err) {

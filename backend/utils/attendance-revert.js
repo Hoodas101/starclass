@@ -97,8 +97,10 @@ function revertDeduction({ scheduleId, studentId, t }) {
   if (!ded) return 0;
   const back = ded.count != null ? ded.count : resolveConsumeClasses(scheduleId);
   const card = db.prepare('SELECT id, status FROM member_cards WHERE id = ?').get(ded.card_id);
-  // 卡不存在（已删除）或非 active：不回加，只清流水（见上方「死卡保护」注释）
-  if (!card || card.status !== 'active') {
+  // 卡不存在（已删除）或已作废：不回加，只清流水（见上方「死卡保护」注释）。
+  // paused 必须回补：暂停中的卡仍是有效资产，把课时吞掉再删掉流水，
+  // 等于「钱没退、课时也没了、凭据还没了」。
+  if (!card || !['active', 'paused'].includes(card.status)) {
     db.prepare('DELETE FROM deduction_logs WHERE id = ?').run(ded.id);
     return 0;
   }

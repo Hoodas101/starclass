@@ -72,7 +72,7 @@
       </div>
       <div class="overview-item">
         <span class="overview-value v4-num-display is-md">{{ stats.totalCards }}</span>
-        <span class="overview-label">{{ $t('membership') }}数</span>
+        <span class="overview-label">{{ t('membership') }}数</span>
       </div>
       <div class="overview-item warn">
         <span class="overview-value v4-num-display is-md">{{ stats.expiringCards }}</span>
@@ -122,6 +122,7 @@
           <template #header>
             <SortableHeader
               :label="col.label"
+              :align="col.align"
               :state="sortState(col.key)"
               :priority="sortPriority(col.key)"
               :sortable="col.sortable !== false"
@@ -332,7 +333,7 @@
             </div>
 
             <div class="detail-section">
-              <h4>{{ $t('membership') }}</h4>
+              <h4>{{ t('membership') }}</h4>
               <div v-if="detailCards.length" class="detail-classes">
                 <div
                   v-for="card in detailCards"
@@ -367,7 +368,7 @@
                   </div>
                 </div>
               </div>
-              <div v-else class="empty-hint">暂无{{ $t('membership') }}</div>
+              <div v-else class="empty-hint">暂无{{ t('membership') }}</div>
             </div>
 
             <div class="detail-section">
@@ -380,7 +381,7 @@
                 >
                   <div class="checkin-dot" :class="order.status"></div>
                   <div class="checkin-info">
-                    <span class="checkin-course">{{ order.order_type }} · ¥{{ order.payable_amount }}</span>
+                    <span class="checkin-course">{{ order.order_type }} · {{ formatMoney(order.payable_amount) }}</span>
                     <span class="checkin-date">{{ order.paid_at ? relativeTime(order.paid_at) : '未支付' }}</span>
                   </div>
                 </div>
@@ -552,7 +553,7 @@
 
       <template #footer>
         <el-button @click="addDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitAdd">{{ editingId ? '保存修改' : '确认添加' }}</el-button>
+        <el-button type="primary" :loading="addSubmitting" @click="submitAdd">{{ editingId ? '保存修改' : '确认添加' }}</el-button>
       </template>
     </el-dialog>
 
@@ -586,7 +587,7 @@
       ref="exportDialogRef"
       title="导出成员数据"
       description="选择时间范围后确认导出，文件将立即开始下载。"
-      @confirm="doExport"
+      @confirm="(range, done) => doExport(range).finally(done)"
     />
   </div>
 </template>
@@ -894,7 +895,9 @@ const applyView = (id) => {
   searchKeyword.value = (v.filters && v.filters.keyword) || ''
   sorts.value = Array.isArray(v.sorts) ? v.sorts : []
   customWidths.value = v.widths || {}
-  if (Array.isArray(v.order) && v.order.length) columnSettings.value = { ...columnSettings.value, order: v.order }
+  // 空数组同样要应用：它代表「回到默认列定义顺序」。此前只在非空时写入，
+  // 于是切到「全部」视图后仍保留着上一次的自定义列序。
+  if (Array.isArray(v.order)) columnSettings.value = { ...columnSettings.value, order: v.order }
   onSearch()
   persistViews()
 }
@@ -1218,7 +1221,7 @@ const saveComment = async () => {
 
 const handlePauseCard = async (card) => {
   try {
-    await ElMessageBox.prompt(`暂停后有效期将按暂停天数顺延。请输入暂停原因：`, `暂停${$t('membership')}`, {
+    await ElMessageBox.prompt(`暂停后有效期将按暂停天数顺延。请输入暂停原因：`, `暂停${t('membership')}`, {
       confirmButtonText: '确认暂停',
       cancelButtonText: '取消',
       inputPlaceholder: '如：外出旅游 / 伤病休养',
@@ -1235,7 +1238,7 @@ const handlePauseCard = async (card) => {
 
 const handleResumeCard = async (card) => {
   try {
-    await ElMessageBox.confirm('恢复后将按暂停天数自动顺延有效期，确认恢复？', `恢复${$t('membership')}`, {
+    await ElMessageBox.confirm('恢复后将按暂停天数自动顺延有效期，确认恢复？', `恢复${t('membership')}`, {
       confirmButtonText: '确认恢复',
       cancelButtonText: '取消',
       type: 'success'
@@ -1299,12 +1302,17 @@ const openAddDialog = () => {
   addDialogVisible.value = true
 }
 
+const addSubmitting = ref(false)
 const submitAdd = async () => {
   if (!addFormRef.value) return
+  // 双击「确认添加」会并发两次请求，服务端查重各返回一次候选、叠两个确认框，
+  // 确认后仍可能建出两条档案（课时/积分/订单/考勤全裂成两份）。
+  if (addSubmitting.value) return
 
   const valid = await addFormRef.value.validate().catch(() => false)
   if (!valid) return
 
+  addSubmitting.value = true
   try {
     if (editingId.value) {
       await updateStudent(editingId.value, {
@@ -1365,6 +1373,8 @@ const submitAdd = async () => {
     loadStudents()
   } catch (e) {
     // 错误已由拦截器提示
+  } finally {
+    addSubmitting.value = false
   }
 }
 

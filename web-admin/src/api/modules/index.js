@@ -227,7 +227,9 @@ export const deleteClassroom = (id, data) => request.delete(`/admin/classrooms/$
 // 周期排课规则（增量 P1-7）：此前只增不减，无法编辑/删除
 export const getScheduleRules = (params) => request.get('/schedules/rules', { params })
 export const updateScheduleRule = (id, data) => request.put(`/schedules/rules/${id}`, data)
-export const deleteScheduleRule = (id, data) => request.delete(`/schedules/rules/${id}`, { data })
+// cascade 必须走 query：后端读的是 req.query.cascade。
+// 之前放在 body 里 → 级联永不生效，但前端照样提示「已取消 N 场」，课还在、家长也没收到通知。
+export const deleteScheduleRule = (id, params) => request.delete(`/schedules/rules/${id}`, { params })
 
 // 会员卡转让（增量 P1-8）：卡种已在售 transferable=1，转让能力此前完全缺失
 export const transferCard = (cardId, data) => request.post(`/membership/card/${cardId}/transfer`, data)

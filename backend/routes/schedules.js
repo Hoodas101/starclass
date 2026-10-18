@@ -487,6 +487,39 @@ router.post('/recursive', (req, res) => {
  *
  * 把过滤片段追加到 where、并把 classIds 压入 params，返回新的 where 字符串。
  */
+/**
+ * 家长可见的排期白名单（唯一实现）。
+ *
+ * 此前只有详情接口用了白名单，列表 / 今日课表直接 `SELECT s.*` —— 家长能读到
+ * remark（内部备注，可能写「家长投诉」「欠费待催」）、created_by 等机构内部字段。
+ * 白名单集中一处，新增列时不会自动泄露；price_per_class 属家长合理可见范围。
+ */
+function toParentSchedule(s) {
+  return {
+    id: s.id,
+    course_id: s.course_id,
+    course_name: s.course_name,
+    teacher_id: s.teacher_id,
+    teacher_name: s.teacher_name,
+    classroom_id: s.classroom_id,
+    classroom_name: s.classroom_name,
+    date: s.date,
+    start_time: s.start_time,
+    end_time: s.end_time,
+    duration_minutes: s.duration_minutes,
+    max_students: s.max_students,
+    enrolled_count: s.enrolled_count,
+    status: s.status,
+    group_course_id: s.group_course_id,
+    group_name: s.group_name,
+    class_id: s.class_id,
+    class_name: s.class_name,
+    allow_self_booking: s.allow_self_booking,
+    is_recursive: s.is_recursive,
+    price_per_class: s.price_per_class,
+  };
+}
+
 function applyClassVisibility(where, params, classIds) {
   let w = `${where} AND (`;
   w += " (COALESCE(group_course_id,'') = '' AND COALESCE(class_id,'') = '')";
@@ -584,7 +617,9 @@ router.get('/', (req, res) => {
       FROM schedules s ${where} ORDER BY date ASC, start_time ASC LIMIT ? OFFSET ?
     `).all(...params, pageSize, offset);
 
-    res.json(success({ list, total, page, pageSize }));
+    // 非员工（家长）走白名单，避免把 remark / created_by 等内部字段带出去
+    const safeList = isStaffReq(req) ? list : list.map(toParentSchedule);
+    res.json(success({ list: safeList, total, page, pageSize }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }
@@ -893,7 +928,8 @@ router.get('/today', (req, res) => {
       ORDER BY start_time ASC
     `).all(...params);
 
-    res.json(success({ date: today, list, count: list.length }));
+    const safeList = isStaffReq(req) ? list : list.map(toParentSchedule);
+    res.json(success({ date: today, list: safeList, count: safeList.length }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }

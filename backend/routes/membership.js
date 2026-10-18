@@ -58,15 +58,17 @@ try {
   }
 } catch (e) { console.warn('[membership] uniform goods migration failed:', e.message); }
 
-// 权限判断：管理员或该成员的绑定家长
-function canManageCard(req, card) {
+// 暂停 / 恢复会员卡的权限：仅员工（管理员 / 教练）。
+//
+// 不再允许绑定家长自助操作（产品决策 2026-10-17）：resume 按**真实暂停时长**顺延有效期，
+// 且暂停中的卡不参与过期扫描 —— 等价「冻结时间」，30 天卡可以停两年再恢复，仍剩 30 天；
+// 临界过期的卡也能借此复活。这属于可无限续期的资产滥用，必须由机构侧掌握。
+function canManageCard(req) {
   const openid = getOpenId(req);
   if (!openid) return false;
-  if (req.userRole === 'admin') return true;
+  if (req.userRole === 'admin' || req.userRole === 'coach') return true;
   const u = db.prepare('SELECT role FROM users WHERE openid = ?').get(openid);
-  if (u && u.role === 'admin') return true;
-  const bind = db.prepare('SELECT 1 FROM parent_bindings WHERE parent_openid = ? AND student_id = ?').get(openid, card.student_id);
-  return !!bind;
+  return !!u && (u.role === 'admin' || u.role === 'coach');
 }
 
 /**
@@ -79,7 +81,7 @@ router.post('/pause', (req, res) => {
     if (!cardId) return res.json(fail('缺少会员卡 ID'));
     const card = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(cardId);
     if (!card) return res.json(fail('会员卡不存在'));
-    if (!canManageCard(req, card)) return res.status(403).json(safeFail('无权操作该会员卡'));
+    if (!canManageCard(req)) return res.status(403).json(safeFail('仅教练或管理员可暂停/恢复会员卡'));
     if (card.status !== 'active') return res.json(fail('仅进行中的会员卡可暂停'));
 
     const currentTime = now();
@@ -117,7 +119,7 @@ router.post('/resume', (req, res) => {
     if (!cardId) return res.json(fail('缺少会员卡 ID'));
     const card = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(cardId);
     if (!card) return res.json(fail('会员卡不存在'));
-    if (!canManageCard(req, card)) return res.status(403).json(safeFail('无权操作该会员卡'));
+    if (!canManageCard(req)) return res.status(403).json(safeFail('仅教练或管理员可暂停/恢复会员卡'));
     if (card.status !== 'paused' || !card.paused_at) return res.json(fail('该会员卡未处于暂停状态'));
 
     const currentTime = now();
@@ -1012,9 +1014,12 @@ router.post('/refund', (req, res) => {
           UPDATE orders SET
             refunded_amount = MIN(payable_amount, refunded_amount + ?),
             status = CASE WHEN refunded_amount + ? >= payable_amount THEN 'refunded' ELSE status END,
+            -- 必须写 last_refunded_at：财务按 COALESCE(NULLIF(last_refunded_at,0), updated_at) 归集退款月份。
+            -- 漏写时二次退款会沿用上一次的时间戳，两笔退款都被算进旧月份。
+            last_refunded_at = ?,
             updated_at = ?
           WHERE id = ? AND status = 'paid'
-        `).run(refundAmount, refundAmount, currentTime, orderId);
+        `).run(refundAmount, refundAmount, currentTime, currentTime, orderId);
       } else if (refundAmount > 0) {
         // === 退款载体订单（隐形约定，改动统计口径前必读）===
         // 本系统所有财务视图（finance.js 的 summary / monthly / by-product / by-sales、

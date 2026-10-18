@@ -1,6 +1,6 @@
 <template>
   <!-- 整表头可点（P2-9）：点列名文字即在三态间切换，不再要求点准右侧那个很淡的小箭头 -->
-  <span class="col-header" :title="title || label" @click="onSort">
+  <span class="col-header" :class="`is-${align}`" :title="title || label" @click="onSort">
     <span class="col-header-text">{{ label }}</span>
     <span
       v-if="sortable"
@@ -35,6 +35,8 @@ const props = defineProps({
   priority: { type: Number, default: 0 },
   sortable: { type: Boolean, default: true },
   resizable: { type: Boolean, default: true },
+  // 列对齐：数字列右对齐时表头也要靠右（同时决定拖拽把手的视觉归属）
+  align: { type: String, default: 'left' },
 })
 const emit = defineEmits(['sort', 'resize'])
 
@@ -93,18 +95,31 @@ onBeforeUnmount(() => {
 <style lang="scss">
 // 表头单行：此前 .col-header 是 block，块级盒会撑出空行，表头高度达 63px（数据行仅 22px）。
 // 改 inline-flex + nowrap，文字/箭头/角标强制同排。
+// 必须撑满整个表头单元格（width:100%）：此前是 inline-flex 按内容宽度布局，
+// 列宽大于列名时拖拽把手的 right:-6px 会停在文字边缘，真实列边界反而没有命中区。
 .col-header {
   position: relative;
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 2px;
-  max-width: 100%;
+  width: 100%;
+  min-width: 0;
   white-space: nowrap;
   cursor: pointer;
   user-select: none;
+
+  &.is-center {
+    justify-content: center;
+  }
+
+  &.is-right {
+    justify-content: flex-end;
+  }
 }
 
 .col-header-text {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

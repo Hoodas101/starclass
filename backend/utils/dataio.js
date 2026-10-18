@@ -206,7 +206,12 @@ function exportData(modulesInput, opts = {}) {
             params.push(dateFrom, dateTo);
           }
         }
-        tables[t] = db.prepare(sql).all(...params);
+        const rows = db.prepare(sql).all(...params);
+        // 口令哈希与令牌版本绝不出现在导出文件里：导出物一旦外流，
+        // bcrypt 哈希可离线爆破，token_version 还会泄露账号状态。
+        tables[t] = t === 'users'
+          ? rows.map(({ password, token_version, ...rest }) => rest)
+          : rows;
       } catch (e) {
         // 不静默吞掉：导出空表会让使用者在迁移完成后才发现数据缺失
         tables[t] = [];
