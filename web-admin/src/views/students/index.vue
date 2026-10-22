@@ -168,9 +168,10 @@
             <span v-else-if="col.key === 'expires'">{{ formatCardExpiry(row.expires_at) }}</span>
             <span v-else-if="col.key === 'startDate'">{{ row.card_start_date ? formatDate(row.card_start_date) : '-' }}</span>
             <span v-else-if="col.key === 'latestPurchase'">{{ row.latest_purchase_date ? formatDate(row.latest_purchase_date) : '-' }}</span>
-            <span v-else-if="col.key === 'purchaseCount'">{{ row.purchase_count || 0 }} 次</span>
+            <!-- null 表示「无权限查看」（销售视角），不能渲染成 0 次 / ¥0 —— 那会被读成「没消费过」 -->
+            <span v-else-if="col.key === 'purchaseCount'">{{ row.purchase_count == null ? '-' : `${row.purchase_count} 次` }}</span>
 
-            <span v-else-if="col.key === 'spent'" class="total-spent">{{ formatMoney(row.total_spent) }}</span>
+            <span v-else-if="col.key === 'spent'" class="total-spent">{{ row.total_spent == null ? '-' : formatMoney(row.total_spent) }}</span>
 
             <!-- 加入时间统一 YYYY-MM-DD：Date.parse 对数值时间戳必然 NaN，且相对时间会
                  在同一列混出「3 天前」与「09-06」两种写法；「距今多久」移到 title 悬停 -->
@@ -320,7 +321,7 @@
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">累计消费</span>
-                  <span class="prop-value prop-strong prop-static">{{ formatMoney(selectedStudent.total_spent) }}</span>
+                  <span class="prop-value prop-strong prop-static">{{ selectedStudent.total_spent == null ? '-' : formatMoney(selectedStudent.total_spent) }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">备注</span>
@@ -364,6 +365,15 @@
                   </div>
                   <div class="card-actions">
                     <el-button v-if="card.status === 'active'" text type="warning" size="small" @click="handlePauseCard(card)">暂停</el-button>
+                    <!-- 转让：后端 /membership/card/:id/transfer 早已实现、卡种也已支持 transferable，
+                         但此前无任何入口 —— 线下转让后系统无记录，受让人上课查无卡、账实不符 -->
+                    <el-button
+                      v-if="card.status === 'active' && Number(card.transferable) === 1"
+                      text
+                      type="primary"
+                      size="small"
+                      @click="openTransfer(card)"
+                    >转让</el-button>
                     <el-button v-if="card.status === 'paused'" text type="success" size="small" @click="handleResumeCard(card)">恢复</el-button>
                   </div>
                 </div>
@@ -557,6 +567,49 @@
       </template>
     </el-dialog>
 
+    <!-- 会员卡转让：受让人必须是另一个在册成员（后端强校验，这里只做选择） -->
+    <el-dialog v-model="transferVisible" :title="`转让${t('membership')}`" class="dlg-md" width="460px">
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        title="转让后卡立即易主"
+        description="历史考勤、扣课与收入结转不追溯；原持卡人将无法再用此卡上课。"
+        style="margin-bottom: 12px"
+      />
+      <el-form label-width="80px" label-position="left">
+        <el-form-item :label="`原${t('learner')}`">
+          <span>{{ selectedStudent?.name || '-' }}</span>
+        </el-form-item>
+        <el-form-item :label="`受让${t('learner')}`" required>
+          <el-select
+            v-model="transferForm.toStudentId"
+            filterable
+            remote
+            :remote-method="loadTransferOptions"
+            :loading="transferLoading"
+            placeholder="输入姓名或手机号搜索成员"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="o in transferOptions"
+              :key="o.id"
+              :label="`${o.name}${o.parent_phone ? '（' + o.parent_phone + '）' : ''}`"
+              :value="o.id"
+              :disabled="o.id === selectedStudent?.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="转让原因">
+          <el-input v-model="transferForm.reason" type="textarea" :rows="2" placeholder="可选" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="transferVisible = false">取消</el-button>
+        <el-button type="primary" :loading="transferSubmitting" @click="doTransfer">确认转让</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 字段设置（双栏拖拽管理器） -->
     <ColumnSettingsDialog
       ref="colDialogRef"
@@ -600,7 +653,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Plus, Search, UserFilled, School, CreditCard, Download, Upload, Finished, CaretBottom, Setting, ArrowDown } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
-import { getStudents, getStudentDetail, addStudent, updateStudent, deleteStudent, pauseCard, resumeCard, getCardTypes, getSettings, saveSettings, getDashboard, getStudentTimeline, importStudents, getComments, addComment } from '@/api/modules'
+import { getStudents, getStudentDetail, addStudent, updateStudent, deleteStudent, pauseCard, resumeCard, transferCard, getStudentOptions, getCardTypes, getSettings, saveSettings, getDashboard, getStudentTimeline, importStudents, getComments, addComment } from '@/api/modules'
 import ColumnSettingsDialog from '@/components/ColumnSettingsDialog.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -798,8 +851,8 @@ const cellText = (col, row) => {
     case 'expires': return formatCardExpiry(row.expires_at)
     case 'startDate': return formatDate(row.card_start_date)
     case 'latestPurchase': return formatDate(row.latest_purchase_date)
-    case 'purchaseCount': return `${row.purchase_count || 0} 次`
-    case 'spent': return formatMoney(row.total_spent)
+    case 'purchaseCount': return row.purchase_count == null ? '' : `${row.purchase_count} 次`
+    case 'spent': return row.total_spent == null ? '' : formatMoney(row.total_spent)
     case 'join': return formatDate(row.join_date)
     case 'lastActivity': return row.last_activity_at ? relativeTime(row.last_activity_at) : '从未出勤'
     case 'status': return statusTextMap[row.status] || row.status || ''
@@ -1216,6 +1269,53 @@ const saveComment = async () => {
     // 拦截器已提示
   } finally {
     commentSaving.value = false
+  }
+}
+
+const transferVisible = ref(false)
+const transferLoading = ref(false)
+const transferSubmitting = ref(false)
+const transferOptions = ref([])
+const transferCardRow = ref(null)
+const transferForm = reactive({ toStudentId: '', reason: '' })
+
+function openTransfer(card) {
+  transferCardRow.value = card
+  transferForm.toStudentId = ''
+  transferForm.reason = ''
+  transferVisible.value = true
+  loadTransferOptions('')
+}
+
+async function loadTransferOptions(query = '') {
+  transferLoading.value = true
+  try {
+    const res = await getStudentOptions({ q: query })
+    const map = new Map(transferOptions.value.map((o) => [o.id, o]))
+    ;(res?.list || []).forEach((o) => map.set(o.id, o))
+    transferOptions.value = [...map.values()]
+  } catch (e) {
+    // 无权限或网络异常时保留现状
+  } finally {
+    transferLoading.value = false
+  }
+}
+
+async function doTransfer() {
+  if (!transferForm.toStudentId) return ElMessage.warning('请选择受让成员')
+  transferSubmitting.value = true
+  try {
+    await transferCard(transferCardRow.value.id, {
+      toStudentId: transferForm.toStudentId,
+      reason: transferForm.reason,
+    })
+    ElMessage.success('转让完成')
+    transferVisible.value = false
+    if (selectedStudent.value) loadStudentDetail(selectedStudent.value.id)
+  } catch (e) {
+    // 拦截器已提示业务/网络错误
+  } finally {
+    transferSubmitting.value = false
   }
 }
 

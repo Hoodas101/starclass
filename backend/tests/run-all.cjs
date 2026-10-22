@@ -54,6 +54,7 @@ const SUITES = [
   ['security-regression.cjs', '安全回归（免密登录/模拟支付默认关、越权、导出脱敏、头像类型）'],
   ['business-regression.cjs', '业务口径回归（0 元单/时效卡摊销/转让/积分过期/暂停卡回补）'],
   ['v109-v111-regression.cjs', 'v1.0.9~11 审计项（线索越权/性别姓名值域/金额值域/僵尸积分/已取消排期点名）'],
+  ['chaos-v109.cjs', 'v1.0.9 混沌/压力（批量补课幂等与容量/R1 脱敏/卡转让）'],
   ['card-expiry-regression.cjs', 'P1-8 会员卡过期流转'],
   ['dashboard-charts-regression.cjs', 'P1-13 看板图表聚合'],
   ['sales-export-regression.cjs', 'P1-18 销售导出单品统计'],

@@ -43,6 +43,12 @@
         </template>
       </div>
       <div class="toolbar-right">
+        <el-button
+          v-if="activeMode === 'assign'"
+          type="primary"
+          :disabled="!assignSelection.length"
+          @click="openBatchAssign"
+        >批量安排{{ assignSelection.length ? `（${assignSelection.length}）` : '' }}</el-button>
         <el-button @click="refreshActive">刷新</el-button>
       </div>
     </div>
@@ -50,7 +56,17 @@
     <!-- 补课安排 -->
     <div v-if="activeMode === 'assign'" class="card table-container">
       <ListErrorState v-if="!loading1 && error1" :error="error1" @retry="loadEligible" />
-      <el-table v-else :data="filteredEligible" v-loading="loading1" size="small" @row-click="openAssign" row-class-name="clickable-row">
+      <el-table
+        v-else
+        :data="filteredEligible"
+        v-loading="loading1"
+        size="small"
+        row-class-name="clickable-row"
+        @row-click="openAssign"
+        @selection-change="onAssignSelectionChange"
+      >
+        <!-- 多选：一次课多名学员缺席时批量安排（行内已有补课的不允许再选） -->
+        <el-table-column type="selection" width="42" :selectable="(row) => !row.hasMakeup" />
         <el-table-column :label="$t('learner')" prop="student_name" min-width="100" />
         <el-table-column :label="`原${$t('course')}`" prop="course_name" min-width="120" />
         <el-table-column label="原日期" prop="date" min-width="110" />
@@ -144,7 +160,7 @@
     </el-dialog>
 
     <!-- 安排补课对话框 -->
-    <el-dialog v-model="assignVisible" title="安排补课" class="dlg-lg">
+    <el-dialog v-model="assignVisible" :title="batchMode ? `批量安排补课（${assignSelection.length} 人）` : '安排补课'" class="dlg-lg">
       <el-descriptions :column="1" border size="small" style="margin-bottom: 16px">
         <el-descriptions-item :label="$t('learner')">{{ currentRow?.student_name }}</el-descriptions-item>
         <el-descriptions-item :label="`原${$t('course')}`">{{ currentRow?.course_name }} ({{ currentRow?.date }} {{ currentRow?.start_time }}-{{ currentRow?.end_time }})</el-descriptions-item>
@@ -197,7 +213,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
-import { getMakeupEligible, assignMakeup, cancelMakeup, getMakeupRecords, getSchedules, getScheduleDetail, getScheduleOptions, rescheduleStudent } from '@/api/modules'
+import { getMakeupEligible, assignMakeup, batchArrangeMakeup, cancelMakeup, getMakeupRecords, getSchedules, getScheduleDetail, getScheduleOptions, rescheduleStudent } from '@/api/modules'
 
 defineProps({ embedded: Boolean })
 
@@ -269,7 +285,36 @@ async function loadRecords() {
   }
 }
 
+const assignSelection = ref([])
+const batchMode = ref(false)
+
+function onAssignSelectionChange(rows) {
+  assignSelection.value = rows || []
+}
+
+/** 批量安排：要求所选学员来自**同一场**原排期（后端 batch-assign 的入参就是单场 + 多学员） */
+async function openBatchAssign() {
+  const rows = assignSelection.value.filter((r) => !r.hasMakeup)
+  if (!rows.length) return ElMessage.warning('请先勾选要安排补课的学员')
+  const scheduleIds = [...new Set(rows.map((r) => r.schedule_id))]
+  if (scheduleIds.length > 1) {
+    return ElMessage.warning('批量安排要求所选学员来自同一场活动；不同场次请分开安排')
+  }
+  batchMode.value = true
+  currentRow.value = rows[0]
+  assignForm.makeupScheduleId = ''
+  assignForm.note = ''
+  assignVisible.value = true
+  try {
+    const res = await getSchedules({ pageSize: 100 })
+    scheduleOptions.value = (res.list || []).filter((s) => s.status === 'scheduled')
+  } catch (e) {
+    // 拦截器已提示业务/网络错误
+  }
+}
+
 async function openAssign(row) {
+  batchMode.value = false
   currentRow.value = row
   assignForm.makeupScheduleId = ''
   assignForm.note = ''
@@ -286,13 +331,31 @@ async function handleAssign() {
   if (!assignForm.makeupScheduleId) return ElMessage.warning('请选择补课排期')
   submitting.value = true
   try {
-    await assignMakeup({
-      studentId: currentRow.value.student_id,
-      originalScheduleId: currentRow.value.schedule_id,
-      makeupScheduleId: assignForm.makeupScheduleId,
-      note: assignForm.note,
-    })
-    ElMessage.success('补课已安排')
+    if (batchMode.value) {
+      const rows = assignSelection.value.filter((r) => !r.hasMakeup)
+      const res = await batchArrangeMakeup({
+        originalScheduleId: currentRow.value.schedule_id,
+        makeupScheduleId: assignForm.makeupScheduleId,
+        studentIds: rows.map((r) => r.student_id),
+        note: assignForm.note,
+      })
+      // 逐人结果：成功 N / 失败 M，失败时给出第一条原因，避免「全成功」的错觉
+      if (res.failed > 0) {
+        const first = (res.results || []).find((r) => !r.ok)
+        ElMessage.warning(`已安排 ${res.ok} 人，${res.failed} 人失败${first ? `：${first.reason}` : ''}`)
+      } else {
+        ElMessage.success(`已为 ${res.ok} 人安排补课`)
+      }
+      assignSelection.value = []
+    } else {
+      await assignMakeup({
+        studentId: currentRow.value.student_id,
+        originalScheduleId: currentRow.value.schedule_id,
+        makeupScheduleId: assignForm.makeupScheduleId,
+        note: assignForm.note,
+      })
+      ElMessage.success('补课已安排')
+    }
     assignVisible.value = false
     loadEligible()
   } catch (e) {

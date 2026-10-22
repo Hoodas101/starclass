@@ -234,9 +234,8 @@ export const deleteScheduleRule = (id, params) => request.delete(`/schedules/rul
 // 会员卡转让（增量 P1-8）：卡种已在售 transferable=1，转让能力此前完全缺失
 export const transferCard = (cardId, data) => request.post(`/membership/card/${cardId}/transfer`, data)
 
-// 注：曾计划「请假 → 批量补课」，但后端 POST /api/makeup/batch-assign **从未实现**
-//（v1.0.2 只加了这条前端封装，无调用方）。留此说明避免后人再照它去调一个不存在的接口；
-// 需要该能力时应先补后端路由。
+// 请假 → 批量补课：一次课多名学员缺席时，按「同一原排期 + 多学员」一次性安排
+export const batchArrangeMakeup = (data) => request.post('/makeup/batch-assign', data)
 
 // 会员卡明细（到店限次展示 / 卡列表）
 export const getMemberCards = (params) => request.get('/membership/cards', { params })

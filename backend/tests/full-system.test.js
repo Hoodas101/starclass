@@ -160,7 +160,7 @@ const ROUTES = [
   ['POST', '/api/followups'], ['POST', '/api/followups/ID1/complete'], ['POST', '/api/followups/ID1/cancel'],
   ['GET', '/api/payroll/coaches'], ['GET', '/api/payroll/coach/ID1'], ['PUT', '/api/payroll/coach/ID1/rule'], ['GET', '/api/payroll/me'],
   ['POST', '/api/comments'], ['GET', '/api/comments'], ['GET', '/api/comments/my'],
-  ['GET', '/api/makeup/eligible'], ['POST', '/api/makeup/assign'], ['POST', '/api/makeup/cancel'],
+  ['GET', '/api/makeup/eligible'], ['POST', '/api/makeup/assign'], ['POST', '/api/makeup/batch-assign'], ['POST', '/api/makeup/cancel'],
   ['GET', '/api/makeup/records'], ['POST', '/api/makeup/reschedule'],
   ['GET', '/api/finance/summary'], ['GET', '/api/finance/monthly'], ['GET', '/api/finance/by-product'], ['GET', '/api/finance/by-sales'],
   ['GET', '/api/trial/list'], ['GET', '/api/trial/ID1'], ['POST', '/api/trial/ID1/convert'], ['PUT', '/api/trial/ID1'],

@@ -666,10 +666,24 @@ router.get('/', (req, res) => {
     // 其次是归档；最后才用会员卡派生状态（暂停/已结束/已退费/流失），避免列表恒显「正常」。
     // 注意不能写成 `r.mem_status || r.status`：mem_status 的 CASE 带 ELSE 'none'，恒为真值，
     // 会把学员自身的 status（含已删除）永远吞掉 —— 已删学员因此显示成「在读」。
-    const mapped = list.map((r) => ({
-      ...r,
-      status: r.status === 'refunded' ? 'refunded' : (r.archived ? 'archived' : (r.mem_status || r.status)),
-    }));
+    // R1（口径裁决）：销售可见 roster + 家长手机（跟进客户需要），
+    // 但**不可见生日与累计消费** —— 与 canViewStudentData 把销售排除在敏感字段外保持一致。
+    // 此前列表把这两类字段一并返回，等于同一份数据在列表与详情两条路径上口径不同。
+    const isSalesViewer = ((getReqUser(req) || {}).role === 'sales');
+    const mapped = list.map((r) => {
+      const row = {
+        ...r,
+        status: r.status === 'refunded' ? 'refunded' : (r.archived ? 'archived' : (r.mem_status || r.status)),
+      };
+      if (isSalesViewer) {
+        row.birthday = null;
+        row.age = null;
+        row.total_spent = null;
+        row.purchase_count = null;
+        row.latest_purchase_date = null;
+      }
+      return row;
+    });
     res.json(success({ list: mapped, total, page, pageSize }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
@@ -900,7 +914,9 @@ router.get('/:id', requireAuth, (req, res) => {
     // 会员卡（仅返回基本信息）
     const cards = db.prepare(`
       SELECT id, order_id, card_type_name, total_classes, remaining_classes, expires_at, status,
-        paused_at, pause_total_ms, pause_reason
+        paused_at, pause_total_ms, pause_reason,
+        -- 卡种是否可转让：详情页据此决定是否显示「转让」入口（后端另有强校验，此处仅控制可见性）
+        (SELECT ct.transferable FROM membership_cards ct WHERE ct.id = member_cards.card_type_id) AS transferable
       FROM member_cards WHERE student_id = ? ORDER BY created_at DESC
     `).all(id);
     // 积分（仅返回余额）
@@ -910,7 +926,11 @@ router.get('/:id', requireAuth, (req, res) => {
     // 消费记录
     const orders = db.prepare('SELECT id, order_no, order_type, payable_amount, status, paid_at FROM orders WHERE student_id = ? ORDER BY created_at DESC LIMIT 10').all(id);
 
-    res.json(success({ ...student, parents, cards, points, enrollments, orders }));
+    // 与列表同一口径（R1）：销售不可见生日。列表已脱敏、详情不脱敏等于白做 ——
+    // 同一个人在两处看到两种数据，反而更容易被当成 bug。
+    const detailView = { ...student };
+    if (((getReqUser(req) || {}).role === 'sales')) detailView.birthday = null;
+    res.json(success({ ...detailView, parents, cards, points, enrollments, orders }));
   } catch (err) {
     console.error('[getStudent]', err);
     res.status(500).json(safeFail('获取成员信息失败'));
