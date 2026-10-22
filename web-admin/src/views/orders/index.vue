@@ -422,7 +422,7 @@
             v-if="detailOrder.status === 'paid'"
             type="danger"
             plain
-            @click="handleCancelOrder(detailOrder)"
+            @click="handleCancelOrder(detailOrder)" :loading="cancellingOrder"
           >
             取消订单
           </el-button>
@@ -1123,13 +1123,16 @@ const saveDetailEdit = async () => {
   }
 }
 
+const cancellingOrder = ref(false)
 const handleCancelOrder = async (order) => {
+  if (cancellingOrder.value) return
   try {
     await ElMessageBox.confirm(
       `确定取消订单「${order.order_no}」？已发放的${t('membership')}与积分将回收。`,
       '取消订单',
       { type: 'warning', confirmButtonText: '确认取消', confirmButtonClass: 'el-button--danger' }
     )
+    cancellingOrder.value = true
     await cancelOrder(order.id)
     ElMessage.success('订单已取消')
     orderDetailVisible.value = false
@@ -1138,6 +1141,8 @@ const handleCancelOrder = async (order) => {
     // 用户主动取消（ElMessageBox 取消按钮 reject 值为 'cancel'）静默处理
     if (e === 'cancel') return
     // 真实 API / 网络错误：拦截器已统一提示
+  } finally {
+    cancellingOrder.value = false
   }
 }
 

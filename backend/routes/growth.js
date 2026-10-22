@@ -21,6 +21,27 @@ function canGrowth(req) {
   return isAdminReq(req) || hasPerm(getReqUser(req), 'growth');
 }
 
+// 当前登录员工的昵称（业绩归属比对用；与写入侧 normSalesperson 同口径）
+function myLeadName(req) {
+  const openid = getOpenId(req);
+  if (!openid) return '';
+  const u = db.prepare('SELECT nickname FROM users WHERE openid = ?').get(openid);
+  return normSalesperson(u && u.nickname);
+}
+
+/**
+ * 线索归属校验：管理员放行；其余只能操作**归属自己**的线索。
+ * 与 orders.js 的 canOperateOrder 同模型 —— 业绩归属是自由文本 salesperson，按昵称比对。
+ * 缺了这道校验，任一销售都能改 / 删 / 转化他人线索（含手机号），并篡改进展与业绩归属；
+ * convert 路径还能越权建成员、建订单、发积分。
+ */
+function canOperateLead(req, lead) {
+  if (isAdminReq(req)) return true;
+  if (!lead) return false;
+  const me = myLeadName(req);
+  return !!me && normSalesperson(lead.salesperson) === me;
+}
+
 // leads 表由 db/init.js 创建，stage_changed_at 列已收编至 migrations/014
 // （此前此处另有 CREATE TABLE / CREATE INDEX / ALTER，均为冗余或静默空操作）
 
@@ -167,6 +188,12 @@ router.get('/leads', (req, res) => {
     if (status) { where += ' AND status = ?'; params.push(status); }
     if (startDate) { where += ' AND created_at >= ?'; params.push(new Date(startDate + 'T00:00:00').getTime()); }
     if (endDate) { where += ' AND created_at <= ?'; params.push(new Date(endDate + 'T23:59:59.999').getTime()); }
+    // 读侧同样按归属隔离：否则销售能看到全部线索（含他人客户手机号），
+    // 而写侧已限制只能改自己的 —— 读得到改不了，反而更容易被复制走客户资源。
+    if (!isAdminReq(req)) {
+      where += ' AND TRIM(COALESCE(salesperson, \'\')) = ?';
+      params.push(myLeadName(req));
+    }
 
     const total = db.prepare(`SELECT COUNT(*) as count FROM leads ${where}`).get(...params).count;
     const list = db.prepare(`
@@ -192,7 +219,9 @@ router.post('/leads', (req, res) => {
     db.prepare(`
       INSERT INTO leads (id, name, phone, source, stage, intent_level, next_follow_at, note, salesperson, student_id, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
-    `).run(id, name, phone, source, stage, Math.min(5, Math.max(1, parseInt(intentLevel) || 3)), nextFollowAt || null, note, normSalesperson(salesperson), studentId || '', t, t);
+    `).run(id, name, phone, source, stage, Math.min(5, Math.max(1, parseInt(intentLevel) || 3)), nextFollowAt || null, note,
+      isAdminReq(req) ? normSalesperson(salesperson) : (normSalesperson(salesperson) || myLeadName(req)),
+      studentId || '', t, t);
     res.json(success({ id }));
   } catch (err) {
     res.status(500).json(safeFail('创建线索失败'));
@@ -207,6 +236,7 @@ router.put('/leads/:id', (req, res) => {
     if (!canGrowth(req)) return res.status(403).json(safeFail('无增长中心权限'));
     const row = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
     if (!row) return res.json(fail('线索不存在'));
+    if (!canOperateLead(req, row)) return res.status(403).json(safeFail('仅可操作自己名下的线索'));
     const { name, phone, source, stage, intentLevel, nextFollowAt, note, salesperson, status, studentId } = req.body;
     const merged = {
       name: name !== undefined ? name : row.name,
@@ -245,7 +275,21 @@ router.put('/leads/:id', (req, res) => {
 router.delete('/leads/:id', (req, res) => {
   try {
     if (!canGrowth(req)) return res.status(403).json(safeFail('无增长中心权限'));
+    const row = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
+    if (!row) return res.json(fail('线索不存在'));
+    if (!canOperateLead(req, row)) return res.status(403).json(safeFail('仅可操作自己名下的线索'));
     db.prepare('DELETE FROM leads WHERE id = ?').run(req.params.id);
+    // 物理删除必须留痕：线索含客户手机号，删了无从追溯是谁删的
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'lead',
+      entityId: req.params.id,
+      action: 'delete',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { name: row.name, phone: row.phone, stage: row.stage, salesperson: row.salesperson },
+      after: null,
+    });
     res.json(success({ id: req.params.id }));
   } catch (err) {
     res.status(500).json(safeFail('删除线索失败'));
@@ -267,6 +311,7 @@ router.post('/leads/:id/convert', (req, res) => {
     if (!canGrowth(req)) return res.status(403).json(safeFail('无增长中心权限'));
     const row = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
     if (!row) return res.json(fail('线索不存在'));
+    if (!canOperateLead(req, row)) return res.status(403).json(safeFail('仅可操作自己名下的线索'));
     if (row.status === 'converted') return res.json(fail('该线索已成交，请勿重复转化'));
     const t = now();
     const { rewardPoints, rewardReason = '线索成交奖励', createStudent, createOrder, confirmDuplicate, linkStudentId } = req.body || {};
@@ -446,6 +491,7 @@ router.post('/leads/:id/stage', (req, res) => {
     if (!STAGE_TEXT[stage]) return res.json(fail('无效的阶段'));
     const row = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
     if (!row) return res.json(fail('线索不存在'));
+    if (!canOperateLead(req, row)) return res.status(403).json(safeFail('仅可操作自己名下的线索'));
     const t = now();
     db.prepare(`
       UPDATE leads SET stage = ?, stage_changed_at = ?, updated_at = ?,
@@ -482,6 +528,9 @@ router.get('/suggestions', (req, res) => {
 router.get('/leads/:id/suggestion', (req, res) => {
   try {
     if (!canGrowth(req)) return res.status(403).json(safeFail('无增长中心权限'));
+    const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
+    if (!lead) return res.json(fail('线索不存在'));
+    if (!canOperateLead(req, lead)) return res.status(403).json(safeFail('仅可查看自己名下的线索'));
     const s = leadSuggestions.getLeadSuggestion(db, req.params.id);
     if (!s) return res.json(fail('线索不存在'));
     res.json(success(s));

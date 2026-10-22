@@ -25,6 +25,32 @@
 
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+
+/**
+ * 把调用方写的 '/tmp/xxx' 映射到**系统临时目录**下的 xxx。
+ * 为什么需要：Windows 上 path.join('/tmp','xxx') 会被归一成 '\tmp\xxx'（相对当前盘符，
+ * 通常不可写），15 个套件会在建库阶段直接 exit=2，Windows 开发者机器上回归完全跑不了。
+ * 统一映射后，调用方继续写 '/tmp/xxx' 即可跨平台运行。
+ */
+function resolveTempDir(dir) {
+  const s = String(dir).replace(/\\/g, '/');
+  const m = /^\/?tmp\/(.+)$/.exec(s);
+  return m ? path.join(os.tmpdir(), m[1]) : dir;
+}
+
+/**
+ * 防呆：临时库必须落在系统临时目录内，绝不能指向真实库 backend/db/data.db。
+ * 各套件原先各写一份 `DB_PATH.startsWith('/tmp/')`，在 Windows 上恒为 false → 恒 exit=2。
+ */
+function assertIsolatedTempDb() {
+  const dbPath = path.resolve(String(process.env.DB_PATH || ''));
+  const rel = path.relative(path.resolve(os.tmpdir()), dbPath);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    console.error('[致命] DB_PATH 不在系统临时目录内，拒绝运行以免污染真实库:', dbPath);
+    process.exit(2);
+  }
+}
 
 /**
  * 建一个干净的夹具库，并把 process.env.DB_PATH 指向它。
@@ -33,6 +59,7 @@ const fs = require('fs');
  */
 function bootstrap(dir) {
   process.env.NODE_ENV = 'test';
+  dir = resolveTempDir(dir);
   // 整目录重建，而不是逐个 unlink「已存在的」文件：旧实现只覆盖快照里存在的文件，
   // 上一轮遗留的 -wal / -shm 不会被清掉，会与新的 data.db 组成不确定输入。
   fs.rmSync(dir, { recursive: true, force: true });
@@ -75,4 +102,6 @@ function resolveStaffIdentities(db) {
   return out;
 }
 
-module.exports = { bootstrap, resolveStaffIdentities };
+module.exports = {
+  resolveTempDir,
+  assertIsolatedTempDb, bootstrap, resolveStaffIdentities };

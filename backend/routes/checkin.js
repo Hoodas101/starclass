@@ -120,6 +120,11 @@ router.post('/teacher', (req, res) => {
 
     const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(scheduleId);
     if (!schedule) return res.json(fail('排期不存在'));
+    // 已取消的排期不允许再点名：取消排期时已原子回滚了全部已签到学员的课时/积分/收入结转，
+    // 再点名会二次扣课、二次发分，并在考勤表留下「已取消活动」的幽灵出席记录。
+    if (schedule.status === 'cancelled') {
+      return res.json(fail('该排期已取消，不能点名'));
+    }
     const actor = getActor(req);
 
     // 教练归属校验：非管理员必须为本排期的授课教练，避免跨教练篡改考勤/课时

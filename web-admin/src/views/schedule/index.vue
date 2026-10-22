@@ -1404,7 +1404,7 @@ const deactivateRule = async (row) => {
     }
     // 注：后端读取的是 query 参数 ?cascade=1，而 api 封装走的是请求体，
     // 该次级联可能不生效（规则本身已在第一次调用中停用），详见交付报告。
-    await deleteScheduleRule(row.id, { cascade: true })
+    await deleteScheduleRule(row.id, { cascade: 1 })
     ElMessage.success(`规则已停用，并取消 ${affected} 场未来排期`)
     openRulesDialog()
   } catch (e) {

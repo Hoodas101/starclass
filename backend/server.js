@@ -215,8 +215,15 @@ app.use('/api/auth/login', (req, res, next) => {
   if (recent.length >= LOGIN_RATE_LIMIT) {
     return res.status(429).json({ code: 429, data: null, message: '登录尝试过于频繁，请15分钟后再试' });
   }
-  recent.push(now);
-  loginAttempts.set(ip, recent);
+  // 只把**失败**计入：此前每次尝试都无条件计数，办公室/学校共享出口（NAT 同 IP）下
+  // 正常成功登录会相互累积，第 100 个从未输错的用户即被 429 封锁 15 分钟。
+  // 阈值与窗口不变 —— 纯失败 100 次仍会触发封锁，防暴破能力不降级。
+  res.on('finish', () => {
+    if (res.statusCode < 400) return;
+    const list = (loginAttempts.get(ip) || []).filter((t) => Date.now() - t < LOGIN_RATE_WINDOW);
+    list.push(now);
+    loginAttempts.set(ip, list);
+  });
   next();
 });
 

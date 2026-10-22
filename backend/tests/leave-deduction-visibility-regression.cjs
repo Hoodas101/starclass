@@ -34,14 +34,11 @@
 // 3001 是线上服务；3095/3096/3097 已被其它套件占用，这里走 3098。
 process.env.PORT = process.env.PORT || '3098';
 
-const { bootstrap, resolveStaffIdentities } = require('./_bootstrap.cjs');
+const { assertIsolatedTempDb, bootstrap, resolveStaffIdentities } = require('./_bootstrap.cjs');
 bootstrap('/tmp/edu-test-leave-deduction-visibility');
 
-// 防呆：临时库必须落在 /tmp，绝不能是真实库 backend/db/data.db
-if (!String(process.env.DB_PATH || '').startsWith('/tmp/')) {
-  console.error('[致命] DB_PATH 不在 /tmp，拒绝运行以免污染真实库:', process.env.DB_PATH);
-  process.exit(2);
-}
+// 防呆：临时库必须落在系统临时目录内（跨平台，Windows 上 '/tmp' 不可写）
+assertIsolatedTempDb();
 
 const db = require('../db');
 const { now, generateToken } = require('../utils');

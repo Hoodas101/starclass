@@ -33,13 +33,12 @@ registerHandler('renewal_reminder', async () => generateRenewalReminders(Date.no
  * deduction_logs，扣课路径的「扣课即结转」够不到它们，若不在日任务里摊销，
  * recognizedRevenue 永远缺时效卡部分、合同负债被系统性高估。
  *
- * 幂等：recognizeTimeCardRevenue 内部同卡只保留一行、重复运行 delta ≤ 0 时不写入，
- * 因此多实例并存 / 重复调度都安全。
+ * 幂等：recognizeTimeCardRevenue 按 `timecard:<cardId>` 累计已结转额，
+ * 每次只追加「本次增量」行，delta ≤ 0 时不写入 —— 重复运行结果收敛，可安全重跑。
  *
- * 注意：本函数挂在 worker 启动流程上（ENABLE_JOB_WORKER=true 时生效）。
- * server.js 的日任务清单当前未调用它 —— 需要在 server.js 的日调度里
- * 增加 `require('./utils/worker').runDailyMaintenance()`（server.js 不在本次改动范围内，
- * 已在交付报告中标注为跨文件事项）。
+ * 调度（两处，均真实存在，勿按旧注释以为只有一处）：
+ *   1. worker 启动流程（ENABLE_JOB_WORKER=true 时按周期跑）；
+ *   2. server.js 的日任务 —— 见 server.js 中 `worker.runDailyMaintenance()` 调用点。
  *
  * @param {number} [nowMs] 观察时间戳，便于测试控制
  * @returns {{recognized:number, amount:number}}

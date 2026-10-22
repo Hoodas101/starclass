@@ -233,6 +233,16 @@ router.post('/', (req, res) => {
         if (item.quantity !== undefined && item.quantity !== null && !Number.isFinite(Number(item.quantity))) {
           return res.json(fail('订单项数量不合法'));
         }
+        // 光挡 NaN 不够：负单价 / 1e308 这类超大金额同样是有限数，会穿透并污染
+        // 实付、营收聚合与对账；quantity=0/负数/10000 也会算出荒谬金额。
+        if (item.unitPrice !== undefined && item.unitPrice !== null) {
+          const up = Number(item.unitPrice);
+          if (up < 0 || up > 1e9) return res.json(fail('订单项单价需在 0 ~ 10 亿之间'));
+        }
+        if (item.quantity !== undefined && item.quantity !== null) {
+          const q = Number(item.quantity);
+          if (!Number.isInteger(q) || q < 1 || q > 9999) return res.json(fail('订单项数量需为 1 ~ 9999 的整数'));
+        }
       }
     }
 
@@ -780,7 +790,11 @@ router.post('/:id/refund', (req, res) => {
             `).run(generateId('PLG'), order.student_id, -actual, newBal, 'order_' + order.id, currentTime);
           }
         }
-      } else if (appliedSuggestion && suggestion.started && (suggestion.mode === 'custom' || suggestion.mode === 'ratio') && suggestion.cardId) {
+      } else if (appliedSuggestion && (suggestion.mode === 'custom' || suggestion.mode === 'ratio') && suggestion.cardId) {
+        // 注意：**不能**带 `suggestion.started &&`。
+        // beforeStart='percent' 的规则分支（refund.js）在定义上就是「未开始消耗」，started 恒为 false，
+        // 带上这个条件会让「开课前按 (100−X)% 退现金」整体跳过权益回收 ——
+        // 学员拿回大部分现金却保留整张卡，等价于 X 折买卡。次数卡与时效卡都会中招。
         // 语义：凡**按规则建议值**退款（appliedSuggestion 为真）且该退款对应「交出剩余权益」
         // 的，都要同步回收卡权益——否则学员既拿到现金退款、又保留全部剩余课时/有效期。
         // mode==='ratio' 是 afterStart='percent' 的规则扣费退（退款额 = remain×(1−pct%)），
@@ -798,7 +812,9 @@ router.post('/:id/refund', (req, res) => {
             db.prepare('UPDATE member_cards SET used_classes = used_classes + remaining_classes, remaining_classes = 0, updated_at = ? WHERE id = ?').run(currentTime, card.id);
             clawback = `已同步回收卡内剩余 ${card.remaining_classes || 0} 次课时`;
           } else {
-            db.prepare('UPDATE member_cards SET expires_at = ?, updated_at = ? WHERE id = ?').run(currentTime, card.id);
+            // 三个占位符必须三个实参：此前漏传第二个 currentTime，better-sqlite3 抛
+            // RangeError → 退款事务整体回滚 → 默认规则下任意时效卡部分退款都是 500。
+            db.prepare('UPDATE member_cards SET expires_at = ?, updated_at = ? WHERE id = ?').run(currentTime, currentTime, card.id);
             clawback = '已同步清零卡内剩余有效期';
           }
         }

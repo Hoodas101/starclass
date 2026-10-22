@@ -53,18 +53,15 @@
 'use strict';
 
 // ---- 隔离库（必须在 require('../db') 之前设置）----
-const { bootstrap } = require('./_bootstrap.cjs');
+const { assertIsolatedTempDb, bootstrap } = require('./_bootstrap.cjs');
 bootstrap('/tmp/edu-test-order-benefits-idempotency');
 
 const db = require('../db');
 const { now } = require('../utils');
 const ordersRouter = require('../routes/orders');
 
-// 防呆：临时库必须落在 /tmp，绝不能是真实库 backend/db/data.db
-if (!String(process.env.DB_PATH || '').startsWith('/tmp/')) {
-  console.error('[致命] DB_PATH 不在 /tmp，拒绝运行以免污染真实库:', process.env.DB_PATH);
-  process.exit(2);
-}
+// 防呆：临时库必须落在系统临时目录内（跨平台，Windows 上 '/tmp' 不可写）
+assertIsolatedTempDb();
 
 // ---------- 直调路由处理器（与 deduction-count-regression.cjs 同款）----------
 function getHandler(router, method, path) {

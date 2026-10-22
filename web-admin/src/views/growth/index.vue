@@ -525,7 +525,7 @@
         <el-button v-if="leadForm.id" type="danger" plain @click="removeLead({ id: leadForm.id, name: leadForm.name })">删除</el-button>
         <el-button @click="leadDialogOpen = false">取消</el-button>
         <el-button v-if="leadForm.id && leadForm.status !== 'converted' && leadForm.stage !== 'deal'" type="success" plain @click="convertFromDialog">转成交</el-button>
-        <el-button type="primary" @click="saveLead">{{ leadForm.id ? '保存' : '创建' }}</el-button>
+        <el-button type="primary" :loading="savingLead" @click="saveLead">{{ leadForm.id ? '保存' : '创建' }}</el-button>
       </template>
     </el-dialog>
 
@@ -715,7 +715,8 @@ const leadFormRef = ref(null)
 const leadForm = reactive({ id: '', name: '', phone: '', source: 'natural', stage: 'new', intentLevel: 3, nextFollowAt: null, note: '', salesperson: '', studentId: '', status: '' })
 const leadRules = {
   name: [{ required: true, message: '请输入姓名', trigger: 'blur' }],
-  phone: [{ pattern: /^1\d{10}$/, message: '请输入11位有效手机号', trigger: 'blur' }],
+  // 与后端 1[3-9] 口径一致：/^1\d{10}$/ 会放过 12x 号段，提交后建档/下单直接失败
+  phone: [{ pattern: /^1[3-9]\d{9}$/, message: '请输入11位有效手机号', trigger: 'blur' }],
 }
 const leadStudentOptions = ref([])
 
@@ -735,9 +736,12 @@ const openLeadDialog = async (row) => {
   nextTick(() => leadFormRef.value?.clearValidate())
 }
 
+const savingLead = ref(false)
 const saveLead = async () => {
+  if (savingLead.value) return
   const valid = await leadFormRef.value?.validate().catch(() => false)
   if (!valid) return
+  savingLead.value = true
   try {
     if (leadForm.id) {
       await updateLead(leadForm.id, { ...leadForm })
@@ -749,6 +753,8 @@ const saveLead = async () => {
     loadLeads(); loadFunnel()
   } catch (e) {
     // 拦截器已提示业务/网络错误
+  } finally {
+    savingLead.value = false
   }
 }
 

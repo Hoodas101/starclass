@@ -112,12 +112,28 @@ function canViewStudents(req) {
  * POST /api/students — 创建成员
  * Body: { name, gender, birthday, school, grade, hobby, remark, phone, parentName }
  */
+// 成员基础字段值域：建档 POST / 编辑 PUT / 批量导入 三条路径必须同一判据。
+// 此前只有 POST 校验姓名非空，于是 PUT 与导入都是绕过通道（实测 10000 字姓名、
+// gender='hacker' 均可入库，污染列表列宽、打印排版与按性别分组的统计）。
+const GENDER_VALUES = ['', '男', '女'];
+const NAME_MAX = 50;
+
+/** 合法返回 ''，否则返回可直接展示的错误文案 */
+function validateStudentBasics(nameVal, genderVal) {
+  if (!nameVal) return '成员姓名不能为空';
+  if (nameVal.length > NAME_MAX) return `成员姓名不能超过 ${NAME_MAX} 个字`;
+  if (!GENDER_VALUES.includes(genderVal)) return '性别只能填「男」或「女」';
+  return '';
+}
+
 router.post('/', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可新增成员'));
     const { name, gender, birthday, school, grade, hobby, remark, level, height, weight, bmi, phone, parentName, confirmDuplicate } = req.body;
     const nameVal = String(name || '').trim();
-    if (!nameVal) return res.json(fail('成员姓名不能为空'));
+    const genderVal = String(gender == null ? '' : gender).trim();
+    const basicErr = validateStudentBasics(nameVal, genderVal);
+    if (basicErr) return res.json(fail(basicErr));
 
     // 建档查重：同一孩子被录两遍会让课时/积分/订单/考勤全部裂成两份且难以合并。
     // 手机号相同视为强重复 → 不直接建档，回传候选让操作者确认（confirmDuplicate 表示已确认）。
@@ -177,7 +193,7 @@ router.post('/', (req, res) => {
       let inserted = false;
       for (let attempt = 0; attempt < 5 && !inserted; attempt++) {
         try {
-          insertStmt.run(id, nameVal, gender || '', birthdayVal, school || '', grade || '', hobby || '', level || '',
+          insertStmt.run(id, nameVal, genderVal, birthdayVal, school || '', grade || '', hobby || '', level || '',
             h.value === undefined ? 0 : h.value,
             w.value === undefined ? 0 : w.value,
             b.value === undefined ? 0 : b.value,
@@ -404,10 +420,19 @@ router.post('/import', (req, res) => {
         const statusUnknown = !!statusInput && !mappedStatus && !VALID_STUDENT_STATUS.includes(statusInput);
         // 同建档路径：join_date 为 TEXT 列，绑字符串避免落成 '...0'（前端会解析失败显示 `-`）
         const joinDateVal = String(joinNorm ? (new Date(joinNorm + 'T12:00:00').getTime() || t) : t);
+        // 姓名长度 / 性别值域：与建档、编辑同一判据。超长姓名会撑坏列表列宽、
+        // 打印排版与 Excel 导出；越界性别会让按性别分组的统计出现野值。
+        // 单行记 failed 不中断整批（与其它行级校验一致）。
+        const genderImport = String(r.gender || '').trim();
+        const basicErrImport = validateStudentBasics(name, genderImport);
+        if (basicErrImport) {
+          failed.push({ row: fileRowOf(r, idx), name, reason: basicErrImport });
+          return;
+        }
         db.prepare(`
           INSERT INTO students (id, name, gender, birthday, school, grade, level, remark, status, join_date, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(id, name, String(r.gender || '').trim(), birthdayVal, String(r.school || '').trim(),
+        `).run(id, name, genderImport, birthdayVal, String(r.school || '').trim(),
           String(r.grade || '').trim(), String(r.level || '').trim(), String(r.remark || '').trim(), statusVal, joinDateVal, t, t);
 
         if (phoneOk) {
@@ -524,7 +549,10 @@ router.post('/import', (req, res) => {
  */
 router.get('/', (req, res) => {
   try {
-    // 成员列表仅管理端工作人员（管理员/教练）可查看，家长端使用 /students/my
+    // 成员列表按「students」权限放行 —— 除管理员/教练外，销售默认也持有该权限。
+    // 待裁决（R1）：销售在列表里能拿到生日 / 家长手机 / 累计消费，而 canViewStudentData
+    // 把销售排除在敏感字段之外，两处口径不一致。要么明确「销售可见 roster + 家长手机、
+    // 不可见累计消费/生日」，要么维持现状并在此说明，不要让它停留在「注释说一套、代码做一套」。
     if (!canViewStudents(req)) return res.status(403).json(safeFail('无成员查看权限'));
     const { keyword, status, project, sort, archived, startDate, endDate } = req.query;
     const { page, pageSize, offset } = parsePagination(req.query);
@@ -990,6 +1018,19 @@ router.put('/:id', requireAuth, (req, res) => {
       return res.json(fail(`生日「${birthdayVal}」不是有效日期（格式 YYYY-MM-DD）`));
     }
 
+    // 姓名 / 性别：PUT 与 POST 同口径。此前 PUT 是绕过通道 —— 10000 字姓名、
+    // gender='hacker' 都能直接入库（生日已校验，唯独这两项漏网）。
+    const nameValPut = name === undefined ? undefined : String(name).trim();
+    const genderValPut = gender === undefined ? undefined : String(gender == null ? '' : gender).trim();
+    if (nameValPut !== undefined || genderValPut !== undefined) {
+      // 未传的字段用「库中现值 / 空串」参与判据：只改性别时不会因为没传姓名而误报
+      const basicErr = validateStudentBasics(
+        nameValPut === undefined ? String(existing.name || '').trim() : nameValPut,
+        genderValPut === undefined ? '' : genderValPut,
+      );
+      if (basicErr) return res.json(fail(basicErr));
+    }
+
     // 状态枚举白名单：此前后端无校验，非法值（如 inactive）会静默入库 → 列表标签空白、
     // 按状态筛选失效、报表口径失真，且系统不报错、排查成本高。此处与前端可选值对齐。
     const VALID_STATUS = ['active', 'paused', 'refunded', 'churn', 'graduated'];
@@ -1193,6 +1234,10 @@ router.delete('/:id', requireAuth, (req, res) => {
       // 一并清理积分流水：此前只清了 parent_bindings，point_logs 残留成孤儿记录
       //（由系统产生，非导入遗留），对账时会出现无法归属的积分明细。
       db.prepare('DELETE FROM point_logs WHERE student_id = ?').run(id);
+      // 账户行必须与流水同删：只删流水会留下「有余额、无流水」的僵尸账户 ——
+      // 「流水 SUM = 余额」恒等式必败，且 total_earned 仍计入全机构积分汇总，
+      // 等于人已经删了还在给机构贡献总分。恢复成员时账户由签到/购买惰性重建为 0 分起算。
+      db.prepare('DELETE FROM points WHERE student_id = ?').run(id);
       // 清理孤儿家长账号：建档/导入时凭手机号自动建了 role='parent' 的 users，删除学员却不动它，
       // 真实库曾积累约 41.5% 无绑定的幽灵账号（且会被下一个同手机号学员复用 → 上一任家长看到下一任数据）。
       // 三重约束：① 该 openid 不再绑定任何其他孩子（多孩家庭不误删）；② 仅 phone_ 前缀

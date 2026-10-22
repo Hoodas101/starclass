@@ -836,8 +836,10 @@ router.post('/changePassword', (req, res) => {
     const openid = getOpenId(req);
     if (!openid) return res.status(401).json(safeFail('未登录'));
 
-    // 员工三角色（管理员/教练/销售）均需自助改密；此前漏了 sales，销售无法改初始密码
-    const user = db.prepare("SELECT * FROM users WHERE openid = ? AND role IN ('admin','coach','sales')").get(openid);
+    // 员工三角色（管理员/教练/销售）均需自助改密；此前漏了 sales，销售无法改初始密码。
+    // parent 一并放行：家长账号若已设过密码，把他排除在外等于「密码泄露了也改不了」。
+    // 安全性不受影响 —— 下面仍要求 user.password 存在且原密码校验通过。
+    const user = db.prepare("SELECT * FROM users WHERE openid = ? AND role IN ('admin','coach','sales','parent')").get(openid);
     if (!user) return res.status(403).json(safeFail('当前账号无需设置密码'));
 
     const pwdResult = verifyPassword(oldPassword || '', user.password || '');

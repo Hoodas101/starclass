@@ -756,7 +756,9 @@ router.delete('/rules/:id', (req, res) => {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可停用周期规则'));
     const rule = db.prepare('SELECT * FROM schedule_rules WHERE id = ?').get(req.params.id);
     if (!rule) return res.json(fail('周期规则不存在'));
-    const cascade = String(req.query.cascade || '') === '1';
+    // 容忍布尔序列化：前端历史上传过 cascade=true（axios 把 true 序列化成 'true'），
+    // 只认 '1' 会让「停用并取消 N 场」静默失效 —— 前端提示已取消，实际一场没动。
+    const cascade = ['1', 'true'].includes(String(req.query.cascade || ''));
     const today = formatDate(now());
     const future = db.prepare(`
       SELECT sc.id FROM schedules sc
