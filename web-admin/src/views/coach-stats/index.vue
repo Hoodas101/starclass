@@ -251,11 +251,11 @@
         <div v-for="p in selfPeriods" :key="p.key" class="self-card">
           <span class="self-label">{{ p.label }}</span>
           <div class="self-nums">
-            <span class="self-num v4-num-display is-md">{{ p.classes }}</span>
+            <span class="self-num num-display is-md">{{ p.classes }}</span>
             <span class="self-num-label">上课节数</span>
           </div>
           <div class="self-nums people">
-            <span class="self-num v4-num-display is-md">{{ p.students }}</span>
+            <span class="self-num num-display is-md">{{ p.students }}</span>
             <span class="self-num-label">上课人次</span>
           </div>
         </div>
@@ -266,7 +266,7 @@
           <span class="self-pay-rule">{{ selfPay.summary }}</span>
         </div>
         <div class="self-pay-nums">
-          <span class="self-pay-amount v4-num-display is-md">¥{{ selfPay.totals.amount.toLocaleString() }}</span>
+          <span class="self-pay-amount num-display is-md">¥{{ selfPay.totals.amount.toLocaleString() }}</span>
           <span class="self-pay-detail">{{ selfPay.totals.classes }} 节 · {{ selfPay.totals.students }} 人次（按实际签到人数计算）</span>
         </div>
       </div>

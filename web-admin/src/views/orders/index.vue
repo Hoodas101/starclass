@@ -54,19 +54,19 @@
     <div class="order-stats">
       <div class="order-stat-card">
         <span class="order-stat-label">今日收入</span>
-        <span class="order-stat-value v4-num-display is-md">{{ formatMoney(todayAmount) }}</span>
+        <span class="order-stat-value num-display is-md">{{ formatMoney(todayAmount) }}</span>
       </div>
       <div class="order-stat-card">
         <span class="order-stat-label">本月营收</span>
-        <span class="order-stat-value v4-num-display is-md">{{ formatMoney(monthAmount) }}</span>
+        <span class="order-stat-value num-display is-md">{{ formatMoney(monthAmount) }}</span>
       </div>
       <div class="order-stat-card">
         <span class="order-stat-label">本年营收</span>
-        <span class="order-stat-value v4-num-display is-md">{{ formatMoney(yearAmount) }}</span>
+        <span class="order-stat-value num-display is-md">{{ formatMoney(yearAmount) }}</span>
       </div>
       <div class="order-stat-card">
         <span class="order-stat-label">销售单数</span>
-        <span class="order-stat-value v4-num-display is-md">{{ totalOrders }}</span>
+        <span class="order-stat-value num-display is-md">{{ totalOrders }}</span>
       </div>
     </div>
 

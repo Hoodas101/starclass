@@ -92,5 +92,43 @@ console.log('\n[4] 时间段取值兼容')
   rec('★ 无对 timeRange[x] 直接调 .format()', bad.length === 0, bad.join(' | '))
 }
 
+// ===== [5] 设计令牌唯一性 =====
+// 对应 trycompai/crm 的 design.md 规则：同一语义只能有一个值。
+// 曾经并存两代令牌（v3 --t-* / v4 --v4-*），同一个「成功」有两种绿、同一个按钮有两种圆角；
+// v4 全站零引用却仍在导出，后人照它写新页面就会让两套配色都变成"在用"。
+console.log('\n[5] 设计令牌唯一性')
+{
+  const styleFiles = []
+  const walkCss = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name)
+      if (e.isDirectory()) walkCss(p)
+      else if (e.name.endsWith('.scss') || e.name.endsWith('.vue')) styleFiles.push(p)
+    }
+  }
+  walkCss(SRC)
+
+  // 5-1 不得再引用第二代令牌（$v4- 或 var(--v4-）
+  const v4 = []
+  for (const f of styleFiles) {
+    const src = read(f)
+    for (const m of src.matchAll(/(\$v4-[\w-]+|var\(--v4-[\w-]+\))/g)) v4.push(`${rel(f)} ${m[0]}`)
+  }
+  rec('★ 无第二代设计令牌（$v4- / var(--v4-）', v4.length === 0, v4.slice(0, 3).join(' | '))
+
+  // 5-2 焦点环必须走 --focus-ring，不得硬编码宽度
+  const focus = []
+  for (const f of styleFiles) {
+    const src = read(f)
+    for (const m of src.matchAll(/outline:\s*\d+px\s+solid/g)) focus.push(`${rel(f)} ${m[0]}`)
+  }
+  rec('★ 焦点环统一走 --focus-ring（无硬编码 px）', focus.length === 0, focus.slice(0, 3).join(' | '))
+
+  // 5-3 遮罩必须走 --t-scrim，不得在 .el-overlay 上写死 rgba
+  const overlay = read(path.join(SRC, 'styles/index.scss')).match(/\.el-overlay\s*\{[^}]*\}/)
+  const scrimOk = !!overlay && overlay[0].includes('var(--t-scrim)')
+  rec('★ 弹窗遮罩走 --t-scrim（浅深主题各自可见）', scrimOk, overlay ? overlay[0].slice(0, 80) : '未找到 .el-overlay')
+}
+
 console.log(`\n结果汇总：PASS ${pass}  FAIL ${fail}`)
 process.exit(fail > 0 ? 1 : 0)

@@ -67,15 +67,15 @@
     <!-- 数据概览 -->
     <div class="overview-strip">
       <div class="overview-item">
-        <span class="overview-value v4-num-display is-md">{{ stats.totalStudents }}</span>
+        <span class="overview-value num-display is-md">{{ stats.totalStudents }}</span>
         <span class="overview-label">在册成员</span>
       </div>
       <div class="overview-item">
-        <span class="overview-value v4-num-display is-md">{{ stats.totalCards }}</span>
+        <span class="overview-value num-display is-md">{{ stats.totalCards }}</span>
         <span class="overview-label">{{ t('membership') }}数</span>
       </div>
       <div class="overview-item warn">
-        <span class="overview-value v4-num-display is-md">{{ stats.expiringCards }}</span>
+        <span class="overview-value num-display is-md">{{ stats.expiringCards }}</span>
         <span class="overview-label">7 天内到期</span>
       </div>
     </div>

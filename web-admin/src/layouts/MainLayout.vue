@@ -641,7 +641,8 @@ const handleCommand = async (command) => {
   // 键盘焦点可见性：roving tabindex 把焦点落在 li 上，需明确焦点环
   &:focus-visible,
   :deep(.el-menu-item:focus-visible) {
-    outline: 2px solid var(--t-accent-line);
+    outline: var(--focus-ring);
+    outline-offset: var(--focus-offset);
     outline-offset: -2px;
     border-radius: 8px;
   }

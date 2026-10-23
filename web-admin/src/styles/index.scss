@@ -94,7 +94,12 @@ html:not([data-theme]) {
   --t-success-text: #1B7A3D;
   --t-danger-text: #C92A2A;
   --t-warning-text: #B45309;
-  --t-scrim: rgba(0, 0, 0, 0.18);
+  // 弹窗/抽屉遮罩：唯一的遮罩色来源（--el-mask-color 也指向它）
+  --t-scrim: rgba(0, 0, 0, 0.32);
+  // 焦点环：全站唯一来源。宽度与偏移只在这里改，避免出现 1/2/3px 混用。
+  // 用 accent-line（半透明）而不是纯 accent：深色主题下纯色描边过于刺眼。
+  --focus-ring: 2px solid var(--t-accent-line);
+  --focus-offset: 2px;
   --t-card-shadow: #{$shadow-sm};
   --t-card-shadow-hover: #{$shadow-md};
   --t-input-bg: #{$surface};
@@ -160,7 +165,10 @@ html[data-theme='dark'] {
   --t-success-text: #30D158;
   --t-danger-text: #FF6961;
   --t-warning-text: #FFB340;
-  --t-scrim: rgba(0, 0, 0, 0.55);
+  // 深色下页面本身接近纯黑，黑遮罩能压暗的余量很小 —— 弹窗与背景的层次
+  // 主要靠 --t-bg-overlay(#17171C) 与 --t-elevation-float(0.65 投影) 承担，
+  // 遮罩只是让抽屉旁仍可见的页面再退一层。取值比浅色重，但不要指望它单独撑起分隔。
+  --t-scrim: rgba(0, 0, 0, 0.62);
   --t-card-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   --t-card-shadow-hover: 0 2px 8px rgba(0, 0, 0, 0.5);
   --t-input-bg: #17171C;
@@ -212,7 +220,7 @@ html:not([data-theme]) {
   --el-text-color-regular: #{$text-2} !important;
   --el-text-color-secondary: #{$text-3} !important;
   --el-text-color-placeholder: #{$text-faint} !important;
-  --el-mask-color: rgba(0, 0, 0, 0.18) !important;
+  --el-mask-color: var(--t-scrim) !important;
 
   --el-border-radius-base: #{$radius-md};
   --el-border-radius-small: #{$radius-sm};
@@ -256,7 +264,7 @@ html[data-theme='dark'] {
   --el-text-color-regular: #B9B9BF !important;
   --el-text-color-secondary: #8E8E94 !important;
   --el-text-color-placeholder: #6E6E76 !important;
-  --el-mask-color: rgba(0, 0, 0, 0.6) !important;
+  --el-mask-color: var(--t-scrim) !important;
 
   --el-border-radius-base: #{$radius-md};
   --el-border-radius-small: #{$radius-sm};
@@ -460,8 +468,8 @@ html[data-theme='dark'] .el-table th.el-table__cell {
   }
 
   &:focus-visible {
-    outline: 2px solid var(--t-accent-line);
-    outline-offset: 2px;
+    outline: var(--focus-ring);
+    outline-offset: var(--focus-offset);
   }
 }
 
@@ -872,9 +880,12 @@ html[data-theme='dark'] .el-table th.el-table__cell {
   box-shadow: var(--t-elevation-float) !important;
 }
 
-// 遮罩减轻：EP 默认 rgba(0,0,0,.5) 偏重，与 12px 圆角弹窗搭配观感陈旧；降到 .32。
+// 遮罩统一走 --t-scrim：此前这里硬编码 rgba(0,0,0,.32)，把深色主题单独调过的
+// 0.6 又盖了回去 —— 同一个遮罩在两套主题下实际只有一种取值。
+// 现在浅色 .32（比 EP 默认 .5 轻）、深色 .62，一个变量管到底；
+// 深色下的层次主要由弹窗表面色与投影承担，遮罩是辅助。
 .el-overlay {
-  background-color: rgba(0, 0, 0, 0.32);
+  background-color: var(--t-scrim);
 }
 
 // 过渡时长收口到 DESIGN.md §6（常规 ≤200ms）：此前项目从未定义 --el-transition-duration，
@@ -936,7 +947,7 @@ html[data-theme='dark'] .el-table th.el-table__cell {
 
 // ============================================
 // 全局 reduced-motion 兜底（DESIGN.md §6.3）
-// 现有 3 处降级（.fade-* / .table-container / .v4-stagger-in / .v4-btn / .v4-card）
+// 现有 2 处降级（.fade-* / .table-container）
 // 只覆盖局部的 transition/animation。Element Plus 弹窗/抽屉/popper 等
 // 内部组件默认不响应系统「减少动效」偏好，本兜底把项目内**所有**动效降到
 // 0.01ms（视觉上等价于无动画），保留状态切换的最终结果，不丢失信息。
@@ -1003,8 +1014,8 @@ html[data-theme='dark'] .el-table th.el-table__cell {
 // 键盘焦点可见性
 // ============================================
 :focus-visible {
-  outline: 2px solid var(--t-accent-line);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
   border-radius: 4px;
 }
 
@@ -1094,8 +1105,8 @@ html[data-theme='dark'] .el-table th.el-table__cell {
   &:active { transform: scale(0.97); }
 
   &:focus-visible {
-    outline: 2px solid var(--t-accent-line);
-    outline-offset: 1px;
+    outline: var(--focus-ring);
+    outline-offset: var(--focus-offset);
   }
 }
 
@@ -1258,130 +1269,46 @@ html[data-theme='dark'] .el-table th.el-table__cell {
 }
 
 // ============================================
-// DESIGN v4 token 输出层（与 v3 并存；opt-in 使用）
-// 27 个现有页面继续走 --t-*（v3），不主动迁移。
+// 数字展示（KPI / 统计大数字）
+//
+// 这里原本还有一整套「DESIGN v4」令牌与组件层（--v4-primary / --v4-success /
+// --v4-radius-6 / .v4-btn / .v4-card / .v4-stagger-in）。核查结果：
+// **v4 的颜色、圆角、动效令牌在页面里零引用**，.v4-btn / .v4-card /
+// .v4-stagger-in / .v4-tabular 也零引用，只有数字展示这一支在用。
+//
+// 留着它的代价不是体积，而是**同一语义有两个值**：同一个「成功」有
+// #34C759 与 #10B981 两种绿、同一个按钮有 8px 与 6px 两种圆角。
+// 后人会照着 v4 写新页面，于是两套配色都变成"在用"，再也收不回来。
+// 故删除死层，只保留实际在用的数字展示令牌。
 // ============================================
 
-// v4 字体加载（仅在使用 v4 token 时触发网络下载）
+// Space Grotesk / Inter 仅用于数字展示，按需加载
 @supports (font-variation-settings: normal) {
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
 }
 
 :root {
-  // 字体
-  --v4-font-body: #{inspect($v4-font-body)};
-  --v4-font-display: #{inspect($v4-font-display)};
-
-  // 颜色
-  --v4-primary: #{$v4-primary};
-  --v4-primary-strong: #{$v4-primary-strong};
-  --v4-primary-bg: #{$v4-primary-bg};
-  --v4-primary-line: #{$v4-primary-line};
-  --v4-success: #{$v4-success};
-  --v4-success-bg: #{$v4-success-bg};
-  --v4-warning: #{$v4-warning};
-  --v4-warning-bg: #{$v4-warning-bg};
-  --v4-danger: #{$v4-danger};
-  --v4-danger-bg: #{$v4-danger-bg};
-
-  // 字号扩展
-  --v4-fs-5xl: #{$v4-fs-5xl};
-  --v4-fs-6xl: #{$v4-fs-6xl};
-
-  // 圆角扩展
-  --v4-radius-6: #{$v4-radius-6};
-
-  // 动效扩展
-  --v4-dur-fast: #{$v4-dur-fast};
-  --v4-stagger: #{$v4-stagger};
-  --v4-dur-page: #{$v4-dur-page};
-
-  // 数字稳定（OpenType features）
-  --v4-numeric: #{$v4-numeric};
+  --font-display: #{inspect($font-display)};
+  --fs-5xl: #{$fs-5xl};
+  --fs-6xl: #{$fs-6xl};
+  // 等宽数字 + lining figures：变化的数字不会左右抖动
+  --num-features: #{$num-features};
 }
 
-// ============================================
-// v4 工具类（opt-in；在元素上添加 .v4-* 即可应用）
-// ============================================
-
 // 数字英雄卡（KPI / 统计大数字）
-.v4-num-display {
-  font-family: var(--v4-font-display);
-  // DESIGN.md §4 字重上限 700：900 不在 token 内，且中文字体栈缺 900 字形时浏览器合成
+.num-display {
+  font-family: var(--font-display);
+  // 字重上限 700：900 不在 token 内，且中文字体栈缺 900 字形时浏览器合成
   //「伪粗体」（笔画粘连、发虚，Windows 尤甚）。数字冲击力改由字号 + 负字距承担。
   font-weight: 700;
   letter-spacing: -0.04em;
   line-height: 1;
   color: var(--t-text-1);
-  font-feature-settings: var(--v4-numeric);
+  font-feature-settings: var(--num-features);
 }
-.v4-num-display.is-lg { font-size: var(--v4-fs-6xl); }
-.v4-num-display.is-md { font-size: var(--v4-fs-5xl); }
-.v4-num-display.is-sm { font-size: var(--t-fs-3xl); }
-
-// 数字稳定（任何变化的数字）
-.v4-tabular { font-feature-settings: var(--v4-numeric); }
-
-// v4 按钮（更紧凑 6px 圆角）
-.v4-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 16px;
-  height: 36px;
-  border-radius: var(--v4-radius-6);
-  font: 500 13px var(--v4-font-body);
-  border: 1px solid transparent;
-  cursor: pointer;
-  transition: background-color var(--v4-dur-fast) var(--ease-standard),
-              box-shadow var(--v4-dur-fast) var(--ease-standard),
-              transform var(--v4-dur-fast) var(--ease-spring);
-}
-.v4-btn-primary {
-  background: var(--v4-primary);
-  color: white;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-}
-.v4-btn-primary:hover {
-  background: var(--v4-primary-strong);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(0, 113, 227, 0.18);
-}
-.v4-btn-primary:active { transform: scale(0.97); }
-
-// v4 卡片（更克制阴影 + 10px 圆角）
-.v4-card {
-  background: var(--t-surface);
-  border: 1px solid var(--t-line);
-  border-radius: var(--t-radius-xl);
-  padding: var(--t-spacing-lg);
-  transition: box-shadow var(--v4-dur-fast) var(--ease-standard),
-              transform var(--v4-dur-fast) var(--ease-standard);
-}
-.v4-card:hover {
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-  transform: translateY(-1px);
-}
-
-// v4 stagger 入场（在父元素加 .v4-stagger-in，子元素按序淡入）
-.v4-stagger-in > * {
-  animation: v4-fade-up var(--v4-dur-page) var(--ease-standard) both;
-}
-.v4-stagger-in > *:nth-child(1) { animation-delay: calc(var(--v4-stagger) * 0); }
-.v4-stagger-in > *:nth-child(2) { animation-delay: calc(var(--v4-stagger) * 1); }
-.v4-stagger-in > *:nth-child(3) { animation-delay: calc(var(--v4-stagger) * 2); }
-.v4-stagger-in > *:nth-child(4) { animation-delay: calc(var(--v4-stagger) * 3); }
-.v4-stagger-in > *:nth-child(5) { animation-delay: calc(var(--v4-stagger) * 4); }
-.v4-stagger-in > *:nth-child(6) { animation-delay: calc(var(--v4-stagger) * 5); }
-@keyframes v4-fade-up {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: none; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .v4-stagger-in > * { animation: none; }
-  .v4-btn { transition: none; }
-  .v4-card { transition: none; }
-}
+.num-display.is-lg { font-size: var(--fs-6xl); }
+.num-display.is-md { font-size: var(--fs-5xl); }
+.num-display.is-sm { font-size: var(--t-fs-3xl); }
 
 // ============================================
 // 可访问性：键盘可操作元素（role="button"）
@@ -1393,8 +1320,8 @@ html[data-theme='dark'] .el-table th.el-table__cell {
   cursor: pointer;
 
   &:focus-visible {
-    outline: 2px solid var(--t-accent-line);
-    outline-offset: 2px;
+    outline: var(--focus-ring);
+    outline-offset: var(--focus-offset);
     border-radius: var(--t-radius-sm);
   }
 }

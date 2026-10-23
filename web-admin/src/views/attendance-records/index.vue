@@ -72,19 +72,19 @@
     <!-- 汇总卡片 -->
     <div class="stat-cards">
       <div class="stat-card">
-        <div class="stat-value text-success v4-num-display is-md">{{ summary.attendedSessions }}</div>
+        <div class="stat-value text-success num-display is-md">{{ summary.attendedSessions }}</div>
         <div class="stat-label">出勤次数</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value v4-num-display is-md">{{ summary.totalSessions }}</div>
+        <div class="stat-value num-display is-md">{{ summary.totalSessions }}</div>
         <div class="stat-label">应到次数</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value text-accent v4-num-display is-md">{{ summary.attendedHours }}<span class="stat-unit">课时</span></div>
+        <div class="stat-value text-accent num-display is-md">{{ summary.attendedHours }}<span class="stat-unit">课时</span></div>
         <div class="stat-label">已上课时</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value text-accent v4-num-display is-md">{{ summary.attendanceRate }}<span class="stat-unit">%</span></div>
+        <div class="stat-value text-accent num-display is-md">{{ summary.attendanceRate }}<span class="stat-unit">%</span></div>
         <div class="stat-label">出勤率</div>
       </div>
     </div>

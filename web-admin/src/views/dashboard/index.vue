@@ -39,7 +39,7 @@
           <span class="stat-label">{{ stat.label }}</span>
         </div>
         <div class="stat-value">
-          <span class="stat-number v4-num-display is-md">{{ stat.value }}</span>
+          <span class="stat-number num-display is-md">{{ stat.value }}</span>
           <span class="stat-unit">{{ stat.unit }}</span>
         </div>
         <!-- 三态语义色：正=绿 / 负=红 / 无对比=中性灰
