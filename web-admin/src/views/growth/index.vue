@@ -140,8 +140,27 @@
               <span class="pipeline-col-name">{{ col.label }}</span>
               <span class="pipeline-col-count">{{ col.items.length }}</span>
             </div>
-            <div class="pipeline-col-body">
-              <div role="button" tabindex="0" v-for="row in col.items" :key="row.id" class="pipeline-card" @click="openLeadDialog(row)" @keydown.enter="openLeadDialog(row)" @keydown.space.prevent="openLeadDialog(row)">
+            <div
+              class="pipeline-col-body"
+              :class="{ 'is-drop-target': dragOverStage === col.stage && draggingLead && draggingLead.stage !== col.stage }"
+              @dragover.prevent="onDragOver(col.stage)"
+              @dragleave="onDragLeave(col.stage, $event)"
+              @drop.prevent="onDrop(col.stage)"
+            >
+              <div
+                role="button"
+                tabindex="0"
+                v-for="row in col.items"
+                :key="row.id"
+                class="pipeline-card"
+                :class="{ 'is-dragging': draggingLead && draggingLead.id === row.id }"
+                :draggable="row.status !== 'converted'"
+                @click="openLeadDialog(row)"
+                @keydown.enter="openLeadDialog(row)"
+                @keydown.space.prevent="openLeadDialog(row)"
+                @dragstart="onDragStart(row, $event)"
+                @dragend="onDragEnd"
+              >
                 <div class="pipeline-card-top">
                   <div class="pipeline-card-name-wrap">
                     <EntityAvatar :name="row.name" size="xs" />
@@ -904,6 +923,43 @@ const onLeadViewChange = (val) => {
   if (val === 'kanban') loadPipeline()
 }
 
+// 拖拽推进阶段（借鉴 trycompai/crm 的 Deal pipeline：拖动卡片即推进）
+const draggingLead = ref(null)
+const dragOverStage = ref('')
+
+function onDragStart(row, e) {
+  if (row.status === 'converted') return
+  draggingLead.value = row
+  // Firefox 要求显式 setData 才会触发后续 drag 事件
+  try { e.dataTransfer.setData('text/plain', row.id); e.dataTransfer.effectAllowed = 'move' } catch (_) {}
+}
+
+function onDragOver(stage) {
+  if (draggingLead.value) dragOverStage.value = stage
+}
+
+function onDragLeave(stage, e) {
+  // 拖过列内的卡片会连续触发 dragleave/dragover；若直接清空，高亮会闪断。
+  // 只有指针真正离开该列（relatedTarget 不在列内）才清除。
+  const to = e && e.relatedTarget
+  if (to && e.currentTarget && e.currentTarget.contains(to)) return
+  if (dragOverStage.value === stage) dragOverStage.value = ''
+}
+
+function onDrop(stage) {
+  const row = draggingLead.value
+  const over = dragOverStage.value
+  draggingLead.value = null
+  dragOverStage.value = ''
+  if (!row || !over || row.stage === stage) return
+  moveStage(row, stage)
+}
+
+function onDragEnd() {
+  draggingLead.value = null
+  dragOverStage.value = ''
+}
+
 const moveStage = async (row, stage) => {
   try {
     await setLeadStage(row.id, { stage })
@@ -1592,11 +1648,24 @@ watch(activeSection, (v) => {
   display: flex;
   flex-direction: column;
   gap: var(--t-spacing-sm);
+  /* 拖拽落点高亮：仅描边不改变布局，避免拖动时列高跳动 */
+  border-radius: var(--t-radius-lg);
+  outline: 2px dashed transparent;
+  outline-offset: 2px;
+  transition: outline-color var(--t-dur-fast) var(--t-ease-standard);
+
+  &.is-drop-target {
+    outline-color: var(--t-accent);
+  }
 }
 
 .pipeline-card {
   background: var(--t-bg);
   border: 1px solid var(--t-line);
+  /* 拖动中的卡片半透明，让落点更清晰 */
+  &.is-dragging {
+    opacity: 0.45;
+  }
   border-radius: var(--t-radius-lg);
   padding: var(--t-spacing-sm) var(--t-spacing-md);
   cursor: pointer;
