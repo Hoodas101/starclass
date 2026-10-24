@@ -431,6 +431,9 @@ router.post('/recursive', (req, res) => {
       // 本次周期性排期涉及的学员集合（与单次创建同源），循环内复用，避免逐日重复查询
       const recurStudentIds = resolveStudentIds({ studentIds: student_ids, classId, groupCourseId });
 
+      // F3：冲突被跳过的日期必须留痕。此前静默 continue，全部跳过仍返回 code=0，
+      // 管理者收到「成功」提示但课表是空的（学员到店才发现没课）。
+      const skipped = [];
       let intervalCounter = 0;
       for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
         const dayOfWeek = d.getDay();
@@ -454,7 +457,10 @@ router.post('/recursive', (req, res) => {
           endTime,
           studentIds: recurStudentIds,
         });
-        if (conflict.conflict && confirmOverride !== true) continue;
+        if (conflict.conflict && confirmOverride !== true) {
+          skipped.push({ date: dateStr, reason: conflict.message || '与已有排期冲突' });
+          continue;
+        }
 
         const id = generateId('sch_');
         db.prepare(`
@@ -468,10 +474,28 @@ router.post('/recursive', (req, res) => {
           parseInt(class_count, 10) || 1, parseInt(price_per_class, 10) || 0, now(), now());
         createdSchedules.push(id);
       }
+      // F3：一节都没排上时抛哨兵错误回滚整个事务 —— 包括上面插入的 schedule_rules 行，
+      // 否则库里会不断堆积「空转规则」（重复操作就多一条）。
+      if (createdSchedules.length === 0) {
+        const err = new Error('未生成任何排期');
+        err.rollbackReason = skipped.length
+          ? `未生成任何排期：${skipped.slice(0, 5).map((x) => x.date).join('、')}${skipped.length > 5 ? ' 等' : ''} 均与已有排期冲突`
+          : '未生成任何排期：所选日期范围内没有符合重复规则的日期';
+        throw err;
+      }
     }).immediate();
 
-    res.json(success({ ruleId, count: createdSchedules.length, scheduleIds: createdSchedules }));
+    // F3：部分成功时把跳过明细一并返回，前端可提示「跳过 N 天（冲突）」
+    res.json(success({
+      ruleId,
+      count: createdSchedules.length,
+      scheduleIds: createdSchedules,
+      skipped,
+      skippedCount: skipped.length,
+    }));
   } catch (err) {
+    if (err && err.rollbackReason) return res.json(fail(err.rollbackReason));
+    console.error('[schedules recursive]', err && err.stack ? err.stack : err);
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }
 });

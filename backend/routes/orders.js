@@ -36,6 +36,17 @@ function canSales(req) {
  * 角色（canSales），导致销售 A 可把销售 B 名下订单的金额改掉、状态改为 cancelled ——
  * 横向越权且直接篡改他人业绩/提成基数。pay 早已有归属校验，此处对齐消除同语义三处写法不一。
  */
+/**
+ * 当前登录员工的昵称（业绩归属用）。与 canOperateOrder 的比对口径一致：
+ * 归属是自由文本，只能按昵称比对。
+ */
+function myStaffName(req) {
+  const openid = getOpenId(req);
+  if (!openid) return '';
+  const u = db.prepare('SELECT nickname FROM users WHERE openid = ?').get(openid);
+  return u && u.nickname ? String(u.nickname).trim() : '';
+}
+
 function canOperateOrder(req, order) {
   if (isAdminReq(req)) return true;
   const openid = getOpenId(req);
@@ -129,72 +140,79 @@ function grantOrderBenefits(order, paidAt) {
   // 建卡与发积分整体事务化：better-sqlite3 为同步 API，单机单进程下事务天然串行，
   // 使「统计已发张数 + 插入」成为原子步骤，避免并发请求都读到 issued=0 而各发一套。
   db.transaction(() => {
-    // 预扫：统计本单每个卡种「应当发卡」的明细条数，作为期望张数 wanted。
-    // 一单可合法包含同一卡种的多条明细（如同一卡种买两份），故按条数累计而非按卡种去重。
-    const wantedByProduct = new Map();
+    // 预扫：按**数量**统计本单每个卡种应发张数、每个商品应发积分。
+    // 此前只按「明细条数」+1，quantity=2 时实收两份钱却只发一张卡、一份积分
+    //（客户多付一倍拿一半权益；反向也可被用来「收 2 份钱只记 1 单」做账外循环）。
+    const wantedByProduct = new Map();   // productId -> 应发卡张数
+    const rewardByProduct = new Map();   // productId -> 应发积分合计
+    const productCache = new Map();      // productId -> 产品行（避免重复查库）
+
     for (const item of items) {
       const productId = item.itemId;
       if (!productId) continue;
-      const product = db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(productId);
+      if (!productCache.has(productId)) {
+        productCache.set(productId, db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(productId));
+      }
+      const product = productCache.get(productId);
       if (!product) continue;
+
+      const qty = Math.max(1, Number(item.quantity) || 1);
       const isCard = (product.product_type || 'membership') === 'membership' && product.billing_mode !== 'goods';
-      if (!isCard) continue;
-      if (!(item.itemType === 'membershipCard' || order.order_type === 'membership')) continue;
-      wantedByProduct.set(product.id, (wantedByProduct.get(product.id) || 0) + 1);
+
+      // 卡：按数量展开（一单可合法包含同一卡种多条明细，故按条数×数量累计）
+      if (isCard && (item.itemType === 'membershipCard' || order.order_type === 'membership')) {
+        wantedByProduct.set(product.id, (wantedByProduct.get(product.id) || 0) + qty);
+      }
+      // 积分：同一卡种的多条明细合并成一笔，避免 refId 冲突导致第二笔被跳过
+      const reward = Number(product.points_reward) || 0;
+      if (reward > 0) {
+        rewardByProduct.set(product.id, (rewardByProduct.get(product.id) || 0) + reward * qty);
+      }
     }
 
-    for (const item of items) {
-      const productId = item.itemId;
-      if (!productId) continue;
-      const product = db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(productId);
-      if (!product) continue;
-
-      const isCard = (product.product_type || 'membership') === 'membership' && product.billing_mode !== 'goods';
-
-      if (isCard && (item.itemType === 'membershipCard' || order.order_type === 'membership')) {
-        // 幂等：只补发缺口 wanted − issued（≤0 则一张都不发）。
-        // issued 统计**不按 status 过滤**：已退卡/已取消同样算「发过」，不能自动补发。
-        // 注意：SQL 注释必须用 --，SQLite 不认 //。
-        const wanted = wantedByProduct.get(product.id) || 0;
-        const issued = db.prepare('SELECT COUNT(*) AS c FROM member_cards WHERE order_id = ? AND card_type_id = ?')
-          .get(order.id, product.id).c;
-        for (let n = issued; n < wanted; n++) {
-          const cardId = generateId('CARD');
-          const expiresAt = calcCardExpiresAt(currentTime, product.valid_days, product.billing_mode || 'time');
-          // 到店限次（每周/每月）随开卡快照到卡实例：与 membership.js /activate 同一口径，
-          // 保证日后调整卡种不追溯改写已售出的卡；缺列/空值时 Number(undefined)||0 → 0（不限次）
-          const visitLimitPerWeek = Number(product.visit_limit_per_week) || 0;
-          const visitLimitPerMonth = Number(product.visit_limit_per_month) || 0;
-          db.prepare(`
-            INSERT INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name,
-              total_classes, remaining_classes, activated_at, expires_at, status, order_id,
-              visit_limit_per_week, visit_limit_per_month, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
-          `).run(cardId, product.id, product.name, product.billing_mode || 'time', order.student_id, order.student_name,
-            product.total_classes, product.total_classes, currentTime, expiresAt, order.id,
-            visitLimitPerWeek, visitLimitPerMonth, currentTime, currentTime);
-        }
+    // 1) 发卡：只补发缺口（幂等）。issued 不按 status 过滤 —— 已退卡同样算「发过」，不能自动补发。
+    for (const [productId, wanted] of wantedByProduct) {
+      const product = productCache.get(productId);
+      const issued = db.prepare('SELECT COUNT(*) AS c FROM member_cards WHERE order_id = ? AND card_type_id = ?')
+        .get(order.id, productId).c;
+      for (let n = issued; n < wanted; n++) {
+        const cardId = generateId('CARD');
+        const expiresAt = calcCardExpiresAt(currentTime, product.valid_days, product.billing_mode || 'time');
+        // 到店限次（每周/每月）随开卡快照到卡实例：与 membership.js /activate 同一口径，
+        // 保证日后调整卡种不追溯改写已售出的卡；缺列/空值时 Number(undefined)||0 → 0（不限次）
+        const visitLimitPerWeek = Number(product.visit_limit_per_week) || 0;
+        const visitLimitPerMonth = Number(product.visit_limit_per_month) || 0;
+        db.prepare(`
+          INSERT INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name,
+            total_classes, remaining_classes, activated_at, expires_at, status, order_id,
+            visit_limit_per_week, visit_limit_per_month, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+        `).run(cardId, product.id, product.name, product.billing_mode || 'time', order.student_id, order.student_name,
+          product.total_classes, product.total_classes, currentTime, expiresAt, order.id,
+          visitLimitPerWeek, visitLimitPerMonth, currentTime, currentTime);
       }
+    }
 
-      // 购买产品（会员卡或实物商品）赠送积分（幂等：按 订单+商品 去重；受积分规则开关控制）
-      const reward = (product.points_reward || 0);
-      if (reward > 0 && isPurchasePointsEnabled()) {
-        const refId = 'order_' + order.id + '_' + product.id;
-        const exist = db.prepare('SELECT id FROM point_logs WHERE reference_id = ?').get(refId);
-        if (!exist) {
-          const student = db.prepare('SELECT name FROM students WHERE id = ?').get(order.student_id);
-          const acc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(order.student_id);
-          if (!acc && student) {
-            db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-              .run(generateId('PTS'), order.student_id, student.name, reward, reward, currentTime);
-          } else {
-            db.prepare('UPDATE points SET total_earned = total_earned + ?, balance = balance + ?, updated_at = ? WHERE student_id = ?')
-              .run(reward, reward, currentTime, order.student_id);
-          }
-          const bal = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(order.student_id)?.balance || reward;
-          db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, description, created_at, expire_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-            .run(generateId('PLG'), order.student_id, 'earn', reward, bal, '购买「' + product.name + '」赠送积分', refId, '购买产品赠送', currentTime, computeExpiry(currentTime));
+    // 2) 发积分：每个商品一笔，金额已按数量合计；按 订单+商品 幂等（受积分规则开关控制）
+    if (isPurchasePointsEnabled()) {
+      for (const [productId, reward] of rewardByProduct) {
+        if (reward <= 0) continue;
+        const product = productCache.get(productId);
+        const refId = 'order_' + order.id + '_' + productId;
+        if (db.prepare('SELECT id FROM point_logs WHERE reference_id = ?').get(refId)) continue;
+
+        const student = db.prepare('SELECT name FROM students WHERE id = ?').get(order.student_id);
+        const acc = db.prepare('SELECT id FROM points WHERE student_id = ?').get(order.student_id);
+        if (!acc && student) {
+          db.prepare('INSERT INTO points (id, student_id, student_name, total_earned, balance, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+            .run(generateId('PTS'), order.student_id, student.name, reward, reward, currentTime);
+        } else {
+          db.prepare('UPDATE points SET total_earned = total_earned + ?, balance = balance + ?, updated_at = ? WHERE student_id = ?')
+            .run(reward, reward, currentTime, order.student_id);
         }
+        const bal = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(order.student_id)?.balance || reward;
+        db.prepare('INSERT INTO point_logs (id, student_id, type, amount, balance, reason, reference_id, description, created_at, expire_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(generateId('PLG'), order.student_id, 'earn', reward, bal, '购买「' + product.name + '」赠送积分', refId, '购买产品赠送', currentTime, computeExpiry(currentTime));
       }
     }
   })();
@@ -246,9 +264,25 @@ router.post('/', (req, res) => {
       }
     }
 
+    // H2：totalPrice 一律服务端重算，不信任客户端。
+    // 此前可传 unitPrice=0 / totalPrice=1000（实付 0），而收入结转 utils/items.js 的
+    // itemLineTotal 优先取 totalPrice、退卡定价同源 —— 等于按 1000 逐次确认收入。
+    // 反向亦可实付 100、totalPrice=999999，单课时结转数万元、合同负债变负。
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        const up = Number(item.unitPrice) || 0;
+        const qty = Math.max(1, Number(item.quantity) || 1);
+        item.totalPrice = up * qty;
+      }
+    }
+
     // 业绩归属是自由文本且无外键，写入前统一 trim：否则同一员工手输「张三」/「张三 」
     // 会在报表里分裂成两个业绩组。批量导入路径（下方 /import）本就 trim，两条路径策略须一致。
-    const salespersonNorm = String(salesperson || '').trim();
+    // M2：业绩归属是提成依据。非管理员一律强制为本人昵称 —— 否则销售可把单子
+    // 挂到任意人名下（伪造他人业绩，或改归属后绕过 canOperateOrder 的归属校验）。
+    const salespersonNorm = isAdminReq(req)
+      ? String(salesperson || '').trim()
+      : (String(salesperson || '').trim() || myStaffName(req));
 
     let orderItems = items;
     let totalAmount = 0;
@@ -267,11 +301,29 @@ router.post('/', (req, res) => {
       return res.json(fail('缺少订单项或会员卡类型'));
     }
 
-    let payableAmount = Math.max(0, totalAmount - discountAmount);
+    // H3-1：折扣必须是有限数且落在 [0, totalAmount]。
+    // 此前传 "abc" 会让 discount_amount='abc'、payable_amount=NULL，后续统计全失真。
+    const discountVal = Number(discountAmount === undefined || discountAmount === null ? 0 : discountAmount);
+    if (!Number.isFinite(discountVal) || discountVal < 0) return res.json(fail('折扣金额不合法'));
+    if (discountVal > totalAmount) return res.json(fail('折扣金额不能超过订单总额'));
+
+    // H3-2：状态白名单。此前可直接传 status='refunded' 建成"已退款单"（无任何支付/退款流水），
+    // 或传 'paid' 跳过收款流程。退款/取消必须走各自的接口。
+    const STATUS_ALLOWED = ['pending', 'paid'];
+    if (!STATUS_ALLOWED.includes(String(status))) {
+      return res.json(fail('订单状态只能为待支付或已支付，退款/取消请走对应操作'));
+    }
+
+    let payableAmount = Math.max(0, totalAmount - discountVal);
     // 支持管理端按实际成交价录入（覆盖项目标价）
     if (overrideAmount !== undefined && isFinite(Number(overrideAmount)) && Number(overrideAmount) >= 0) {
       payableAmount = Number(overrideAmount);
     }
+    // M1：0 元单强制标记「不计入销售」。此前只写审计标记，仍照常计入销售统计 →
+    // 赠课/让价单会虚增业绩，若提成以销售看板为准就会多发。
+    const isZeroAmount = payableAmount <= 0;
+    const revenueExcludedFinal = (revenueExcluded || isZeroAmount) ? 1 : 0;
+
     const currentTime = now();
     const id = generateId('ORD');
     const orderNo = `ORD${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -281,12 +333,19 @@ router.post('/', (req, res) => {
       db.prepare(`
         INSERT INTO orders (id, order_no, user_id, student_id, student_name, order_type, items, total_amount, discount_amount, payable_amount, status, salesperson, remark, is_1v1, revenue_excluded, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, orderNo, openid, studentId, student.name, orderType, JSON.stringify(orderItems), totalAmount, discountAmount, payableAmount, status, salespersonNorm, remark, is1v1 ? 1 : 0, revenueExcluded ? 1 : 0, currentTime, currentTime);
+      `).run(id, orderNo, openid, studentId, student.name, orderType, JSON.stringify(orderItems), totalAmount, discountVal, payableAmount, status, salespersonNorm, remark, is1v1 ? 1 : 0, revenueExcludedFinal, currentTime, currentTime);
 
       // 直接录入已收款订单：立即结算并激活会员卡（settleOrder/grantOrderBenefits 内部按 reference_id 幂等去重）
       if (status === 'paid') {
         const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
-        settleOrder(order, paidAt || currentTime, channel);
+        // H3-3：paidAt 由客户端给，此前可把收入记到任意历史月份（影响月报/结转）。
+        // 只接受毫秒时间戳，并夹取到 [建单时间 - 1 天, 当前时间]。
+        let paidAtMs = Number(paidAt);
+        if (!Number.isFinite(paidAtMs) || paidAtMs <= 0) paidAtMs = currentTime;
+        const lower = currentTime - 24 * 3600 * 1000;
+        const upper = Math.max(currentTime, Date.now());
+        paidAtMs = Math.min(Math.max(paidAtMs, lower), upper);
+        settleOrder(order, paidAtMs, channel);
       }
 
       // 建单即确定应收金额，status='paid' 时还会立即结算建卡发积分；
@@ -579,8 +638,19 @@ router.post('/:id/pay', (req, res) => {
     const channel = normalizeChannel(req.body && req.body.channel);
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
     if (!order) return res.json(fail('订单不存在'));
-    // Ownership: only the order owner (or a bound parent) can pay
-    if (!isAdminReq(req)) {
+    // F2：区分「员工代收」与「家长自助支付」。
+    // 此前只看 isAdminReq —— 销售（前台收现金/微信转账后录入）与家长被一并拦下，
+    // 「签单→收款」断在收银环节，只能找管理员代点。
+    // 注意：这条与 H3（status 白名单）必须一起改 —— H3 收口后「建单即 paid」的旁路没了，
+    // 若只修 H3 不修本条，销售收款会彻底断流。
+    // 口径：员工只能代收**自己可操作**的订单（本人建单 / 本人业绩归属），管理员不限。
+    // 不用 `canSales(req)` 一刀切 —— 那会让任一销售能给任意人的订单收款，
+    // 把既有的 IDOR 防护（T7：非订单所有者支付被拒）打开一个口子。
+    // 覆盖的真实场景是「销售建单 → 同一位销售收款」，这正是此前断掉的那一环。
+    const isStaffCollect = canOperateOrder(req, order);
+
+    // 家长自助：仍须订单归属本人或其绑定学员
+    if (!isStaffCollect) {
       const openid = getOpenId(req);
       const owned = order.user_id === openid || db.prepare(
         'SELECT 1 FROM parent_bindings WHERE parent_openid = ? AND student_id = ?'
@@ -597,7 +667,8 @@ router.post('/:id/pay', (req, res) => {
     // 而日常启动脚本（start-all.sh / npm start）根本不设 NODE_ENV —— 等于默认开放，
     // 家长可以零成本把自己的待支付订单置为已付并发卡发分。
     const simulatedPayEnabled = process.env.SIMULATED_PAY_DISABLED === '0';
-    if (!isAdminReq(req) && !simulatedPayEnabled) {
+    // 员工代收不受此闸门约束（收的是真实现金/转账，不是"模拟支付"）；家长自助仍 fail-closed
+    if (!isStaffCollect && !simulatedPayEnabled) {
       return res.status(403).json(safeFail('该机构未开放自助支付，请联系机构收银'));
     }
 
@@ -1098,10 +1169,24 @@ router.get('/stats', (req, res) => {
     // 'localtime' 口径不可省略：today/month/year 由 formatDate() 按本机时区生成。
     // E3：谓词由 date(paid_at/1000,'unixepoch','localtime') = ? 改为 paid_at 毫秒区间（半开），
     // 前者是表达式谓词、用不上 idx_orders_paid_at，每次 /stats 全表扫三遍。
-    const todayAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND paid_at >= ? AND paid_at < ?`, dayStartMs(today), dayEndMs(today));
-    const monthAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND paid_at >= ? AND paid_at < ?`, monthStartMs(month), nextMonthStartMs(month));
-    const yearAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND paid_at >= ? AND paid_at < ?`, yearStartMs(year), nextYearStartMs(year));
-    res.json(success({ today: todayAmount, month: monthAmount, year: yearAmount }));
+    const todayAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?`, dayStartMs(today), dayEndMs(today));
+    const monthAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?`, monthStartMs(month), nextMonthStartMs(month));
+    const yearAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?`, yearStartMs(year), nextYearStartMs(year));
+    // M6：退卡产生的退款落在 order_type='refund_standalone' 的载体单上（payable=0、
+    // status='refunded'），上面的 status='paid' 谓词会把它整条排除 —— 净营收完全不减，
+    // 与管理财务页（finance/summary 会把退款单列冲减）同屏两个数字矛盾。
+    // 按退款发生时间在同一区间内冲减，与财务口径对齐。
+    const refundSum = (from, to) => q(
+      `SELECT COALESCE(SUM(COALESCE(refunded_amount,0)),0) as t FROM orders
+        WHERE order_type = 'refund_standalone' AND status = 'refunded'
+          AND paid_at >= ? AND paid_at < ?`,
+      from, to
+    );
+    res.json(success({
+      today: todayAmount - refundSum(dayStartMs(today), dayEndMs(today)),
+      month: monthAmount - refundSum(monthStartMs(month), nextMonthStartMs(month)),
+      year: yearAmount - refundSum(yearStartMs(year), nextYearStartMs(year)),
+    }));
   } catch (err) {
     console.error('[orders stats]', err);
     res.status(500).json(safeFail('获取营收统计失败'));

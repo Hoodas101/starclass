@@ -28,11 +28,21 @@ function resolveJwtSecret() {
   if (env) return env;
   try {
     const existing = fs.readFileSync(SECRET_FILE, 'utf8').trim();
-    if (existing) return existing;
+    if (existing) {
+      // 已有密钥：校验权限不是 600 就收紧（历史文件/备份还原常见 644）
+      try {
+        const mode = fs.statSync(SECRET_FILE).mode & 0o777;
+        if (mode !== 0o600) fs.chmodSync(SECRET_FILE, 0o600);
+      } catch (e) { /* 忽略 */ }
+      return existing;
+    }
   } catch (e) { /* 文件不存在，下面生成 */ }
   const fresh = crypto.randomBytes(32).toString('hex');
   try {
     fs.writeFileSync(SECRET_FILE, fresh, { mode: 0o600 });
+    // mode 只在「新建文件」时生效：备份还原、umask 022 的旧进程创建的文件会是 644。
+    // 世界可读等于同机任意用户可伪造管理员 token，故写入后显式收紧一次。
+    try { fs.chmodSync(SECRET_FILE, 0o600); } catch (e) { /* 只读挂载等场景忽略 */ }
     console.log(`[安全] 未设置 JWT_SECRET，已生成随机密钥并持久化到 ${SECRET_FILE}（请随数据库一起备份）`);
   } catch (e) {
     // 文件系统只读等异常场景：退化为进程内存密钥（重启后所有登录态失效，但不伪造风险）

@@ -76,6 +76,23 @@ if (process.env.TRUST_PROXY) {
   }
 }
 
+// MH4：安全响应头。此前响应只有 `X-Powered-By: Express`（技术栈指纹），
+// 且没有 X-Frame-Options —— 后台含改密/收款等高危操作，可被 iframe 嵌套点击劫持。
+// 不引入 helmet：这里只需要 5 个头，多一个依赖就多一处升级负担。
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // CSP：本应用无内联脚本/外链脚本，self 足够；style 放开 unsafe-inline 是 Element Plus 运行时注入所需
+  res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data: https:; connect-src 'self'");
+  // HSTS 仅在明确走 HTTPS 的部署上开启，避免本地/内网 http 被浏览器强制升级
+  if (process.env.ENABLE_HSTS === '1') {
+    res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  }
+  next();
+});
+
 // CORS（限制来源）— 必须放在限流与认证之前，确保预检请求带正确响应头
 // 生产环境通过 CORS_ORIGINS 环境变量配置允许的来源（逗号分隔），如：
 //   export CORS_ORIGINS=https://admin.example.com,https://www.example.com

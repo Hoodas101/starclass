@@ -403,7 +403,7 @@ async function main() {
   // ---------------- B. 角色越权 403 矩阵 ----------------
   console.log('\n\x1b[1m[B] 角色越权矩阵\x1b[0m');
   const adminOnly = [
-    ['POST', '/api/students'], ['PUT', '/api/settings'], ['GET', '/api/admin/export'],
+    ['PUT', '/api/settings'], ['GET', '/api/admin/export'],
     ['POST', '/api/admin/teachers'], ['DELETE', '/api/admin/teachers/ID1'],
     ['POST', '/api/admin/courses'], ['DELETE', '/api/admin/courses/ID1'],
     ['GET', '/api/admin/parents'], ['POST', '/api/settings/backups/create'],
@@ -415,6 +415,15 @@ async function main() {
       const r = await call(m, p, { token: tk });
       rec(`B-403-adminOnly-vs-${role}`, `${m} ${p}`, r.status === 403, `status=${r.status}`);
     }
+  }
+  // 建档权限口径（F1）：管理员 + 销售可建档（DEFAULT_PERMS.sales 含 'students'，前端据此显示入口），
+  // 教练不可。此前接口硬编码 adminOnly，与权限模型/前端入口三者不一致。
+  {
+    const coachCreate = await call('POST', '/api/students', { token: tokens.coach });
+    rec('B-403 教练不可建档', coachCreate.status === 403, `status=${coachCreate.status}`);
+    const salesCreate = await call('POST', '/api/students', { token: tokens.sales, body: {} });
+    rec('B 销售可建档（与 DEFAULT_PERMS 对齐，空表单返回业务错误而非 403）',
+      salesCreate.status !== 403, `status=${salesCreate.status}`);
   }
   const coachOnly = [['POST', '/api/checkin/teacher'], ['PUT', '/api/leave/ID1/approve']];
   for (const role of ['sales', 'parent']) {

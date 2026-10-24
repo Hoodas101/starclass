@@ -7,7 +7,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, isAdminReq } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, now, isAdminReq, escapeLike } = require('../utils');
 const { generateRenewalNotifications } = require('../utils/renewal');
 
 // priority / summary / category / is_broadcast / group_name 列已收编至 migrations/011
@@ -481,7 +481,8 @@ router.get('/admin/list', (req, res) => {
 
     let where = 'WHERE 1=1';
     const params = [];
-    if (keyword) { where += ' AND title LIKE ?'; params.push(`%${keyword}%`); }
+    // L3：关键字必须转义 % 与 _，否则输入 "%" 等价于「不带条件」把全表拉满 LIMIT
+    if (keyword) { where += " AND title LIKE ? ESCAPE '\\'"; params.push(`%${escapeLike(keyword)}%`); }
     if (priority) { where += ' AND priority = ?'; params.push(priority); }
     if (category) { where += ' AND category = ?'; params.push(category); }
     if (startDate) {

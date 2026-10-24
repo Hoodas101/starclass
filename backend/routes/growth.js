@@ -10,6 +10,8 @@ const leadSuggestions = require('../utils/lead-suggestions');
 const { getChurnRules } = require('../utils/churn');
 // 建档查重（与 POST /api/students 同一判据）
 const { findDuplicateStudents } = require('../utils/duplicate');
+// 与 POST /api/students 同一判据：旁路建档不得绕过姓名长度/性别值域
+const { validateStudentBasics } = require('../utils/student-basics');
 // 续费 / 课时预警的统一口径常量（与 followups.js 共用同一来源，避免两处阈值各写一份）
 const { RENEWAL_WARN_DAYS, LOW_CLASS_THRESHOLD, EXPIRED_WINDOW_DAYS } = require('../utils/renewal');
 // 已删除 / 已归档学员的排除条件（三处预警共用同一判据，避免各写一份后逐渐走样）
@@ -248,7 +250,9 @@ router.put('/leads/:id', (req, res) => {
       note: note !== undefined ? note : row.note,
       salesperson: salesperson !== undefined ? normSalesperson(salesperson) : row.salesperson,
       status: status !== undefined ? status : row.status,
-      studentId: studentId !== undefined ? studentId : (row.student_id || ''),
+      // H1：线索关联学员是「资损链」的一环（改成任意学员再发积分）。
+      // 非管理员只能保持原值，改关联需管理员操作。
+      studentId: studentId !== undefined && isAdminReq(req) ? studentId : (row.student_id || ''),
     };
     // 阶段与转化状态同步：任一入口（Web/小程序）把阶段推进到 deal/lost 时，
     // 统一标记 converted/lost 与转化时间，保证转介绍统计与漏斗口径一致
@@ -315,6 +319,16 @@ router.post('/leads/:id/convert', (req, res) => {
     if (row.status === 'converted') return res.json(fail('该线索已成交，请勿重复转化'));
     const t = now();
     const { rewardPoints, rewardReason = '线索成交奖励', createStudent, createOrder, confirmDuplicate, linkStudentId } = req.body || {};
+
+    // H1：成交奖励积分是**有价资产**（可兑换），此前任何有 growth 权限的销售都能
+    // 在 convert 时自填 rewardPoints（无上限）。配合 PUT /leads/:id 可任意改 student_id，
+    // 形成「建线索 → 改关联学员 → 成交发 999999999 分」的资损链。
+    // 口径与 POST /points/adjust 对齐：只有管理员能发。
+    const rewardRaw = parseInt(rewardPoints, 10);
+    if (rewardRaw > 0) {
+      if (!isAdminReq(req)) return res.status(403).json(safeFail('成交奖励积分仅管理员可发放'));
+      if (rewardRaw > 9999) return res.json(fail('单次奖励积分不能超过 9999'));
+    }
     // 状态流转、建成员、建订单、发奖励同事务：此前分两步，发奖失败时线索已标记成交，
     // 再点会命中「已成交」拒绝，奖励永远补不上（且读-改-写积分账户存在竞态）。
     const result = db.transaction(() => {
@@ -332,6 +346,10 @@ router.post('/leads/:id/convert', (req, res) => {
         const phone = String(row.phone || '').trim();
         if (!name) {
           out.studentSkipped = '线索缺少姓名，未创建成员';
+        } else if (validateStudentBasics(name, '')) {
+          // 线索上没有性别字段，按「未填」参与判据；姓名长度等仍按同口径拦截，
+          // 否则 60 字姓名可从这个旁路直接入库（正门已拦）。
+          out.studentSkipped = validateStudentBasics(name, '');
         } else if (!/^1[3-9]\d{9}$/.test(phone)) {
           // 手机号是线索唯一可用的联系方式：缺失/非法时创建出的成员无法绑定家长、无法触达，
           // 故按「缺少必填信息」跳过，不写占位手机号（字段清单与 students.js 创建成员一致）。

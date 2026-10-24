@@ -49,7 +49,8 @@ async function getAccessToken() {
   if (cachedToken && Date.now() < tokenExpiresAt) return cachedToken;
 
   const url = `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${encodeURIComponent(CONFIG.appid)}&secret=${encodeURIComponent(CONFIG.secret)}`;
-  const resp = await fetch(url);
+  // M7：出站请求必须带超时。默认 headersTimeout 300s，微信侧抖动会把请求挂满 5 分钟。
+  const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
   const data = await resp.json();
 
   if (data.access_token) {
@@ -97,6 +98,7 @@ async function sendSubscribeMessage(openid, templateKey, values, page) {
     };
 
     const resp = await fetch(url, {
+    signal: AbortSignal.timeout(5000),
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

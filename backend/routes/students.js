@@ -112,23 +112,19 @@ function canViewStudents(req) {
  * POST /api/students — 创建成员
  * Body: { name, gender, birthday, school, grade, hobby, remark, phone, parentName }
  */
-// 成员基础字段值域：建档 POST / 编辑 PUT / 批量导入 三条路径必须同一判据。
-// 此前只有 POST 校验姓名非空，于是 PUT 与导入都是绕过通道（实测 10000 字姓名、
-// gender='hacker' 均可入库，污染列表列宽、打印排版与按性别分组的统计）。
-const GENDER_VALUES = ['', '男', '女'];
-const NAME_MAX = 50;
-
-/** 合法返回 ''，否则返回可直接展示的错误文案 */
-function validateStudentBasics(nameVal, genderVal) {
-  if (!nameVal) return '成员姓名不能为空';
-  if (nameVal.length > NAME_MAX) return `成员姓名不能超过 ${NAME_MAX} 个字`;
-  if (!GENDER_VALUES.includes(genderVal)) return '性别只能填「男」或「女」';
-  return '';
-}
+// 成员字段值域：建档 / 编辑 / 导入 / 线索转化建档共用同一判据（见 utils/student-basics）
+const { validateStudentBasics } = require('../utils/student-basics');
 
 router.post('/', (req, res) => {
   try {
-    if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可新增成员'));
+    // F1：与 DEFAULT_PERMS 对齐。此前硬编码「仅管理员」，而 DEFAULT_PERMS.sales 含
+    // 'students' 键 —— 前端按权限显示建档入口、接口却 403，销售「招新→建档→签单」
+    // 第一环断掉；同时线索转化旁路又能建档，形成「该挡的没挡住、不该挡的挡住了」。
+    // 口径：管理员 + 销售（DEFAULT_PERMS.sales 含 'students'，前端也据此显示入口）。
+    // 不用 canViewStudents（它按 students 权限放行，教练默认也有该键）—— 教练建档不在业务范围内。
+    if (!(isAdminReq(req) || hasPerm(getReqUser(req), 'sales'))) {
+      return res.status(403).json(safeFail('无成员建档权限'));
+    }
     const { name, gender, birthday, school, grade, hobby, remark, level, height, weight, bmi, phone, parentName, confirmDuplicate } = req.body;
     const nameVal = String(name || '').trim();
     const genderVal = String(gender == null ? '' : gender).trim();
@@ -705,8 +701,9 @@ router.get('/options', (req, res) => {
     const params = [];
     if (includeArchived === '1') where = 'WHERE 1=1';
     if (q) {
-      where += ' AND s.name LIKE ?';
-      params.push(`%${q}%`);
+      // L3：转义 % / _，否则输入 "%" 等于不带条件
+      where += " AND s.name LIKE ? ESCAPE '\\'";
+      params.push(`%${escapeLike(q)}%`);
     }
     // parent_phone 供「开单 / 登记请假」的远程搜索下拉区分同名学员
     // （同名不同孩子时，只看姓名无法判断该选哪一个）

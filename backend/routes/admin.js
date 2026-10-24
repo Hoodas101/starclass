@@ -6,11 +6,19 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { success, fail, safeFail, generateId, getOpenId, getActor, recordAudit, formatDate, now, hashPassword, resolvePerms, hasPerm, getReqUser, attendanceRate, isAdminReq } = require('../utils');
+const { success, fail, safeFail, generateId, getOpenId, getActor, recordAudit, formatDate, now, hashPassword, resolvePerms, hasPerm, getReqUser, attendanceRate, isAdminReq, escapeLike } = require('../utils');
 // 订单明细解析：导出 / 退卡 / 财务报表共用同一实现（此前各自复制，口径已分叉）
 const { parseItems, itemQuantity, itemLineTotal } = require('../utils/items');
 // 员工默认口令的唯一定义处（登录/改密/强制拦截共用，避免多处硬编码分叉）
-const { getStaffDefaultPassword } = require('../utils/security');
+const { getStaffDefaultPassword, generateTempPassword } = require('../utils/security');
+
+/** 员工初始口令：配置了就用配置值；否则生成随机临时口令（生产不再回落 123456） */
+function initStaffPassword() {
+  const configured = getStaffDefaultPassword();
+  if (configured) return { password: configured, temp: null };
+  const temp = generateTempPassword();
+  return { password: temp, temp };
+}
 // 已删除（status='refunded'）/ 已归档学员的统一排除条件（学员表别名须为 s）
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 // 存量脏数据体检 + 一次性安全清理
@@ -757,9 +765,10 @@ router.get('/export', adminOnly, (req, res) => {
  */
 router.get('/suppressions', adminOnly, (req, res) => {
   try {
-    const keyword = req.query.keyword ? `%${req.query.keyword}%` : '';
+    // L3：转义通配符，避免 "%" 把全表带出来
+    const keyword = req.query.keyword ? `%${escapeLike(req.query.keyword)}%` : '';
     const list = keyword
-      ? db.prepare('SELECT * FROM suppressions WHERE phone LIKE ? OR name LIKE ? ORDER BY created_at DESC').all(keyword, keyword)
+      ? db.prepare("SELECT * FROM suppressions WHERE phone LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' ORDER BY created_at DESC").all(keyword, keyword)
       : db.prepare('SELECT * FROM suppressions ORDER BY created_at DESC').all();
     res.json(success({ list, total: list.length }));
   } catch (err) {
@@ -982,6 +991,12 @@ router.post('/teachers', adminOnly, (req, res) => {
       if (phoneUser && phoneUser.role !== role) {
         return res.json(fail(`手机号 ${phone} 已注册为其他身份，无法配置为${role === 'admin' ? '管理者' : role === 'sales' ? '销售' : '教练'}`));
       }
+      // F4：此前只查 users 且只比角色 —— 同一手机号、同一角色可重复建档，
+      // teachers 表因此出现多条同名档案，员工下拉/排课/工资结算把同一人算多份。
+      const sameStaff = db.prepare('SELECT id, name FROM teachers WHERE phone = ? LIMIT 1').get(phone);
+      if (sameStaff) {
+        return res.json(fail(`该手机号已有员工档案（${sameStaff.name}），请勿重复创建`));
+      }
     }
 
     const id = generateId('teacher_');
@@ -1060,6 +1075,10 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
     if (phoneChanged && newPhone && newPhone !== oldPhone) {
       const conflict = db.prepare('SELECT id FROM users WHERE phone = ? AND phone != ?').get(newPhone, oldPhone);
       if (conflict) return res.json(fail(`手机号 ${newPhone} 已被其他账号使用`));
+      // F4：改号时同样要查 teachers 表（users 单行不代表 teachers 单行）
+      const sameStaff = db.prepare('SELECT id, name FROM teachers WHERE phone = ? AND id != ? LIMIT 1')
+        .get(newPhone, req.params.id);
+      if (sameStaff) return res.json(fail(`该手机号已有员工档案（${sameStaff.name}），请勿重复`));
     }
 
     db.prepare(`
@@ -1156,16 +1175,20 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
         INSERT INTO users (id, openid, phone, nickname, avatar, role, password, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, '', ?, ?, 'active', ?, ?)
       `).run(generateId('user_'), `phone_${targetPhone}`, targetPhone, name || existing.name, role,
-        hashPassword(getStaffDefaultPassword()), now(), now());
+        hashPassword(initStaffPassword().password), now(), now());
     }
 
-    // 重置登录密码为初始密码（STAFF_DEFAULT_PASSWORD 可配，默认 123456）
+    // 重置登录密码：配置了 STAFF_DEFAULT_PASSWORD 就用它；否则生成随机临时口令，
+    // 在响应里一次性返回给管理员（不再回落公开的 123456）
+    let tempPassword = null;
     if (resetPassword) {
       const targetPhone = newPhone || oldPhone;
       if (targetPhone) {
+        const init = initStaffPassword();
+        tempPassword = init.temp;
         // bump token_version：重置后该账号旧 Token 全部失效
         db.prepare("UPDATE users SET password = ?, token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE phone = ?")
-          .run(hashPassword(getStaffDefaultPassword()), now(), targetPhone);
+          .run(hashPassword(init.password), now(), targetPhone);
       }
     }
     // 教师更新可能同步改登录账号角色/权限/密码/启用状态，属权限变更，必须留痕
@@ -1186,7 +1209,7 @@ router.put('/teachers/:id', adminOnly, (req, res) => {
         password_reset: !!resetPassword,
       },
     });
-    res.json(success({ id: req.params.id }));
+    res.json(success({ id: req.params.id, ...(tempPassword ? { tempPassword } : {}) }));
   } catch (err) {
     res.status(500).json(safeFail('更新教师失败'));
   }
@@ -1484,8 +1507,8 @@ router.get('/courses/options', (req, res) => {
     // 历史下拉使用 includeInactive=true，故默认不过滤；仅当显式 includeInactive=0 时只取在售
     if (includeInactive === '0') where = 'WHERE is_active = 1 AND archived = 0';
     if (q) {
-      where += (where ? ' AND' : 'WHERE') + ' name LIKE ?';
-      params.push(`%${q}%`);
+      where += (where ? ' AND' : 'WHERE') + " name LIKE ? ESCAPE '\\'";
+      params.push(`%${escapeLike(q)}%`);
     }
     const list = db.prepare(`
       SELECT id, name FROM courses ${where} ORDER BY created_at ASC LIMIT 50
@@ -2027,7 +2050,7 @@ function syncCoachAccount(phone, name, status) {
     db.prepare(`
       INSERT INTO users (id, openid, phone, nickname, avatar, role, password, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, '', 'coach', ?, ?, ?, ?)
-    `).run(generateId('user_'), `coach_${phone}`, phone, name || '教练', hashPassword(getStaffDefaultPassword()), status || 'active', now(), now());
+    `).run(generateId('user_'), `coach_${phone}`, phone, name || '教练', hashPassword(initStaffPassword().password), status || 'active', now(), now());
   }
 }
 

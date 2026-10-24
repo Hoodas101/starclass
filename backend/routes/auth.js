@@ -271,7 +271,8 @@ router.post('/wx-login', async (req, res) => {
     let session;
     try {
       const url = `https://api.weixin.qq.com/sns/jscode2session?appid=${encodeURIComponent(appid)}&secret=${encodeURIComponent(secret)}&js_code=${encodeURIComponent(code)}&grant_type=authorization_code`;
-      const resp = await fetch(url);
+      // M7：出站请求必须带超时。默认 headersTimeout 300s，微信侧抖动会把请求挂满 5 分钟。
+  const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
       session = await resp.json();
     } catch (e) {
       console.error('[wx-login exchange]', e.message);
@@ -347,7 +348,8 @@ async function getWxAccessToken(appid, secret) {
     return _wxAccessToken;
   }
   const url = `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${encodeURIComponent(appid)}&secret=${encodeURIComponent(secret)}`;
-  const resp = await fetch(url);
+  // M7：出站请求必须带超时。默认 headersTimeout 300s，微信侧抖动会把请求挂满 5 分钟。
+  const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
   const data = await resp.json();
   if (!data || !data.access_token) {
     throw new Error(data && data.errmsg ? String(data.errmsg) : '获取 access_token 失败');
@@ -389,6 +391,7 @@ router.post('/phone-login', async (req, res) => {
     let phoneResp;
     try {
       const r = await fetch(`https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token=${encodeURIComponent(accessToken)}`, {
+      signal: AbortSignal.timeout(5000),
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code }),

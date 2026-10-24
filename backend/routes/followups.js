@@ -12,7 +12,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser } = require('../utils');
+const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, hasPerm, getReqUser, escapeLike, isAdminReq } = require('../utils');
 const {
   generateRenewalNotifications,
   EXPIRY_WINDOWS,
@@ -288,8 +288,10 @@ router.get('/', (req, res) => {
     if (req.query.taskType) { where.push('task_type = ?'); params.push(req.query.taskType); }
     if (req.query.targetType) { where.push('target_type = ?'); params.push(req.query.targetType); }
     if (req.query.keyword) {
-      where.push('(target_name LIKE ? OR phone LIKE ?)');
-      params.push(`%${req.query.keyword}%`, `%${req.query.keyword}%`);
+      where.push("(target_name LIKE ? ESCAPE '\\' OR phone LIKE ? ESCAPE '\\')");
+      // L3：转义 % 与 _，否则输入 "%" 等于不带条件
+      const kw = `%${escapeLike(req.query.keyword)}%`;
+      params.push(kw, kw);
     }
     if (req.query.startDate) { where.push('due_at >= ?'); params.push(new Date(req.query.startDate + 'T00:00:00').getTime()); }
     if (req.query.endDate) { where.push('due_at <= ?'); params.push(new Date(req.query.endDate + 'T23:59:59.999').getTime()); }
@@ -367,6 +369,23 @@ router.post('/', (req, res) => {
 });
 
 /**
+ * 跟进任务归属校验（M3）：管理员放行；其余只能操作自己名下的任务。
+ * 与 orders.canOperateOrder / growth.canOperateLead 同模型 —— owner 是自由文本昵称。
+ * 缺了这道校验，任一有 growth/sales 权限的销售可以完成/取消**他人**的客户续费或挽回任务，
+ * 工作流与业绩链路都会被破坏。
+ */
+function canOperateFollowUp(req, row) {
+  if (isAdminReq(req)) return true;
+  if (!row) return false;
+  const openid = getOpenId(req);
+  if (!openid) return false;
+  const u = db.prepare('SELECT nickname FROM users WHERE openid = ?').get(openid);
+  const me = u && u.nickname ? String(u.nickname).trim() : '';
+  const owner = row.owner ? String(row.owner).trim() : '';
+  return !!me && owner === me;
+}
+
+/**
  * POST /api/followups/:id/complete — 完成任务
  */
 router.post('/:id/complete', (req, res) => {
@@ -374,6 +393,7 @@ router.post('/:id/complete', (req, res) => {
     if (!canFollowUp(req)) return res.status(403).json(safeFail('无跟进任务权限'));
     const row = db.prepare('SELECT * FROM follow_ups WHERE id = ?').get(req.params.id);
     if (!row) return res.json(fail('任务不存在'));
+    if (!canOperateFollowUp(req, row)) return res.status(403).json(safeFail('仅可操作自己名下的跟进任务'));
     const t = now();
     db.prepare('UPDATE follow_ups SET status = ?, completed_at = ?, note = COALESCE(?, note) WHERE id = ?')
       .run('done', t, req.body.note || null, req.params.id);
@@ -400,6 +420,7 @@ router.post('/:id/cancel', (req, res) => {
     if (!canFollowUp(req)) return res.status(403).json(safeFail('无跟进任务权限'));
     const row = db.prepare('SELECT * FROM follow_ups WHERE id = ?').get(req.params.id);
     if (!row) return res.json(fail('任务不存在'));
+    if (!canOperateFollowUp(req, row)) return res.status(403).json(safeFail('仅可操作自己名下的跟进任务'));
     db.prepare('UPDATE follow_ups SET status = ?, completed_at = ? WHERE id = ?')
       .run('cancelled', now(), req.params.id);
     res.json(success({ id: req.params.id, cancelled: true }));

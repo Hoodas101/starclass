@@ -229,7 +229,7 @@ router.post('/teacher', (req, res) => {
       // 返回明确文案由前端提示家长联系机构；不写考勤、不扣课、不发积分。
       // 校验在整批 immediate 事务内进行（本函数由 runBatch 调用），保证「计数 + 写入」原子。
       if (status === 'present' || status === 'late') {
-        const limitMsg = checkTimeCardVisitLimit(studentId, now());
+        const limitMsg = checkTimeCardVisitLimit(studentId, now(), dateStr);
         if (limitMsg) {
           results.push({ studentId, status: 'rejected', message: limitMsg });
           return;
@@ -367,9 +367,22 @@ router.post('/teacher', (req, res) => {
     // 前端据此提示家长联系机构。
     // 注意：同一批中**未被拦截**学员的点名已在上面的 immediate 事务内正常提交 ——
     // 每个学员的写入相互独立（各自的考勤/积分/扣课），被拦者未写、通过者已写，不存在半截账目。
+    // F5：部分拒绝时**必须带回明细**。此前直接 fail(...) 丢弃了 results，
+    // 而通过者已经写库 —— 前端/教练只看到「失败」，不知道谁已签成功，
+    // 重复提交会走「已签到」分支或误以为没签上，对账时更难解释。
+    // 保留 code=2 语义（不是全部成功），但 data 不再为 null。
     const rejected = results.filter((r) => r.status === 'rejected');
     if (rejected.length) {
-      return res.json(fail(rejected.map((r) => r.message).join('；'), 2));
+      return res.json({
+        code: 2,
+        message: rejected.map((r) => r.message).join('；'),
+        data: {
+          count: results.length,
+          acceptedCount: results.length - rejected.length,
+          rejectedCount: rejected.length,
+          results,
+        },
+      });
     }
 
     res.json(success({ count: results.length, results }));
@@ -482,13 +495,21 @@ function periodBounds(t) {
  *
  * @returns {string|null} 命中上限时返回明确文案，否则 null
  */
-function checkTimeCardVisitLimit(studentId, t) {
+function checkTimeCardVisitLimit(studentId, t, anchorDate) {
+  // 缺陷2（跨周期绕过）：周期必须按**被签到排期的日期**算，不能按 now()。
+  // 机构提前批量排课是常态，对下周/下月的排期签到，若按 now() 算周界，
+  // 考勤记录的 date 全落在区间外 → 「本周到店」恒为 0 → 上限永不触发。
+  const anchorMs = (() => {
+    if (!anchorDate) return t;
+    const ms = new Date(`${anchorDate}T12:00:00`).getTime();
+    return Number.isFinite(ms) ? ms : t;
+  })();
   // 不限卡种：此前硬过滤 billing_mode='time'，导致「次卡」在卡种页可配到店限次却静默不生效
   //（经营者以为已约束、实则空转）。现对次卡与时效卡一并校验，取最严档。
   const cards = db.prepare(`
     SELECT visit_limit_per_week, visit_limit_per_month FROM member_cards
     WHERE student_id = ? AND status = 'active' AND expires_at > ?
-  `).all(studentId, t);
+  `).all(studentId, anchorMs);
   if (!cards.length) return null;
 
   const pos = (v) => {
@@ -505,7 +526,7 @@ function checkTimeCardVisitLimit(studentId, t) {
   }
   if (!weekLimit && !monthLimit) return null; // 全部不限次
 
-  const { weekStart, weekEnd, month } = periodBounds(t);
+  const { weekStart, weekEnd, month } = periodBounds(anchorMs);
   if (weekLimit) {
     const c = db.prepare(`
       SELECT COUNT(*) c FROM attendances
@@ -609,7 +630,7 @@ router.post('/parent', (req, res) => {
       if (existing) return { err: '已签到，无需重复签到' };
 
       // P1-D1：时效卡周期到店上限校验，在写入前于同一事务内判定，命中即拒绝签到
-      const limitMsg = checkTimeCardVisitLimit(studentId, t);
+      const limitMsg = checkTimeCardVisitLimit(studentId, t, schedule.date);
       if (limitMsg) return { err: limitMsg };
 
       // P2：仅有暂停卡（无任何可用卡）时签到成功但不发积分（扣课本就不会发生），响应带 warning
