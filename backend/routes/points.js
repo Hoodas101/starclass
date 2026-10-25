@@ -333,8 +333,19 @@ router.post('/share', (req, res) => {
     // 分享凭证：必须由 /share/ticket 签发，且与本人、本自然周绑定，单次有效
     const { ticket } = req.body || {};
     const tk = typeof ticket === 'string' ? SHARE_TICKETS.get(ticket) : null;
-    if (!tk || tk.used || tk.expiresAt < Date.now() || tk.openid !== openid || tk.weekKey !== weekKey) {
+    // F4-1：把「已使用」与「无效/过期/跨周/跨人」拆开。
+    // 此前两者混在一个分支，家长手指连点或再次打开同一张分享卡片时，
+    // 会被告知「凭证无效」并引导反复重新分享 —— 而真实情况是「本周已经领过了」。
+    // 注意顺序：先校验凭证本身是否属于本人/本周/未过期，再看是否已使用。
+    if (!tk || tk.expiresAt < Date.now() || tk.openid !== openid || tk.weekKey !== weekKey) {
       return res.json(fail('分享凭证无效或已过期，请重新发起分享'));
+    }
+    if (tk.used) {
+      const already = db.prepare('SELECT id FROM point_logs WHERE reference_id = ?').get(refId);
+      // 已使用且本周确实到账 → 幂等成功（不再误导为凭证失效）
+      if (already) return res.json(success({ added: 0, duplicated: true, message: '本周已领取分享积分' }));
+      // 已使用但本周没有流水（上次发分失败 / 规则被停用）→ 仍要求重新发起，避免"白领"
+      return res.json(fail('分享凭证已使用，请重新发起分享'));
     }
     tk.used = true;
 

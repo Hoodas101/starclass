@@ -137,7 +137,13 @@ router.post('/', (req, res) => {
     if (!confirmDuplicate) {
       const dup = findDuplicateStudents({ name: nameVal, phone });
       if (dup.hasStrong) {
-        return res.json(success({ duplicate: true, candidates: dup.list }));
+        // D1：此前用 success() → message 为 "ok"，前端只判 code===0 会误以为建档成功
+        //（实际没有落库、没有 id）。改为业务失败码 + 明确文案，与 data.duplicate 双重提示。
+        return res.json({
+          code: 1,
+          message: '发现可能重复的成员，请确认后重试',
+          data: { duplicate: true, candidates: dup.list },
+        });
       }
     }
 
@@ -354,8 +360,12 @@ router.post('/import', (req, res) => {
         const strongHits = phoneOk ? dup.list.filter(x => x.strength === 'strong') : [];
         const samePerson = strongHits.find(x => String(x.name || '').trim() === name) || null;
         let hit = samePerson;
-        // 手机号命中但姓名不同 → 放行建档，并记 warning 明示（既不静默跳过，也不静默放行）
-        const siblingOf = hit ? null : (strongHits[0] || null);
+        // 手机号命中但姓名不同 → 放行建档，并记 warning 明示（既不静默跳过，也不静默放行）。
+        // 注意：判据不能只看 strong —— 强匹配已收紧为「同号 + 同名」（多孩家庭不再被误拦），
+        // 兄弟姐妹在候选里是 weak。这里按「手机号命中」取，才能继续给出提示。
+        const siblingOf = hit
+          ? null
+          : (dup.list.find((x) => x.phone && normalizePhone(x.phone) === normalizePhone(phone)) || null);
         if (!hit) {
           // 手机号没命中时按姓名兜底：软删除（DELETE /:id）会把 parent_bindings 一并删除，
           // 已删学员因此再也查不到手机号，只能靠姓名找回 —— 否则「删错了再导一次」会凭空
@@ -868,7 +878,9 @@ router.get('/home/data', (req, res) => {
 
     res.json(success({
       // 无绑定成员时返回 null，由前端展示"绑定学员"引导空状态
-      student: student ? { name: student.name, avatar: student.avatar || '' } : null,
+      // D6：必须带 id。多孩家庭前端拿到「这是哪个孩子」后要用 id 切卡/报名/签到，
+      // 此前只回 name+avatar，家长端无法定位。
+      student: student ? { id: student.id, name: student.name, avatar: student.avatar || '' } : null,
       membership: membership ? {
         cardTypeName: membership.card_type_name,
         billingMode: membership.billing_mode || 'time',

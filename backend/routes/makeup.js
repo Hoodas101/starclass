@@ -21,6 +21,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, now, isCoachReq } = require('../utils');
+// 在册判据（与 leave / enroll / trial 同源，避免各写一份后走样）
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
 // makeup_records 建表与索引已收编至 migrations/014
 
@@ -100,8 +102,13 @@ function assignOne({ studentId, originalScheduleId, makeupScheduleId, note, open
   if (!makeupSchedule) return { err: '补课排期不存在或已取消' };
 
   // 验证学员存在
-  const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
-  if (!student) return { err: '学员不存在' };
+  // F8-1：必须用与其它端点同源的「在册」判据（ACTIVE_STUDENT_SQL）。
+  // 此前只查 students 行是否存在 —— 已退课/已归档学员可被排进未来补课场次，
+  // 到场后无卡可扣却照常计考勤，enrolled_count 与真实在册人数也会脱节。
+  const student = db.prepare(
+    `SELECT s.name FROM students s WHERE s.id = ? AND ${ACTIVE_STUDENT_SQL}`
+  ).get(studentId);
+  if (!student) return { err: '该学员非在册状态，无法安排补课' };
 
   // 原排期与缺席记录校验（判据与 GET /eligible 严格同源）：
   // 补课权益只能对应「一次真实的缺席 / 请假」。此前 assign 完全不校验，

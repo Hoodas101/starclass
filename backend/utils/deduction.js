@@ -99,7 +99,8 @@ function pickCardForDeduction(studentId, scheduleId, t, per) {
   // 结果 course_temp 排期绕过范围隔离，1v1 私教卡（单价数倍于团课）被临时/团课静默消耗
   //（实测余次 10→9），属直接营收损失且不易察觉。若临时活动确需用某张限定卡，
   // 应调整卡种范围或改用「全活动通用」卡，而非让系统静默扣错卡。
-  return { scopeMismatch: true };
+  // 带上卡种名，调用方才能给出「持有『X』但不适用于本课程」的可定位提示
+  return { scopeMismatch: true, cardTypeName: (cards[0] && cards[0].card_type_name) || '' };
 }
 
 module.exports = { resolveConsumeClasses, pickCardForDeduction };

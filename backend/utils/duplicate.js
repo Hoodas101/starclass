@@ -60,7 +60,11 @@ function findDuplicateStudents({ name, phone, excludeId } = {}) {
   const list = [];
   const seen = new Set();
 
-  // ── 强匹配：家长手机号相同 ──
+  // ── 强匹配：家长手机号相同 **且** 姓名相同 ──
+  // 多孩家庭共用一位家长手机号是常态（4 孩家庭很常见），此前只看手机号就判强重复，
+  // 于是第二个孩子起一律被拦在建档之外 —— 而且响应是 code=0（见 students.js），
+  // 前端只判 code 会以为建档成功，实际孩子没落库。
+  // 现在：同号同名才算强重复；同号不同名降级为弱提示（"可能是兄弟姐妹，请确认"）。
   if (PHONE_RE.test(ph)) {
     const rows = db.prepare(`
       SELECT DISTINCT s.id, s.member_no, s.name, s.archived, pb.parent_phone AS phone
@@ -71,14 +75,17 @@ function findDuplicateStudents({ name, phone, excludeId } = {}) {
     for (const r of rows) {
       if (seen.has(r.id)) continue;
       seen.add(r.id);
+      const sameName = !!nm && normalizeName(r.name) === nm;
       list.push({
         id: r.id,
         member_no: r.member_no || '',
         name: r.name || '',
         archived: Number(r.archived) || 0,
         phone: r.phone || ph,
-        reason: `家长手机号 ${ph} 已被该成员使用`,
-        strength: 'strong',
+        reason: sameName
+          ? `家长手机号 ${ph} 与姓名「${r.name}」均已存在`
+          : `家长手机号 ${ph} 已被「${r.name}」使用，可能是兄弟姐妹，请确认`,
+        strength: sameName ? 'strong' : 'weak',
       });
     }
   }

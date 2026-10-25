@@ -145,6 +145,8 @@ router.post('/teacher', (req, res) => {
     // 单学员点名处理（由下方批次事务逐个调用；事务边界提升到整批一层）
     const processOne = (att) => {
       const { studentId, status, checkinMethod = 'manual' } = att;
+      // D5：扣课被跳过时的说明（如"持体适能卡上篮球课，未扣课"），随结果回传给前端
+      let deductionWarning = '';
       // 状态白名单校验（见文件顶部 ATTENDANCE_STATUSES 的注释）。
       // 只拒这一名学员、不中断整批：同批其他学员的合法点名不该被一条脏数据连带回滚。
       if (!ATTENDANCE_STATUSES.includes(status)) {
@@ -317,7 +319,8 @@ router.post('/teacher', (req, res) => {
           // 补课/调课登记的学员不扣课时（原排期已扣或请假已扣）
           if (status === 'present' || status === 'late') {
             try {
-              applyArrivalDeduction(studentId, scheduleId, now());
+              const ded = applyArrivalDeduction(studentId, scheduleId, now());
+              if (ded && ded.warning) deductionWarning = ded.warning;
             } catch (e) {
               // 仅忽略幂等冲突（同一排期+学员重复扣课）；no such column / SQLITE_BUSY 等真实故障必须暴露
               if (!isUniqueViolation(e)) {
@@ -339,9 +342,14 @@ router.post('/teacher', (req, res) => {
           applyLeaveDeduction(studentId, scheduleId, now());
         }
 
-        results.push(onlyPaused
-          ? { studentId, status, pointsEarned, warning: '会员卡已暂停，本次未扣课未计积分' }
-          : { studentId, status, pointsEarned });
+        {
+          const warn = onlyPaused
+            ? '会员卡已暂停，本次未扣课未计积分'
+            : deductionWarning;
+          results.push(warn
+            ? { studentId, status, pointsEarned, warning: warn }
+            : { studentId, status, pointsEarned });
+        }
       }
 
       recordAudit(db, {
@@ -406,6 +414,12 @@ router.post('/teacher', (req, res) => {
  * 无法复原到同一个数值（deduction_logs 无 count 列可记录实际扣减量），
  * 宁可少扣一次也不能让课时余额被回滚路径虚增。
  */
+/**
+ * 首次到店扣课。**必须返回扣课结果**（D5）：此前各分支静默 return，
+ * 「没扣」与「扣了」在响应里毫无区别 —— 多孩家庭常出现「持体适能卡来上篮球课」，
+ * 卡余额分文未动、收入未结转，界面零提示，教练与家长都无从定位。
+ * @returns {{deducted: boolean, reason?: string, warning?: string}}
+ */
 function applyArrivalDeduction(studentId, scheduleId, t) {
   const dedup = db.prepare('SELECT 1 FROM deduction_logs WHERE schedule_id = ? AND student_id = ?').get(scheduleId, studentId);
   if (dedup) return;
@@ -433,15 +447,23 @@ function applyArrivalDeduction(studentId, scheduleId, t) {
       UPDATE makeup_records SET status = 'completed', updated_at = ?
       WHERE makeup_schedule_id = ? AND student_id = ? AND status = 'pending'
     `).run(t, scheduleId, studentId);
-    return;
+    return { deducted: false, reason: 'makeup' };
   }
   // 每次课消耗的课时数：courses.consume_classes，缺省 1（course_temp 的 0 也归一到 1）
   const per = resolveConsumeClasses(scheduleId);
   // 选卡收口到 utils/deduction.pickCardForDeduction：按卡种 course_scope 匹配本课程，
   // 匹配者优先、其次 expires_at ASC，且无匹配时兜底（绝不因范围数据不规范而拒绝扣课）。
   const card = pickCardForDeduction(studentId, scheduleId, t, per);
-  if (!card) return;                     // 无任何合格卡：维持原行为（不扣课）
-  if (card.scopeMismatch) return;        // 有卡但课程范围不匹配：拒绝扣课，绝不静默扣错卡（如私教卡被团课消耗）
+  if (!card) return { deducted: false, reason: 'no_card' };   // 无任何合格卡：不扣课（时效卡本就不扣次）
+  if (card.scopeMismatch) {
+    // 有卡但课程范围不匹配：拒绝扣课（绝不静默扣错卡，如私教卡被团课消耗），但要**说出来**
+    const name = card.cardTypeName ? `「${card.cardTypeName}」` : '';
+    return {
+      deducted: false,
+      reason: 'scope_mismatch',
+      warning: `持有${name}但不适用于本课程，本次未扣课，请联系机构确认卡种`,
+    };
+  }
   // 余额条件必须写进 UPDATE 的 WHERE：此前「先 SELECT 校验余额、再按 id 无条件 UPDATE」，
   // 不同排期并发扣同一张卡时两请求会各自读到同一余额、各自扣减 → 余额变负。
   // 加上 remaining_classes >= per 后，UPDATE 由 SQLite 在写锁内原子判定，
@@ -450,7 +472,7 @@ function applyArrivalDeduction(studentId, scheduleId, t) {
     UPDATE member_cards SET remaining_classes = remaining_classes - ?, used_classes = used_classes + ?, updated_at = ?
     WHERE id = ? AND remaining_classes >= ?
   `).run(per, per, t, card.id, per);
-  if (upd.changes === 0) return;
+  if (upd.changes === 0) return { deducted: false, reason: 'insufficient' };
   // 一次扣课一行流水：deduction_logs 上有 UNIQUE(schedule_id, student_id)，
   // 消耗 N 课时不写成 N 行，而是记在 count 列（迁移 019）。回滚路径读该列还原 N，
   // 不再依赖「回滚时重新推导」，也就不会因中途改过课程配置而多还或少还。
@@ -463,6 +485,7 @@ function applyArrivalDeduction(studentId, scheduleId, t) {
   // 位置紧贴 deduction_logs 写入之后：上面任一 early return（无卡 / 补课调课 / 已扣过）
   // 都代表「本次没有真实消课」，此时不得结转，否则会凭空虚增已确认收入。
   recordRevenueRecognition({ card, scheduleId, classes: per, t });
+  return { deducted: true };
 }
 
 /**

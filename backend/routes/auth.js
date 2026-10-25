@@ -219,6 +219,10 @@ router.post('/login', (req, res) => {
       db.prepare(`
         UPDATE parent_bindings SET parent_openid = ?
         WHERE parent_phone = ? AND parent_openid != ?
+          -- 软解绑的行（parent_openid=''）不得被本迁移自动挂回，否则「解绑」形同虚设。
+          -- 建档写入的 parent_openid 恒为真实/合成 openid（phone_xxx），不会是空串，
+          -- 故这里排除空串不影响「首次登录自动挂载」这条正常路径。
+          AND parent_openid IS NOT NULL AND parent_openid != ''
           AND NOT EXISTS (SELECT 1 FROM users u WHERE u.openid = parent_bindings.parent_openid)
       `).run(user.openid, phone, user.openid);
     }
@@ -574,12 +578,14 @@ router.post('/bindStudent', (req, res) => {
       if (studentId && targetAtt) throttleFail(bindTargetAttempts, studentId, targetAtt);
     };
 
-    // 每位家长最多绑定 3 位成员。按**不同学员数**计数（COUNT(DISTINCT student_id)）：
-    // 此前用 COUNT(*) 计总行数，同一学员的重复绑定会白白挤占名额（3 个名额可能全绑同一个孩子）。
-    // 与 migration 025 的唯一索引 idx_parent_bindings_openid_student 配合，重复绑定已从源头阻断，
-    // 此处再按去重口径计数，形成纵深防御。
+    // 每位家长最多绑定 5 位成员（原为 3）。多孩家庭 4 个孩子很常见，而「建档填家长手机号
+    // + 家长登录」的自动挂载路径本就不限量 —— 两条路径口径不一致，规则不可预期；
+    // 4 孩家庭解绑一个孩子后（剩 3）还会被同一上限挡住重绑。
+    // 安全边界不依赖名额：绑定需「姓名 + 学员编号 + 家长手机号后 4 位」三重校验，
+    // 且有三层失败频控（openid / 手机后 4 位 / 目标学员），放宽不削弱防护。
+    // 计数按**不同学员数**（COUNT(DISTINCT student_id)），避免重复绑定挤占名额。
     const bindCount = db.prepare('SELECT COUNT(DISTINCT student_id) as count FROM parent_bindings WHERE parent_openid = ?').get(openid).count;
-    if (bindCount >= 3) return res.status(400).json(safeFail('最多只能绑定 3 位成员'));
+    if (bindCount >= 5) return res.status(400).json(safeFail('最多只能绑定 5 位成员'));
 
     // 按姓名匹配；重名时需用学员编号（memberNo）进一步区分，避免误绑陌生人孩子
     const candidates = db.prepare('SELECT id, name, member_no FROM students WHERE name = ? AND status = ?').all(studentName.trim(), 'active');
@@ -649,8 +655,14 @@ router.post('/unbindStudent', (req, res) => {
     // 解绑与订单归属清理必须在同一事务内：只删绑定不清理订单会留下「绑定已删、
     // 订单仍归属该家长」的越权残留；只清订单不删绑定则解绑未生效。
     const result = db.transaction(() => {
+      // D3：**软解绑**，不物理删除。bindStudent 的手机号后 4 位校验依赖
+      // parent_bindings.parent_phone —— 那是「建档时登记的家长手机号」的唯一存储。
+      // 行一删，验证依据被销毁，重绑在数据层面不可能成功（实测 4 孩家庭解绑一个孩子后
+      // 永远绑不回来，只能等管理员重建档案）。
+      // 置空 parent_openid 即等效解绑：家长侧所有查询（students/my、orders/my、
+      // schedules/my）都按 parent_openid 匹配，空串不会命中任何真实 openid。
       const del = db.prepare(
-        'DELETE FROM parent_bindings WHERE parent_openid = ? AND student_id = ?'
+        "UPDATE parent_bindings SET parent_openid = '' WHERE parent_openid = ? AND student_id = ?"
       ).run(openid, studentId);
       if (del.changes === 0) return { removed: 0, clearedOrders: 0 };
 

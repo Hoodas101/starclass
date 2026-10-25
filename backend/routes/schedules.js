@@ -109,6 +109,44 @@ function collectScheduleStudentIds(schedule) {
  * 依据请求体解析「本次排期涉及的学员集合」（新建 / 改期 / 冲突检测三个入口共用）。
  * 与 collectScheduleStudentIds 同源：把请求体字段映射成同一形状后复用，避免两套口径。
  */
+/**
+ * 把「排课名单」落成报名记录（D2）。
+ *
+ * 为什么必须做：排课时填的 `student_ids` 此前只写进 schedules.student_ids 文本列，
+ * 而家长端「我的排期」、家长扫码签到、活动卡「是否已报名」全部以 enrollments 为数据源 ——
+ * 管理端排好的名单，家长看不到、也不能自助签到，只能到店由教练代点。
+ * 「排课即报名」是真实心智模型，数据模型必须跟上。
+ *
+ * 幂等：先查后插（与 POST /:id/enroll 同口径），已报名自动跳过。
+ * @returns {number} 本次新增的报名行数
+ */
+function enrollStudentsForSchedule(scheduleId, studentIdSet, scheduleRow, t) {
+  if (!scheduleId || !studentIdSet || !studentIdSet.size) return 0;
+  let added = 0;
+  for (const sid of studentIdSet) {
+    const exists = db.prepare(
+      "SELECT 1 FROM enrollments WHERE schedule_id = ? AND student_id = ? AND status = 'active' LIMIT 1"
+    ).get(scheduleId, sid);
+    if (exists) continue;
+    const stu = db.prepare('SELECT name FROM students WHERE id = ?').get(sid);
+    if (!stu) continue;
+    db.prepare(`
+      INSERT INTO enrollments (id, student_id, student_name, course_id, course_name, schedule_id,
+        enroll_type, status, enrolled_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'normal', 'active', ?, ?, ?)
+    `).run(generateId('enr_'), sid, stu.name, scheduleRow.course_id || '', scheduleRow.course_name || '',
+      scheduleId, t, t, t);
+    added++;
+  }
+  if (added) {
+    // 名额计数以「active 报名数」为准，避免与真实在册人数脱节（对账口径）
+    db.prepare(`UPDATE schedules SET enrolled_count = (
+        SELECT COUNT(*) FROM enrollments WHERE schedule_id = ? AND status = 'active'
+      ), updated_at = ? WHERE id = ?`).run(scheduleId, t, scheduleId);
+  }
+  return added;
+}
+
 function resolveStudentIds({ studentIds, classId, groupCourseId, scheduleId = null }) {
   return collectScheduleStudentIds({
     id: scheduleId,
@@ -327,6 +365,10 @@ function ensureTempCourse() {
 
     const id = generateId('sch_');
     const conflictStudentIds = resolveStudentIds({ studentIds: student_ids, classId, groupCourseId });
+    // 仅「显式填写的名单」才自动报名（见下方 enrollStudentsForSchedule 注释）
+    const explicitStudentIds = new Set(
+      String(student_ids || '').split(',').map((x) => x.trim()).filter(Boolean)
+    );
     // 冲突检测与写入必须落在**同一个 immediate 事务**内：此前 checkConflict 在事务外预检、
     // INSERT 也在事务外，两个教练各自预检通过后先后提交即可插入冲突排期
     //（schedules 表除主键外无 UNIQUE 兜底）。检测在事务内重做一次，不依赖事务外结果。
@@ -342,6 +384,11 @@ function ensureTempCourse() {
         date, startTime, endTime, maxStudents || 0, remark || '', groupCourseId || '', groupName || '', classId || '',
         (class_name && String(class_name).trim()) || '', parseInt(duration_minutes, 10) || 0, (allow_self_booking === 0 || allow_self_booking === false || allow_self_booking === '0' || allow_self_booking === 'false') ? 0 : 1, (student_ids && String(student_ids)) || '',
         parseInt(class_count, 10) || 1, parseInt(price_per_class, 10) || 0, now(), now());
+      // D2：**显式名单**即报名。与 INSERT 同事务，避免「排期建好了但报名没落」的半截状态。
+      // 注意只对 student_ids 生效：班级（classId）/团体（groupCourseId）走各自的
+      // 报名申请-审批流（enrollments.status='pending'），自动建成 active 会把审批架空。
+      const t0 = now();
+      enrollStudentsForSchedule(id, explicitStudentIds, { course_id: effectiveCourseId, course_name: finalName }, t0);
       return { ok: true };
     }).immediate();
     if (txResult.err) return res.json(fail(txResult.err));
@@ -430,6 +477,9 @@ router.post('/recursive', (req, res) => {
       const end = new Date(endDate);
       // 本次周期性排期涉及的学员集合（与单次创建同源），循环内复用，避免逐日重复查询
       const recurStudentIds = resolveStudentIds({ studentIds: student_ids, classId, groupCourseId });
+      const explicitStudentIds = new Set(
+        String(student_ids || '').split(',').map((x) => x.trim()).filter(Boolean)
+      );
 
       // F3：冲突被跳过的日期必须留痕。此前静默 continue，全部跳过仍返回 code=0，
       // 管理者收到「成功」提示但课表是空的（学员到店才发现没课）。
@@ -472,6 +522,8 @@ router.post('/recursive', (req, res) => {
           dateStr, startTime, endTime, maxStudents || 0, ruleId, groupCourseId || '', groupName || '', classId || '',
           (class_name && String(class_name).trim()) || '', parseInt(duration_minutes, 10) || 0, (allow_self_booking === 0 || allow_self_booking === false || allow_self_booking === '0' || allow_self_booking === 'false') ? 0 : 1, (student_ids && String(student_ids)) || '',
           parseInt(class_count, 10) || 1, parseInt(price_per_class, 10) || 0, now(), now());
+        // D2：周期排课同样「名单即报名」（仍仅限显式 student_ids）
+        enrollStudentsForSchedule(id, explicitStudentIds, { course_id: effectiveCourseId, course_name: finalName }, now());
         createdSchedules.push(id);
       }
       // F3：一节都没排上时抛哨兵错误回滚整个事务 —— 包括上面插入的 schedule_rules 行，
@@ -1750,6 +1802,12 @@ router.delete('/:id', (req, res) => {
     const { id } = req.params;
     const existing = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
     if (!existing) return res.json(fail('排期不存在'));
+    // F7-1：重复取消必须显式拒绝。此前只判存在性，对已取消的排期再删一次仍返回
+    // code=0「成功」—— 管理端无法区分「本次取消了」与「早已取消」，且取消动作会
+    // 连带回滚考勤/扣课/收入结转与通知，语义上不该被重复触发。
+    if (existing.status === 'cancelled') {
+      return res.json(fail('该排期已取消，无需重复操作'));
+    }
 
     // 通知内容与接收人此刻备好，发送延后到事务提交成功之后。
     // 接收人必须在事务之前解析：事务会把报名记录置为 cancelled，提交后再查就取不到家长了。

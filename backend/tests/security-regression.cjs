@@ -179,7 +179,11 @@ console.log('\n\x1b[1m[7] 分享积分凭证\x1b[0m');
 
   const r2 = mockRes();
   share(mockReq({ openid: `phone_${PHONE_A}`, userRole: 'parent', body: { ticket } }), r2);
-  rec('★ 同一凭证不能复用', !!(r2.body && r2.body.code !== 0), JSON.stringify(r2.body).slice(0, 120));
+  // 安全属性是「不能重复领分」，不是「必须报错」：凭证复用时若本周已到账，
+  // 返回 duplicated 幂等成功（避免家长被误导为"凭证失效"而反复重新分享），但 added 必须为 0。
+  rec('★ 同一凭证不能重复领分（added=0 且标记 duplicated）',
+    !!(r2.body && r2.body.code === 0 && r2.body.data && r2.body.data.added === 0 && r2.body.data.duplicated === true),
+    JSON.stringify(r2.body).slice(0, 120));
 
   // 他人拿到凭证也不能用
   const rt2 = mockRes();
