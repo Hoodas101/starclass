@@ -12,6 +12,9 @@ const router = express.Router();
 const crypto = require('crypto');
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, now, isAdminReq, isCoachReq, hasPerm, getReqUser, canViewStudentData, calcCardExpiresAt, parsePagination } = require('../utils');
+// 订阅卡规则（顺延开关等）
+const { getCardRules } = require('../utils/card-rules');
+const { validateFormula } = require('../utils/formula');
 // 订单明细解析 / 每次课消耗课时数：与签到扣课、导出报表共用同一实现
 const { parseItems, itemLineTotal } = require('../utils/items');
 const { resolveConsumeClasses, pickCardForDeduction } = require('../utils/deduction');
@@ -170,7 +173,7 @@ router.post('/resume', (req, res) => {
 router.post('/card-type', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可管理产品'));
-    const { name, totalClasses, validDays, billingMode = 'time', price, pointsReward = 0, courseScope, scopeCourseIds, transferable, refundable, productType = 'membership', unit = '', description = '', visitLimitPerWeek, visitLimitPerMonth } = req.body;
+    const { name, totalClasses, validDays, billingMode = 'time', price, pointsReward = 0, courseScope, scopeCourseIds, transferable, refundable, productType = 'membership', unit = '', description = '', visitLimitPerWeek, visitLimitPerMonth, deferEnabled, periodAnchor, refundFormula } = req.body;
     if (!name) return res.json(fail('名称为必填'));
     const type = productType === 'goods' ? 'goods' : 'membership';
     // 到店限次（0/NULL = 不限次）；负数与非法值一律归 0
@@ -203,11 +206,20 @@ router.post('/card-type', (req, res) => {
       if (!validDays || validDays <= 0) return res.json(fail('时效制卡必须设置有效天数'));
     }
 
+    // 订阅卡三字段：留空 = 跟随全局；公式必须**先过求值器**再落库，
+    // 否则一条写错的公式会让该卡种的所有退款静默回落默认规则（用户以为生效了）
+    const anchorVal = ['activated', 'first_use', 'natural'].includes(String(periodAnchor)) ? String(periodAnchor) : '';
+    const formulaVal = String(refundFormula || '').trim();
+    if (formulaVal) {
+      const v = validateFormula(formulaVal);
+      if (!v.ok) return res.json(fail(`退费公式不合法：${v.error}`));
+    }
+
     const id = generateId('ct_');
     db.prepare(`
-      INSERT INTO membership_cards (id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, scope_course_ids, transferable, refundable, product_type, unit, description, visit_limit_per_week, visit_limit_per_month, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'membership', '', ?, ?, ?, ?)
-    `).run(id, name, mode === 'count' ? totalClasses : 0, validDays || 0, mode, pointsReward || 0, price || 0, courseScope || '', normalizeScopeCourseIds(scopeCourseIds), transferable ? 1 : 0, refundable !== false ? 1 : 0, description || '', vw, vm, now());
+      INSERT INTO membership_cards (id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, scope_course_ids, transferable, refundable, product_type, unit, description, visit_limit_per_week, visit_limit_per_month, defer_enabled, period_anchor, refund_formula, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'membership', '', ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, name, mode === 'count' ? totalClasses : 0, validDays || 0, mode, pointsReward || 0, price || 0, courseScope || '', normalizeScopeCourseIds(scopeCourseIds), transferable ? 1 : 0, refundable !== false ? 1 : 0, description || '', vw, vm, deferEnabled ? 1 : 0, anchorVal, formulaVal, now());
 
     // 产品（卡类型/商品）定价与权益变更影响销售口径，需留痕
     const actor = getActor(req);
@@ -226,6 +238,9 @@ router.post('/card-type', (req, res) => {
         valid_days: validDays || 0,
         visit_limit_per_week: vw,
         visit_limit_per_month: vm,
+        defer_enabled: deferEnabled ? 1 : 0,
+        period_anchor: anchorVal,
+        refund_formula: formulaVal,
       },
     });
 
@@ -315,7 +330,7 @@ router.get('/products', (req, res) => {
 router.put('/card-type/:id', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可管理产品'));
-    const { name, totalClasses, validDays, billingMode, price, pointsReward, courseScope, scopeCourseIds, transferable, refundable, isActive, productType, unit, description, visitLimitPerWeek, visitLimitPerMonth } = req.body;
+    const { name, totalClasses, validDays, billingMode, price, pointsReward, courseScope, scopeCourseIds, transferable, refundable, isActive, productType, unit, description, visitLimitPerWeek, visitLimitPerMonth, deferEnabled, periodAnchor, refundFormula } = req.body;
     // 结构化范围：未传则保持原值（COALESCE 兜底），显式传入才覆盖
     const scopeIdsVal = (scopeCourseIds === undefined || scopeCourseIds === null) ? null : normalizeScopeCourseIds(scopeCourseIds);
     const existing = db.prepare('SELECT id, product_type, billing_mode, valid_days, total_classes FROM membership_cards WHERE id = ?').get(req.params.id);
@@ -347,6 +362,17 @@ router.put('/card-type/:id', (req, res) => {
     const vw = (visitLimitPerWeek === undefined || visitLimitPerWeek === null) ? null : Math.max(0, Number(visitLimitPerWeek) || 0);
     const vm = (visitLimitPerMonth === undefined || visitLimitPerMonth === null) ? null : Math.max(0, Number(visitLimitPerMonth) || 0);
 
+    // 订阅卡三字段：未传 → 保持原值（null 走 COALESCE）；传了公式必须先过求值器
+    const deferVal = (deferEnabled === undefined || deferEnabled === null) ? null : (deferEnabled ? 1 : 0);
+    const anchorVal = (periodAnchor === undefined || periodAnchor === null)
+      ? null
+      : (['activated', 'first_use', 'natural'].includes(String(periodAnchor)) ? String(periodAnchor) : '');
+    let formulaVal = (refundFormula === undefined || refundFormula === null) ? null : String(refundFormula).trim();
+    if (formulaVal) {
+      const v = validateFormula(formulaVal);
+      if (!v.ok) return res.json(fail(`退费公式不合法：${v.error}`));
+    }
+
     if (isGoods) {
       db.prepare(`
         UPDATE membership_cards SET
@@ -374,9 +400,12 @@ router.put('/card-type/:id', (req, res) => {
           description = COALESCE(?, description),
           is_active = COALESCE(?, is_active),
           visit_limit_per_week = COALESCE(?, visit_limit_per_week),
-          visit_limit_per_month = COALESCE(?, visit_limit_per_month)
+          visit_limit_per_month = COALESCE(?, visit_limit_per_month),
+          defer_enabled = COALESCE(?, defer_enabled),
+          period_anchor = COALESCE(?, period_anchor),
+          refund_formula = COALESCE(?, refund_formula)
         WHERE id = ?
-      `).run(name, totalClasses, validDays, billingMode, pointsReward, price, courseScope, scopeIdsVal, transferable, refundable, description, isActive, vw, vm, req.params.id);
+      `).run(name, totalClasses, validDays, billingMode, pointsReward, price, courseScope, scopeIdsVal, transferable, refundable, description, isActive, vw, vm, deferVal, anchorVal, formulaVal, req.params.id);
     }
 
     // 产品（卡类型/商品）定价与权益变更影响销售口径，需留痕
@@ -1198,6 +1227,91 @@ router.get('/expiring', (req, res) => {
     res.json(success({ count: list.length, list }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
+  }
+});
+
+/**
+ * POST /api/membership/card/:id/activate-now — 提前激活待生效的顺延卡（仅管理员）
+ *
+ * 为什么需要：学员买了顺延卡（排到旧卡到期之后）后，可能因为退课、转班或旧卡被退，
+ * 需要立刻用新卡。没有这个入口，管理员只能改数据库。
+ *
+ * 关键约束：提前激活必须**同步作废同科目在途旧卡**。否则学员同时持两张同科目时效卡，
+ * 额度叠加、限次各算一套 —— 等于凭空多出一张卡的权益。
+ */
+router.post('/card/:id/activate-now', (req, res) => {
+  try {
+    if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可提前激活'));
+    const rules = getCardRules();
+    if (!rules.defer.allowActivateNow) {
+      return res.json(fail('该机构已关闭「提前激活」，如需使用请联系管理员调整设置'));
+    }
+
+    const cardId = req.params.id;
+    const actor = getActor(req);
+    const t = now();
+
+    const result = db.transaction(() => {
+      const card = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(cardId);
+      if (!card) return { err: '会员卡不存在' };
+      if (card.status !== 'active') return { err: '仅进行中的会员卡可提前激活' };
+      const act = Number(card.activated_at) || 0;
+      // 已生效（含当日生效）不算"提前"
+      if (!act || act <= t) return { err: '该卡已生效，无需提前激活' };
+
+      const type = db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(card.card_type_id);
+      if (!type) return { err: '卡种不存在' };
+
+      // 1) 作废同科目在途旧卡（按卡种 course_scope 匹配，与顺延基准卡同一判据）
+      const scope = String(type.course_scope || '');
+      const oldCards = db.prepare(`
+        SELECT mc.id FROM member_cards mc
+          LEFT JOIN membership_cards ct ON ct.id = mc.card_type_id
+         WHERE mc.student_id = ? AND mc.id != ?
+           AND mc.status IN ('active','paused')
+           AND (mc.expires_at IS NULL OR mc.expires_at > ?)
+           AND COALESCE(ct.course_scope, '') = ?
+      `).all(card.student_id, cardId, t, scope);
+      const superseded = [];
+      for (const o of oldCards) {
+        db.prepare("UPDATE member_cards SET status = 'superseded', updated_at = ? WHERE id = ?").run(t, o.id);
+        superseded.push(o.id);
+      }
+
+      // 2) 从现在起算有效期：不能用原来排好的 expires_at，否则会少掉「提前的那段时间」
+      const newExpires = calcCardExpiresAt(t, type.valid_days, type.billing_mode || 'time');
+      // 3) 清空顺延谱系：否则退款回滚会把一张已经不等待的卡拉回等待态
+      db.prepare(`
+        UPDATE member_cards
+           SET activated_at = ?, expires_at = ?, deferred_from_card_id = '', updated_at = ?
+         WHERE id = ?
+      `).run(t, newExpires, t, cardId);
+
+      return { ok: true, superseded, newExpires };
+    })();
+
+    if (result.err) return res.json(fail(result.err));
+
+    recordAudit(db, {
+      entity: 'member_card',
+      entityId: cardId,
+      action: 'activate_now',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { deferred: true },
+      after: { activatedNow: true, supersededCards: result.superseded },
+    });
+
+    res.json(success({
+      id: cardId,
+      activatedAt: t,
+      expiresAt: result.newExpires,
+      supersededCount: result.superseded.length,
+      supersededCards: result.superseded,
+    }));
+  } catch (err) {
+    console.error('[card activate-now]', err && err.stack ? err.stack : err);
+    res.status(500).json(safeFail('提前激活失败'));
   }
 });
 

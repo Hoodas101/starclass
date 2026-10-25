@@ -14,6 +14,9 @@ const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, ha
 const { parseItems } = require('../utils/items');
 // 退费规则引擎已抽到 utils/refund：refund-preview / refund / 退卡（membership）共用同一口径
 const { computeRefundSuggestion } = require('../utils/refund');
+// 订阅卡：顺延与周期锚定（P1/P2）
+const { findDeferralBase, deferralStartFrom } = require('../utils/card-lifecycle');
+const { getCardRules } = require('../utils/card-rules');
 // 手机号归一化与建档查重同源（utils/duplicate）：库里 parent_bindings.parent_phone 存的是
 // 归一化后的纯数字串，比对导入文件里的号码前必须同样归一化，否则「138 0013 8000」这类
 // 带空格/分隔符的写法会漏配，订单就会退化成只按姓名匹配。
@@ -175,21 +178,44 @@ function grantOrderBenefits(order, paidAt) {
       const product = productCache.get(productId);
       const issued = db.prepare('SELECT COUNT(*) AS c FROM member_cards WHERE order_id = ? AND card_type_id = ?')
         .get(order.id, productId).c;
+      // 顺延判定：同一卡种的多张卡要链式排队，故每发一张都重新找基准卡
+      const cardRules = getCardRules();
       for (let n = issued; n < wanted; n++) {
         const cardId = generateId('CARD');
-        const expiresAt = calcCardExpiresAt(currentTime, product.valid_days, product.billing_mode || 'time');
+        // P1 顺延：该卡种开启顺延 + 全局开关打开 + 学员已有同科目在途卡 → 排到旧卡之后。
+        // 注意基准卡选择**包含已发未生效的顺延卡**，否则连买两张会完全重叠（额度翻倍）。
+        let activatedAt = currentTime;
+        let deferredFrom = '';
+        if (cardRules.defer.enabled && Number(product.defer_enabled) === 1) {
+          const base = findDeferralBase(order.student_id, {
+            courseScope: product.course_scope || '',
+            crossScope: cardRules.defer.crossScope,
+            t: currentTime,
+          });
+          if (base) {
+            activatedAt = deferralStartFrom(base, cardRules.defer.startAnchor, currentTime);
+            deferredFrom = base.id;
+          }
+        }
+        const expiresAt = calcCardExpiresAt(activatedAt, product.valid_days, product.billing_mode || 'time');
         // 到店限次（每周/每月）随开卡快照到卡实例：与 membership.js /activate 同一口径，
         // 保证日后调整卡种不追溯改写已售出的卡；缺列/空值时 Number(undefined)||0 → 0（不限次）
         const visitLimitPerWeek = Number(product.visit_limit_per_week) || 0;
         const visitLimitPerMonth = Number(product.visit_limit_per_month) || 0;
+        // 周期锚点与周期长度**快照到卡实例**：机构之后改卡种配置，已售卡不受影响
+        //（与 visit_limit_* 同一原则 —— 已收的钱不能因后台改配置而变）
+        const anchor = String(product.period_anchor || '').trim() || cardRules.period.defaultAnchor || 'natural';
         db.prepare(`
           INSERT INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name,
             total_classes, remaining_classes, activated_at, expires_at, status, order_id,
-            visit_limit_per_week, visit_limit_per_month, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+            visit_limit_per_week, visit_limit_per_month,
+            deferred_from_card_id, first_used_at, period_anchor, cycle_days_week, cycle_days_month,
+            created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, 0, ?, 7, 30, ?, ?)
         `).run(cardId, product.id, product.name, product.billing_mode || 'time', order.student_id, order.student_name,
-          product.total_classes, product.total_classes, currentTime, expiresAt, order.id,
-          visitLimitPerWeek, visitLimitPerMonth, currentTime, currentTime);
+          product.total_classes, product.total_classes, activatedAt, expiresAt, order.id,
+          visitLimitPerWeek, visitLimitPerMonth,
+          deferredFrom, anchor, currentTime, currentTime);
       }
     }
 

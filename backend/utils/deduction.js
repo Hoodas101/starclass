@@ -14,6 +14,8 @@
 'use strict';
 
 const db = require('../db');
+// 顺延卡「未生效」判据（与 card-lifecycle 同源，不要另写一份）
+const { dayEndExclusive } = require('./card-lifecycle');
 
 /**
  * 排期所属课程「每次课消耗的课时数」。
@@ -65,8 +67,12 @@ function pickCardForDeduction(studentId, scheduleId, t, per) {
     LEFT JOIN membership_cards mct ON mct.id = mc.card_type_id
     WHERE mc.student_id = ? AND mc.status = 'active' AND mc.billing_mode = 'count'
       AND mc.expires_at > ? AND mc.remaining_classes >= ?
+      -- P1 顺延：未生效的卡不得参与扣课。顺延卡发卡即写 activated_at（可能在 30 天后），
+      -- status 仍是 active —— 只按 status 过滤会让排到未来的卡今天就能上课（免费一个月）。
+      -- 按**自然日**比较：当日 00:00 + 1 天，避免「当天开卡当天上课」被误判未生效。
+      AND (COALESCE(mc.activated_at, 0) = 0 OR mc.activated_at < ?)
     ORDER BY mc.expires_at ASC
-  `).all(studentId, t, per);
+  `).all(studentId, t, per, dayEndExclusive(t));
   if (!cards.length) return null;
 
   const sch = db.prepare('SELECT course_id, course_name FROM schedules WHERE id = ?').get(scheduleId);

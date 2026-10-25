@@ -6,6 +6,8 @@
 const db = require('../db');
 // now 来自 utils/index；utils/index 不反向 require 本模块，无循环依赖
 const { now } = require('../utils');
+const { evaluateRefund } = require('./formula');
+const { getCardRules } = require('./card-rules');
 
 /**
  * 按退费规则计算建议退款金额（refund-preview 与 refund 共用，保证预览不是装饰）
@@ -107,9 +109,57 @@ function computeRefundSuggestion(order, opts = {}) {
       : '开课后退费，按未消耗部分退还';
   }
   refundFactor = Math.max(0, Math.min(1, refundFactor));
-  const amount = Math.round(remain * refundFactor);
+
+  // ── 公式化（P3）：卡种 → 全局 → 内置默认 ──
+  // 三层优先级：卡种上配的公式优先（发卡时并不快照公式，退款时读卡种当前值 ——
+  // 与「已收的钱不能因改配置而变」的冲突在此处刻意选择「可调」：退款是事后行为，
+  // 机构调公式的本意就是修正后续退款口径；历史已退金额已落库，不受影响）。
+  let amount = Math.round(remain * refundFactor);
+  let formulaInfo = null;
+  let formulaSrc = '';
+  try {
+    const cfg = getCardRules();
+    const ct = card
+      ? db.prepare('SELECT refund_formula FROM membership_cards WHERE id = ?').get(card.card_type_id)
+      : null;
+    formulaSrc = String((ct && ct.refund_formula) || '').trim() || String(cfg.refund.formula || '').trim();
+  } catch (e) {
+    formulaSrc = '';
+  }
+  if (formulaSrc) {
+    const DAY = 86400000;
+    const act = Number(card && card.activated_at) || 0;
+    const exp = Number(card && card.expires_at) || 0;
+    const totalDays = act && exp > act ? Math.max(1, Math.round((exp - act) / DAY)) : 0;
+    const usedDays = card ? Math.min(totalDays, Math.max(0, Math.round((currentTime - act) / DAY))) : 0;
+    const vars = {
+      paid,
+      refunded: refundedSoFar,
+      remain,
+      total_days: totalDays,
+      used_days: usedDays,
+      remain_days: Math.max(0, totalDays - usedDays),
+      paused_days: card && card.pause_total_ms ? Math.round(Number(card.pause_total_ms) / DAY) : 0,
+      total_classes: Number(card && card.total_classes) || 0,
+      used_classes: Number(card && card.used_classes) || 0,
+      remain_classes: Number(card && card.remaining_classes) || 0,
+      fee_rate: Math.max(0, Math.min(1, 1 - refundFactor)),
+    };
+    const r = evaluateRefund(formulaSrc, vars);
+    if (r.ok) {
+      amount = r.amount;
+      // 因子同步回写：退卡路径按「本卡份额 × 因子」算，两者不能漂移
+      refundFactor = remain > 0 ? amount / remain : 0;
+      formulaInfo = { formula: formulaSrc, vars, raw: r.raw, amount };
+    } else {
+      // 公式坏了不能把退款算成 0 —— 回落既有规则，并留痕便于排查
+      console.warn('[refund] 退费公式求值失败，回落默认规则:', r.error, '|', formulaSrc);
+    }
+  }
 
   return { started, mode, amount, reason, cardInfo, remain, needApproval, processDays, refundFactor,
+    // 公式明细：预览页要展示「怎么算出来的」，不能只给一个数字
+    formula: formulaInfo,
     cardId: card ? card.id : null,
     rules: { beforeStart, beforeStartPercent, afterStart, afterStartPercent } };
 }

@@ -925,7 +925,9 @@ router.get('/:id', requireAuth, (req, res) => {
       SELECT id, order_id, card_type_name, total_classes, remaining_classes, expires_at, status,
         paused_at, pause_total_ms, pause_reason,
         -- 卡种是否可转让：详情页据此决定是否显示「转让」入口（后端另有强校验，此处仅控制可见性）
-        (SELECT ct.transferable FROM membership_cards ct WHERE ct.id = member_cards.card_type_id) AS transferable
+        (SELECT ct.transferable FROM membership_cards ct WHERE ct.id = member_cards.card_type_id) AS transferable,
+        -- 顺延卡：activated_at 在未来 → 前端展示「待生效 + 生效日期」并给「提前激活」入口
+        activated_at, deferred_from_card_id
       FROM member_cards WHERE student_id = ? ORDER BY created_at DESC
     `).all(id);
     // 积分（仅返回余额）

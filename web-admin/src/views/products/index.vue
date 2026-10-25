@@ -187,6 +187,27 @@
           <el-switch v-model="cardForm.transferable" :active-value="1" :inactive-value="0" />
           <span class="unit-text">转让需在学员档案的会员卡上操作</span>
         </el-form-item>
+        <!-- 订阅卡三字段：留空/关闭 = 跟随「系统设置 → 订阅卡规则」 -->
+        <el-form-item label="参与顺延">
+          <el-switch v-model="cardForm.deferEnabled" :active-value="1" :inactive-value="0" />
+          <span class="unit-text">开启后学员已有在途卡时，本卡种新卡会排在旧卡到期之后</span>
+        </el-form-item>
+        <el-form-item label="限次周期">
+          <el-select v-model="cardForm.periodAnchor" clearable placeholder="跟随全局设置" style="width: 220px">
+            <el-option label="跟随全局设置" value="" />
+            <el-option label="开卡日起算" value="activated" />
+            <el-option label="首次到店日起算" value="first_use" />
+            <el-option label="自然周/自然月（旧口径）" value="natural" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="退费公式">
+          <el-input
+            v-model="cardForm.refundFormula"
+            type="textarea"
+            :rows="2"
+            placeholder="留空 = 跟随全局设置；示例：round(remain * remain_days / total_days)"
+          />
+        </el-form-item>
         <el-form-item v-if="editingCardId" label="上架状态">
           <el-switch v-model="cardForm.isActive" :active-value="1" :inactive-value="0" active-text="在售" inactive-text="停用" />
         </el-form-item>
@@ -284,6 +305,9 @@ const cardForm = reactive({
   visitLimitPerWeek: 0,
   visitLimitPerMonth: 0,
   transferable: 0,
+  deferEnabled: 0,
+  periodAnchor: '',
+  refundFormula: '',
 })
 
 // 到店限次展示：未设上限显示「不限次」
@@ -315,6 +339,9 @@ const openCardDialog = (row) => {
     visitLimitPerWeek: Number(row?.visit_limit_per_week) || 0,
     visitLimitPerMonth: Number(row?.visit_limit_per_month) || 0,
     transferable: row?.transferable ? 1 : 0,
+    deferEnabled: row?.defer_enabled ? 1 : 0,
+    periodAnchor: row?.period_anchor || '',
+    refundFormula: row?.refund_formula || '',
   })
   cardDialogVisible.value = true
 }

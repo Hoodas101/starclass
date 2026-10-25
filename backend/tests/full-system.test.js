@@ -115,7 +115,7 @@ const ROUTES = [
   ['POST', '/api/membership/activate'], ['GET', '/api/membership/my'], ['POST', '/api/membership/deduct'],
   ['POST', '/api/membership/refund'], ['GET', '/api/membership/deductions'], ['GET', '/api/membership/expiring'],
   // 会员卡实例列表 + 卡转让（migrations/026 + routes/membership.js）
-  ['GET', '/api/membership/cards'], ['POST', '/api/membership/card/ID1/transfer'],
+  ['GET', '/api/membership/cards'], ['POST', '/api/membership/card/ID1/transfer'], ['POST', '/api/membership/card/ID1/activate-now'],
   ['POST', '/api/points/add'], ['POST', '/api/points/consume'], ['GET', '/api/points/balance'],
   ['GET', '/api/points/logs'], ['GET', '/api/points/ranking'], ['POST', '/api/points/share'], ['POST', '/api/points/share/ticket'], ['GET', '/api/points/rules'],
   ['POST', '/api/orders'], ['POST', '/api/orders/import'], ['GET', '/api/orders/my'],

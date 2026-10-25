@@ -233,6 +233,8 @@ export const deleteScheduleRule = (id, params) => request.delete(`/schedules/rul
 
 // 会员卡转让（增量 P1-8）：卡种已在售 transferable=1，转让能力此前完全缺失
 export const transferCard = (cardId, data) => request.post(`/membership/card/${cardId}/transfer`, data)
+// 订阅卡：把待生效的顺延卡提前激活（会作废同科目在途旧卡）
+export const activateCardNow = (cardId) => request.post(`/membership/card/${cardId}/activate-now`)
 
 // 请假 → 批量补课：一次课多名学员缺席时，按「同一原排期 + 多学员」一次性安排
 export const batchArrangeMakeup = (data) => request.post('/makeup/batch-assign', data)

@@ -207,6 +207,79 @@
           </el-form>
         </div>
 
+        <!-- 订阅卡规则（顺延 / 周期锚定 / 退费公式） -->
+        <div v-if="activeTab === 'cardRules'" class="settings-section">
+          <h3 class="section-title">订阅卡规则</h3>
+          <p class="section-desc">
+            这三组规则直接决定「卡什么时候开始算、每周能来几次、退多少钱」，改动会影响新售出的卡与后续退款。
+          </p>
+
+          <h4 class="section-subtitle">顺延</h4>
+          <el-form :model="cardRulesForm.defer" label-width="auto" label-position="left">
+            <el-form-item label="允许顺延">
+              <el-switch v-model="cardRulesForm.defer.enabled" />
+              <span class="form-hint">开启后，学员已有在途卡时再买卡，新卡自动排在旧卡到期之后，不会两张卡同时计时。</span>
+            </el-form-item>
+            <el-form-item label="顺延起点">
+              <el-radio-group v-model="cardRulesForm.defer.startAnchor">
+                <el-radio value="day">旧卡到期次日 00:00</el-radio>
+                <el-radio value="exact">旧卡到期那一刻</el-radio>
+              </el-radio-group>
+              <span class="form-hint form-hint--block">
+                次日 00:00 与「明天起生效」的说法一致，实际多覆盖不到 1 天；「那一刻」与合同整 30 天严格一致。
+              </span>
+            </el-form-item>
+            <el-form-item label="跨科目排队">
+              <el-switch v-model="cardRulesForm.defer.crossScope" />
+              <span class="form-hint">默认关闭：篮球卡与体适能卡各算各的，互不排队。</span>
+            </el-form-item>
+            <el-form-item label="允许提前激活">
+              <el-switch v-model="cardRulesForm.defer.allowActivateNow" />
+              <span class="form-hint">开启后管理员可在学员档案里把待生效的卡提前启用（会作废同科目旧卡）。</span>
+            </el-form-item>
+          </el-form>
+
+          <h4 class="section-subtitle">周期锚定</h4>
+          <el-form :model="cardRulesForm.period" label-width="auto" label-position="left">
+            <el-form-item label="周/月限次从哪天算">
+              <el-radio-group v-model="cardRulesForm.period.defaultAnchor">
+                <el-radio value="activated">开卡日</el-radio>
+                <el-radio value="first_use">首次到店日</el-radio>
+                <el-radio value="natural">自然周/自然月</el-radio>
+              </el-radio-group>
+              <span class="form-hint form-hint--block">
+                选「开卡日/首次到店日」后，周期按固定 7 天 / 30 天切分，与「有效期 30 天」的合同表述一致；
+                「自然周/自然月」是历史口径，仅用于兼容老卡。已售出的卡按发卡时的设置执行，改这里不影响它们。
+              </span>
+            </el-form-item>
+          </el-form>
+
+          <h4 class="section-subtitle">退费公式</h4>
+          <el-form :model="cardRulesForm.refund" label-width="auto" label-position="left">
+            <el-form-item label="自定义公式">
+              <el-input
+                v-model="cardRulesForm.refund.formula"
+                type="textarea"
+                :rows="3"
+                placeholder="留空 = 使用内置默认（按剩余天数/剩余次数折算）"
+              />
+              <span class="form-hint form-hint--block">
+                可用变量：paid 实付、remain 可退基数、total_days / used_days / remain_days、
+                total_classes / used_classes / remain_classes、fee_rate、paused_days。<br />
+                可用运算与函数：+ - * / ( ) 、min max round floor ceil abs。<br />
+                示例：<code>max(0, round(remain * remain_days / total_days) - 200)</code>（按剩余天数退，再扣 200 元手续费）
+              </span>
+            </el-form-item>
+            <el-form-item label="允许部分退款">
+              <el-switch v-model="cardRulesForm.refund.allowPartial" />
+              <span class="form-hint">关闭后只能按剩余金额一次退完。</span>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" :loading="savingCardRules" @click="saveCardRules">保存订阅卡规则</el-button>
+            </el-form-item>
+          </el-form>
+        </div>
+
         <!-- 请假规则 -->
         <div v-if="activeTab === 'leave'" class="settings-section">
           <div class="section-head">
@@ -758,6 +831,7 @@ const tabGroups = [
       { key: 'points', label: '积分规则', icon: 'Star' },
       { key: 'notification', label: '推送规则', icon: 'Bell' },
       { key: 'refund', label: '退费规则', icon: 'Money' },
+      { key: 'cardRules', label: '订阅卡规则', icon: 'CreditCard' },
       { key: 'leave', label: '请假规则', icon: 'Calendar' },
     ],
   },
@@ -1498,6 +1572,26 @@ const refundForm = reactive({
   processDays: 7
 })
 
+const cardRulesForm = reactive({
+  defer: { enabled: true, startAnchor: 'day', crossScope: false, allowActivateNow: true },
+  period: { defaultAnchor: 'activated' },
+  refund: { formula: '', allowPartial: true },
+})
+const savingCardRules = ref(false)
+
+const saveCardRules = async () => {
+  savingCardRules.value = true
+  try {
+    // 只提交这一组：后端按组浅合并，不会冲掉其他设置
+    await saveSettings({ card_rules: JSON.parse(JSON.stringify(cardRulesForm)) })
+    ElMessage.success('订阅卡规则已保存')
+  } catch (e) {
+    // 拦截器已提示
+  } finally {
+    savingCardRules.value = false
+  }
+}
+
 const saveRefund = async () => {
   savingRefund.value = true
   try {
@@ -1545,6 +1639,12 @@ const loadSettings = async () => {
     if (Array.isArray(data?.points_rules) && data.points_rules.length > 0) pointsRules.value = data.points_rules
     if (Array.isArray(data?.notification_rules) && data.notification_rules.length > 0) notificationRules.value = data.notification_rules
     if (data?.refund_rules) Object.assign(refundForm, data.refund_rules)
+    // 订阅卡规则：按组浅合并到表单，缺组保留默认（后端已做归一化）
+    if (data?.card_rules) {
+      if (data.card_rules.defer) Object.assign(cardRulesForm.defer, data.card_rules.defer)
+      if (data.card_rules.period) Object.assign(cardRulesForm.period, data.card_rules.period)
+      if (data.card_rules.refund) Object.assign(cardRulesForm.refund, data.card_rules.refund)
+    }
     if (data?.leave_rules) {
       const lr = data.leave_rules
       leaveRules.deductMode = lr.deductMode || (lr.deductClass ? 'class' : 'none')

@@ -4,6 +4,7 @@
  * PUT /api/settings          — 批量保存设置
  */
 const express = require('express');
+const { getCardRules, mergeGroup } = require('../utils/card-rules');
 const router = express.Router();
 const db = require('../db');
 const path = require('path');
@@ -72,7 +73,7 @@ router.use((req, res, next) => {
 // growth/trial/finance 三个键是 v1.0.7 多维表格扩展新增的 —— 此前只加了前端 key，
 // 后端白名单没跟上，写入被静默忽略、读取也拿不到，表现为「字段设置保存后刷新就丢」。
 const COLUMN_KEYS = ['students_columns', 'orders_columns', 'growth_columns', 'trial_columns', 'finance_columns'];
-const KEYS = ['org_info', 'points_rules', 'notification_rules', 'refund_rules', 'leave_rules', 'uniform_price', 'service_phone', ...COLUMN_KEYS, 'term_scheme', 'term_overrides', 'churn_rules'];
+const KEYS = ['org_info', 'points_rules', 'notification_rules', 'refund_rules', 'leave_rules', 'uniform_price', 'service_phone', ...COLUMN_KEYS, 'term_scheme', 'term_overrides', 'churn_rules', 'card_rules'];
 
 // 推送规则规范默认值（DEFAULT_NOTIFICATION_RULES）已上移至 utils/reminders.js：
 // 存储为空/畸形时兜底返回，保证设置页可读可配、定时任务有默认档位，且两处共用同一份。
@@ -144,6 +145,10 @@ router.get('/', (req, res) => {
       if (key === 'term_overrides') {
         result[key] = (result[key] && typeof result[key] === 'object') ? result[key] : {};
       }
+      // 订阅卡规则：缺组补默认，非法值逐字段丢弃（读坏了也不能放行）
+      if (key === 'card_rules') {
+        result[key] = getCardRules();
+      }
     }
     if (!isAdminViewer) {
       // 非管理员：只回公开子集 + 表格列配置（列配置供教练/销售的学员/订单列表页使用，非经营敏感项），
@@ -194,12 +199,22 @@ router.put('/', (req, res) => {
       term_scheme: '称呼方案',
       term_overrides: '称呼自定义',
       churn_rules: '流失与召回规则',
+      card_rules: '订阅卡规则',
     };
 
     const actor = getActor(req);
     for (const key of KEYS) {
       if (body[key] !== undefined) {
-        const value = typeof body[key] === 'string' ? body[key] : JSON.stringify(body[key]);
+        let payload = body[key];
+        // card_rules 必须**按组浅合并**：设置页可能只提交「顺延」这一组，
+        // 直接整体覆盖会把「周期」「退费」冲成空对象 —— 这是设置页的历史通病。
+        if (key === 'card_rules') {
+          const prevRow = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+          let prevCfg = {};
+          try { prevCfg = prevRow && prevRow.value ? JSON.parse(prevRow.value) : {}; } catch (e) { prevCfg = {}; }
+          payload = mergeGroup(prevCfg, payload);
+        }
+        const value = typeof payload === 'string' ? payload : JSON.stringify(payload);
         const prev = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
         upsert.run(key, labels[key] || key, value, '', currentTime);
         // 系统设置变更（退费/积分/推送/称呼等规则）直接改变经营口径，属高危写操作。

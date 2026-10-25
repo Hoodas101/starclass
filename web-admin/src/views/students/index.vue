@@ -364,7 +364,16 @@
                     </span>
                   </div>
                   <div class="card-actions">
-                    <el-button v-if="card.status === 'active'" text type="warning" size="small" @click="handlePauseCard(card)">暂停</el-button>
+                    <!-- 顺延卡：activated_at 在未来 → 标记「待生效」并给提前激活入口 -->
+                    <el-tag v-if="isCardPending(card)" size="small" type="info" effect="plain">待生效 {{ formatDate(card.activated_at) }}</el-tag>
+                    <el-button
+                      v-if="isCardPending(card)"
+                      text
+                      type="primary"
+                      size="small"
+                      @click="handleActivateNow(card)"
+                    >提前激活</el-button>
+                    <el-button v-if="card.status === 'active' && !isCardPending(card)" text type="warning" size="small" @click="handlePauseCard(card)">暂停</el-button>
                     <!-- 转让：后端 /membership/card/:id/transfer 早已实现、卡种也已支持 transferable，
                          但此前无任何入口 —— 线下转让后系统无记录，受让人上课查无卡、账实不符 -->
                     <el-button
@@ -653,7 +662,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Plus, Search, UserFilled, School, CreditCard, Download, Upload, Finished, CaretBottom, Setting, ArrowDown } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
-import { getStudents, getStudentDetail, addStudent, updateStudent, deleteStudent, pauseCard, resumeCard, transferCard, getStudentOptions, getCardTypes, getSettings, saveSettings, getDashboard, getStudentTimeline, importStudents, getComments, addComment } from '@/api/modules'
+import { getStudents, getStudentDetail, addStudent, updateStudent, deleteStudent, pauseCard, resumeCard, transferCard, activateCardNow, getStudentOptions, getCardTypes, getSettings, saveSettings, getDashboard, getStudentTimeline, importStudents, getComments, addComment } from '@/api/modules'
 import ColumnSettingsDialog from '@/components/ColumnSettingsDialog.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -1316,6 +1325,38 @@ async function doTransfer() {
     // 拦截器已提示业务/网络错误
   } finally {
     transferSubmitting.value = false
+  }
+}
+
+/** 顺延卡是否尚未生效（按自然日：当天开卡当天可用） */
+function isCardPending(card) {
+  const act = Number(card && card.activated_at) || 0;
+  if (!act) return false;
+  const d = new Date(act);
+  const startOfTomorrow = new Date();
+  startOfTomorrow.setHours(0, 0, 0, 0);
+  startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
+  return act >= startOfTomorrow.getTime();
+}
+
+async function handleActivateNow(card) {
+  try {
+    await ElMessageBox.confirm(
+      `提前激活后，该卡**立即**开始计算有效期（原定 ${formatDate(card.activated_at)} 生效），`
+      + '同科目的在途旧卡将同时作废。确定继续吗？',
+      '提前激活',
+      { type: 'warning', confirmButtonText: '确认激活', confirmButtonClass: 'el-button--warning', dangerouslyUseHTMLString: false }
+    )
+  } catch (e) {
+    return // 用户取消
+  }
+  try {
+    const res = await activateCardNow(card.id)
+    const n = res && res.supersededCount ? res.supersededCount : 0
+    ElMessage.success(n ? `已激活，同时作废 ${n} 张同科目旧卡` : '已激活')
+    if (selectedStudent.value) loadStudentDetail(selectedStudent.value.id)
+  } catch (e) {
+    // 拦截器已提示业务/网络错误
   }
 }
 

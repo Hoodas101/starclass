@@ -13,6 +13,8 @@ const { generateId, success, fail, safeFail, getOpenId, getActor, recordAudit, n
 const { requireStaffPerm } = require('../middleware/authz');
 // 每次课消耗的课时数（courses.consume_classes）与扣课选卡：与手工扣课路径共用同一实现
 const { resolveConsumeClasses, pickCardForDeduction } = require('../utils/deduction');
+// 周期锚定（P2）：按卡实例的 period_anchor 切段，与 natural 旧口径共存
+const { periodBoundsForCard, effectiveCycleLimit } = require('../utils/card-lifecycle');
 // 考勤回滚共享原语（积分 / 扣课 / 收入结转的唯一实现）：
 // 「取消排期」路径（routes/schedules.js）也回滚同一批副作用，必须共用同一份代码，
 // 否则两条回滚路径会各写一份、口径日久漂移。
@@ -315,6 +317,8 @@ router.post('/teacher', (req, res) => {
           if (pointsEarned > 0) {
             addPoints(studentId, student.name, pointsEarned, 'checkin', scheduleId, `${status === 'late' ? '迟到' : '签到'}获得积分`);
           }
+          // P2：首次到店即锚点起点（仅 present/late 算"使用"）
+          if (status === 'present' || status === 'late') markFirstUse(studentId, now());
           // 次数卡学员首次签到自动扣课（幂等：同一排期+学员只扣一次；时效卡仅记录不扣次）
           // 补课/调课登记的学员不扣课时（原排期已扣或请假已扣）
           if (status === 'present' || status === 'late') {
@@ -528,10 +532,16 @@ function checkTimeCardVisitLimit(studentId, t, anchorDate) {
     return Number.isFinite(ms) ? ms : t;
   })();
   // 不限卡种：此前硬过滤 billing_mode='time'，导致「次卡」在卡种页可配到店限次却静默不生效
-  //（经营者以为已约束、实则空转）。现对次卡与时效卡一并校验，取最严档。
+  //（经营者以为已约束、实则空转）。现对次卡与时效卡一并校验。
+  //
+  // P2：周期改为**按卡实例自己的锚点**切段（natural / activated / first_use）。
+  // 不同卡可以有不同锚点，因此必须逐卡算各自的区间与已用次数，再取「最严」的那张，
+  // 不能像旧实现那样把所有卡的上限揉成两个全局数字 —— 那等于假设所有卡共用同一周期。
   const cards = db.prepare(`
-    SELECT visit_limit_per_week, visit_limit_per_month FROM member_cards
-    WHERE student_id = ? AND status = 'active' AND expires_at > ?
+    SELECT id, card_type_name, visit_limit_per_week, visit_limit_per_month,
+           activated_at, first_used_at, expires_at, period_anchor, cycle_days_week, cycle_days_month
+      FROM member_cards
+     WHERE student_id = ? AND status = 'active' AND expires_at > ?
   `).all(studentId, anchorMs);
   if (!cards.length) return null;
 
@@ -539,32 +549,67 @@ function checkTimeCardVisitLimit(studentId, t, anchorDate) {
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
   };
-  let weekLimit = 0;
-  let monthLimit = 0;
-  for (const c of cards) {
-    const w = pos(c.visit_limit_per_week);
-    if (w && (!weekLimit || w < weekLimit)) weekLimit = w;
-    const m = pos(c.visit_limit_per_month);
-    if (m && (!monthLimit || m < monthLimit)) monthLimit = m;
-  }
-  if (!weekLimit && !monthLimit) return null; // 全部不限次
+  const countIn = (fromDate, toDate) => db.prepare(`
+    SELECT COUNT(*) c FROM attendances
+    WHERE student_id = ? AND status IN ('present','late') AND date >= ? AND date <= ?
+  `).get(studentId, fromDate, toDate).c;
 
-  const { weekStart, weekEnd, month } = periodBounds(anchorMs);
-  if (weekLimit) {
-    const c = db.prepare(`
-      SELECT COUNT(*) c FROM attendances
-      WHERE student_id = ? AND status IN ('present','late') AND date >= ? AND date <= ?
-    `).get(studentId, weekStart, weekEnd).c;
-    if (c >= weekLimit) return `本周到店已达上限（${weekLimit} 次），如需加课请联系机构`;
-  }
-  if (monthLimit) {
-    const c = db.prepare(`
-      SELECT COUNT(*) c FROM attendances
-      WHERE student_id = ? AND status IN ('present','late') AND date LIKE ?
-    `).get(studentId, month + '%').c;
-    if (c >= monthLimit) return `本月到店已达上限（${monthLimit} 次），如需加课请联系机构`;
+  for (const card of cards) {
+    const weekLimit = pos(card.visit_limit_per_week);
+    const monthLimit = pos(card.visit_limit_per_month);
+    if (!weekLimit && !monthLimit) continue;
+
+    const bounds = periodBoundsForCard(card, anchorMs);
+    // first_use 且从未签到：没消费就不该受限
+    if (bounds && bounds.unlimited) continue;
+
+    // 周：锚定卡用固定 7 天段；natural 卡沿用自然周（周一为起点）
+    let weekSeg;
+    if (bounds) {
+      weekSeg = bounds.week;
+    } else {
+      const { weekStart, weekEnd } = periodBounds(anchorMs);
+      weekSeg = { startDate: weekStart, endDate: weekEnd, days: 7, cycleDays: 7 };
+    }
+    if (weekLimit && weekSeg) {
+      const limit = bounds ? effectiveCycleLimit(weekLimit, weekSeg) : weekLimit;
+      const used = countIn(weekSeg.startDate, weekSeg.endDate);
+      if (used >= limit) {
+        return `${card.card_type_name || '该卡'}本周到店已达上限（${limit} 次），如需加课请联系机构`;
+      }
+    }
+
+    // 月：锚定卡用固定 30 天段；natural 卡沿用自然月
+    let monthSeg;
+    if (bounds) {
+      monthSeg = bounds.month;
+    } else {
+      const m = formatDate(anchorMs).slice(0, 7);
+      monthSeg = { startDate: `${m}-01`, endDate: `${m}-31`, days: 30, cycleDays: 30 };
+    }
+    if (monthLimit && monthSeg) {
+      const limit = bounds ? effectiveCycleLimit(monthLimit, monthSeg) : monthLimit;
+      const used = countIn(monthSeg.startDate, monthSeg.endDate);
+      if (used >= limit) {
+        return `${card.card_type_name || '该卡'}本月到店已达上限（${limit} 次），如需加课请联系机构`;
+      }
+    }
   }
   return null;
+}
+
+/**
+ * 记录「首次实际使用」（P2）。
+ * first_use 锚点的周期从这一天起算，因此必须在**真实签到落库后**写，
+ * 而不是发卡时写 —— 发卡日与首次上课日经常差好几天。
+ * 只写 0 值的卡：已有首次使用时间的卡不覆盖（锚点不能漂移）。
+ */
+function markFirstUse(studentId, t) {
+  db.prepare(`
+    UPDATE member_cards SET first_used_at = ?, updated_at = ?
+     WHERE student_id = ? AND COALESCE(first_used_at, 0) = 0
+       AND status = 'active' AND (COALESCE(activated_at, 0) = 0 OR activated_at <= ?)
+  `).run(t, t, studentId, t);
 }
 
 /**
@@ -669,6 +714,8 @@ router.post('/parent', (req, res) => {
         t, earned, schedule.date, t, t);
 
       addPoints(studentId, student.name, earned, 'checkin', scheduleId, '家长扫码签到获得积分');
+      // P2：家长扫码签到同样是「首次使用」，锚点要从这一天起算
+      markFirstUse(studentId, t);
       // 次数卡扣课（与教练点名同一规则，幂等）
       try {
         applyArrivalDeduction(studentId, scheduleId, t);
