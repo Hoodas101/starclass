@@ -168,3 +168,77 @@ jobs:
             exit 1
           fi
           echo "无运行数据入库。"
+
+  visual-sweep:
+    name: 视觉巡检（渲染 + 截图对比）
+    # 目的：在真实 Chromium 里把每个页面都渲染一遍，门禁只盯「平台无关」的硬信号——
+    #   控制台 error、>=400 的请求、各断点下的横向溢出。
+    # 像素 diff 对字体/平台敏感，故 CI 不按漂移失败（--update 仅采集+报告）；
+    # 开发者在本机（与基线同机）跑 `npm run visual:sweep` 才是像素回归门禁。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 安装后端依赖
+        working-directory: backend
+        run: npm ci
+
+      - name: 安装前端依赖
+        working-directory: web-admin
+        run: npm ci
+
+      - name: 安装 Playwright Chromium
+        working-directory: web-admin
+        run: npx playwright install --with-deps chromium
+
+      - name: 构建前端
+        working-directory: web-admin
+        run: npm run build
+
+      - name: 准备隔离示例库
+        env:
+          DB_PATH: /tmp/ci-visual.db
+        working-directory: backend
+        run: node db/seed.js
+
+      - name: 启动后端（隔离库）
+        env:
+          DB_PATH: /tmp/ci-visual.db
+          PORT: '3001'
+          NODE_ENV: development
+        working-directory: backend
+        run: node server.js &
+        # 后台启动；下面用探针等待就绪
+
+      - name: 启动静态前端服务
+        working-directory: web-admin
+        run: node ../tools/serve-ui.mjs &
+
+      - name: 等待服务就绪
+        run: |
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:3001/api/health >/dev/null 2>&1; then echo "backend up"; break; fi
+            sleep 1
+          done
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:3000 >/dev/null 2>&1; then echo "ui up"; break; fi
+            sleep 1
+          done
+
+      - name: 运行视觉巡检（采集 + 报告）
+        working-directory: web-admin
+        env:
+          ADMIN_PHONE: '13800000001'
+          ADMIN_PASS: 'Demo@2026'
+        run: node tests/visual-sweep.mjs --update
+
+      - name: 上传巡检截图与报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-sweep
+          path: web-admin/tests/shots/
+          retention-days: 14

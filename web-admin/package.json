@@ -6,7 +6,10 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node tests/table-utils.test.mjs && node tests/static-checks.test.mjs"
+    "test": "node tests/table-utils.test.mjs && node tests/static-checks.test.mjs",
+    "visual:serve": "node ../tools/serve-ui.mjs",
+    "visual:update": "node tests/visual-sweep.mjs --update",
+    "visual:sweep": "node tests/visual-sweep.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.0",
@@ -21,6 +24,9 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.0",
+    "pixelmatch": "^6.0.0",
+    "pngjs": "^7.0.0",
+    "playwright": "^1.48.0",
     "sass": "^1.70.0",
     "unplugin-auto-import": "^0.17.0",
     "unplugin-vue-components": "^0.26.0",

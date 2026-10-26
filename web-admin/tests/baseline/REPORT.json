@@ -1,0 +1,1060 @@
+{
+  "mode": "capture",
+  "timestamp": "2026-10-26T07:45:15.940Z",
+  "baseUrl": "http://127.0.0.1:3000",
+  "viewport": "1440x900, breakpoints:1280/1024/768/390",
+  "summary": {
+    "total": 36,
+    "ok": 36,
+    "minor": 0,
+    "changed": 0,
+    "issue": 0,
+    "newBaseline": 0
+  },
+  "pages": [
+    {
+      "id": "login",
+      "path": "/login",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "dashboard",
+      "path": "/dashboard",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 144
+        },
+        {
+          "width": 390,
+          "overflow": 522
+        }
+      ],
+      "worstOverflow": 522,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "ops-classes",
+      "path": "/operations?tab=classes",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "ops-schedule",
+      "path": "/operations?tab=schedule",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "ops-checkin",
+      "path": "/operations?tab=checkin",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "ops-leave",
+      "path": "/operations?tab=leave",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "ops-attendance",
+      "path": "/operations?tab=attendance",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "ops-makeup",
+      "path": "/operations?tab=makeup",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "students-main",
+      "path": "/students?tab=students",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "students-drawer",
+      "path": "/students?tab=students",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "students-points",
+      "path": "/students?tab=points",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "sales-orders",
+      "path": "/sales?tab=orders",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "sales-products",
+      "path": "/sales?tab=products",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "products-card-dialog",
+      "path": "/sales?tab=products",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "sales-products-goods",
+      "path": "/sales?tab=products",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "sales-products-goods-dialog",
+      "path": "/sales?tab=products",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "sales-finance",
+      "path": "/sales?tab=finance",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "sales-growth",
+      "path": "/sales?tab=growth",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "sales-trial",
+      "path": "/sales?tab=trial",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "parents-dir",
+      "path": "/parents?tab=parents",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "parents-notif",
+      "path": "/parents?tab=notifications",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "parents-feedback",
+      "path": "/parents?tab=feedback",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "staff-employees",
+      "path": "/staff?tab=staff",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "staff-coachstats",
+      "path": "/staff?tab=coachstats",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "profile",
+      "path": "/profile",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "settings-default",
+      "path": "/settings",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "settings-机构信息",
+      "path": "/settings",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "settings-称呼设置",
+      "path": "/settings",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "settings-积分规则",
+      "path": "/settings",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "settings-推送规则",
+      "path": "/settings",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "settings-退费规则",
+      "path": "/settings",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "settings-订阅卡规则",
+      "path": "/settings",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "settings-请假规则",
+      "path": "/settings",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "settings-看板设置",
+      "path": "/settings",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "settings-数据备份",
+      "path": "/settings",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    },
+    {
+      "id": "settings-操作日志",
+      "path": "/settings",
+      "status": "ok",
+      "consoleErrors": [],
+      "failedRequests": [],
+      "overflow": [
+        {
+          "width": 1280,
+          "overflow": 0
+        },
+        {
+          "width": 1024,
+          "overflow": 0
+        },
+        {
+          "width": 768,
+          "overflow": 0
+        },
+        {
+          "width": 390,
+          "overflow": 0
+        }
+      ],
+      "worstOverflow": 0,
+      "baseOverflow": 0,
+      "diffPct": null,
+      "baselineExists": true
+    }
+  ]
+}

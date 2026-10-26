@@ -69,3 +69,7 @@ docs/产品说明书.md
 *.swo
 .DS_Store
 Thumbs.db
+
+# 视觉巡检：运行产物不入库，仅提交基线（对比基准）
+web-admin/tests/shots/
+web-admin/tests/baseline/*.diff.png
