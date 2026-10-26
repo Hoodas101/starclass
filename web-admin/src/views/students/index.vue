@@ -349,13 +349,16 @@
                         <template v-if="card.billing_mode === 'count'">· 剩余 {{ card.remaining_classes }} 次</template>
                         <template v-else>· 时效制不限次数</template>
                       </span>
+                      <!-- 待生效优先于「进行中」：顺延卡的 status 也是 active，
+                           两者并排会出现「进行中 + 待生效」这种自相矛盾的状态 -->
                       <StatusDot
-                        :tone="isCardExpired(card) ? 'neutral' : (card.status === 'active' ? 'success' : card.status === 'paused' ? 'warning' : 'neutral')"
-                        :label="isCardExpired(card) ? '已过期' : (card.status === 'active' ? '进行中' : card.status === 'paused' ? '已暂停' : '已失效')"
+                        :tone="isCardPending(card) ? 'neutral' : (isCardExpired(card) ? 'neutral' : (card.status === 'active' ? 'success' : card.status === 'paused' ? 'warning' : 'neutral'))"
+                        :label="isCardPending(card) ? '待生效' : (isCardExpired(card) ? '已过期' : (card.status === 'active' ? '进行中' : card.status === 'paused' ? '已暂停' : '已失效'))"
                         subtle
                       />
                     </div>
                     <span class="card-date">
+                      <template v-if="isCardPending(card)">生效 {{ formatDate(card.activated_at) }} · </template>
                       {{ card.expires_at ? '到期 ' + formatCardExpiry(card.expires_at) : '未激活' }}
                       <template v-if="card.pause_total_ms"> · 已顺延 {{ Math.round(card.pause_total_ms / 86400000) }} 天</template>
                     </span>
@@ -364,8 +367,7 @@
                     </span>
                   </div>
                   <div class="card-actions">
-                    <!-- 顺延卡：activated_at 在未来 → 标记「待生效」并给提前激活入口 -->
-                    <el-tag v-if="isCardPending(card)" size="small" type="info" effect="plain">待生效 {{ formatDate(card.activated_at) }}</el-tag>
+                    <!-- 顺延卡：状态位显示「待生效」、日期行显示生效日，这里只给操作入口 -->
                     <el-button
                       v-if="isCardPending(card)"
                       text
@@ -1342,7 +1344,7 @@ function isCardPending(card) {
 async function handleActivateNow(card) {
   try {
     await ElMessageBox.confirm(
-      `提前激活后，该卡**立即**开始计算有效期（原定 ${formatDate(card.activated_at)} 生效），`
+      `提前激活后，该卡立即开始计算有效期（原定 ${formatDate(card.activated_at)} 生效），`
       + '同科目的在途旧卡将同时作废。确定继续吗？',
       '提前激活',
       { type: 'warning', confirmButtonText: '确认激活', confirmButtonClass: 'el-button--warning', dangerouslyUseHTMLString: false }

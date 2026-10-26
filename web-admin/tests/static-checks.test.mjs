@@ -130,5 +130,41 @@ console.log('\n[5] 设计令牌唯一性')
   rec('★ 弹窗遮罩走 --t-scrim（浅深主题各自可见）', scrimOk, overlay ? overlay[0].slice(0, 80) : '未找到 .el-overlay')
 }
 
+// ===== [6] 样式层叠与组件样式完整性 =====
+// 这两条都是「渲染出来才发现」的缺陷，静态检查能提前挡住：
+//   · 基规则用 !important 时，修饰规则若不带 !important 就永远不生效（文字按钮被画成实心块）；
+//   · 按需引入时 ElFormItem 解析到 form 目录，el-form-item.css 不在包里（全站表单没行间距）。
+console.log('\n[6] 样式层叠与组件样式完整性')
+{
+  // 先剥掉注释：注释里常引用「旧写法」做对照（如 `.el-button.is-text { color: accent }`），
+  // 不剥会被当成真实代码，守卫就变成误报源。
+  const scss = read(path.join(SRC, 'styles/index.scss'))
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+
+  // 6-1 若 .el-button--primary 的 background 带 !important，
+  //     则 .el-button.is-text.el-button--primary 也必须带，否则修饰规则被压制
+  // 只看「嵌套块之前」的顶层声明：块内还有 &:hover，其中同样写了
+  // background: ... !important，直接对整块取正则会把 hover 的 !important 误当成主体声明
+  //（守卫会永远 PASS，等于没有守卫）。
+  const topDecls = (block) => (block ? block.slice(block.indexOf('{') + 1).split('&')[0] : '')
+  const baseBlock = scss.match(/\.el-button--primary\s*\{[^}]*\}/)
+  const baseImportant = /background\s*:[^;]*!important/.test(topDecls(baseBlock && baseBlock[0]))
+  const modBlock = scss.match(/\.el-button\.is-text\.el-button--primary\s*\{[^}]*\}/)
+  const modImportant = /background\s*:[^;]*!important/.test(topDecls(modBlock && modBlock[0]))
+  rec('★ 文字型主按钮的修饰规则不被 !important 压制', !baseImportant || modImportant,
+    baseImportant && !modImportant ? '基规则带 !important，修饰规则未带 → 会被渲染成实心按钮' : '')
+
+  // 6-2 文字按钮的默认色必须限定「无 type」，否则会盖掉 warning/danger 等语义色
+  const plainTextBtn = scss.match(/\.el-button\.is-text(?![\.\w-])\s*\{[^}]*color/ )
+  rec('★ 文字按钮默认色不覆盖语义类型色', !plainTextBtn,
+    plainTextBtn ? '.el-button.is-text 无条件设 color，会盖掉 warning/danger 语义色' : '')
+
+  // 6-3 ElFormItem 的样式必须显式引入（按需解析器只带 el-form.css）
+  const main = read(path.join(SRC, 'main.js'))
+  rec('★ 已显式引入 el-form-item 样式', main.includes('form-item/style/css'),
+    main.includes('form-item/style/css') ? '' : 'main.js 缺 form-item/style/css → 表单无行间距、错误提示错位')
+}
+
 console.log(`\n结果汇总：PASS ${pass}  FAIL ${fail}`)
 process.exit(fail > 0 ? 1 : 0)

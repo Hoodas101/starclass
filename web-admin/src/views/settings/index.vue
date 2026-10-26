@@ -2043,6 +2043,15 @@ const loadSettings = async () => {
   margin-left: 10px;
   font-size: var(--t-fs-xs);
   color: var(--t-text-3);
+  line-height: 1.6;
+}
+
+// 多行说明（公式变量/示例）：单独成块并换行，不跟在控件右侧挤成一行
+.form-hint--block {
+  display: block;
+  margin-left: 0;
+  margin-top: 6px;
+  line-height: 1.7;
 }
 
 .rule-tag {

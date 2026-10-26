@@ -530,17 +530,37 @@ html[data-theme='dark'] .el-table th.el-table__cell {
   }
 }
 
-.el-button.is-text {
+// 文字按钮的默认色：**只给未指定 type 的那些**。
+//
+// 原写法 `.el-button.is-text { color: accent }` 是无条件覆盖，把 Element Plus 按
+// 类型给的语义色一并盖掉 —— `text type="warning"` 的「暂停」会渲染成强调蓝，
+// 用户看到的是「蓝色暂停」，语义色等于失效。
+// 注意不能写 `:not([class*="el-button--"])`：尺寸类（el-button--small）也带这个前缀，
+// 那样会连默认色一起排除掉，所以逐类型排除。
+.el-button.is-text:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):not(.el-button--info) {
   color: var(--t-accent-text);
 }
 
+// 文字型主按钮（text + type=primary）：必须带 !important 才能生效。
+//
+// 原因：上面的 .el-button--primary 为了压住 Element Plus 的默认样式，给
+// background / border / color 都加了 !important。带 !important 的声明不参与
+// 「特异性比较」，只比特异性更高的 !important 才盖得住 —— 于是这条修饰规则
+// （不带 !important）**完全失效**：全站 7 处「文字型主按钮」被渲染成实心蓝块，
+// 比真正的主操作还重（学员卡里的「提前激活/转让」比「暂停」还显眼）。
+//
+// 这里补齐 !important 而不去动上面那条基规则：基规则是 27 个页面的视觉基线，
+// 拆它的 !important 会连带改变所有主按钮与 Element Plus 的层叠关系。
 .el-button.is-text.el-button--primary {
-  color: var(--t-accent-text);
-  background: var(--t-accent-bg);
+  color: var(--t-accent-text) !important;
+  background: var(--t-accent-bg) !important;
+  border-color: transparent !important;
 
   &:hover {
-    color: var(--t-accent-strong);
-    background: color-mix(in srgb, var(--t-accent) 12%, transparent);
+    color: var(--t-accent-strong) !important;
+    background: color-mix(in srgb, var(--t-accent) 22%, transparent) !important;
+    transform: none;
+    box-shadow: none;
   }
 }
 
@@ -637,7 +657,12 @@ html[data-theme='dark'] .el-table th.el-table__cell {
     // 长表单弹窗必须可滚动：此前只声明 padding，styles/ 全目录 grep max-height 零命中，
     // 1280×720 下「添加员工」等长表单弹窗底部「保存」按钮溢出视口 +220px 且完全不可滚 → 无法提交，
     // 必填校验的红字也落在视口外。一处修复覆盖全站所有弹窗。
-    max-height: calc(100vh - 260px);
+    // 必须按「视口高度 - 上边距 - 头尾」算，不能只减固定像素：
+    // Element Plus 的弹窗上边距是 15vh，会随窗口高度变化。此前写死 260px，
+    // 在 1440×900 下弹窗总高 820 + 上边距 135 → 底部溢出视口 15px，
+    // 末行表单被切在滚动边界上，看起来像渲染坏了。
+    // 85vh 留出 15vh 上边距，再减 header+footer（约 180px）与余量。
+    max-height: calc(85vh - 200px);
     overflow-y: auto;
   }
 
@@ -665,22 +690,23 @@ html[data-theme='dark'] .el-table th.el-table__cell {
   }
 }
 
+// 表单说明文字：行高必须显式给定。
+// 补回 el-form-item.css 后，.el-form-item__content 带上了 line-height: 32px，
+// 多行说明（公式变量、示例）会被撑成一大片散字，读起来像段落被拆开。
+.form-hint {
+  line-height: 1.6;
+}
+
 .el-form-item__label {
   color: var(--t-text-2) !important;
   font-size: $fs-base !important;
   font-weight: 500;
 }
 
-// 必填红星（P1）：此前全站 8 个核心表单的 23 个必填项都看不到星号。
-// 根因不是「没写星号规则」，而是 Element Plus 按需引入时 ElFormItem 被解析到
-// form 目录，其 style/css 只 import 了 el-form.css（仅含 inline 表单规则），
-// el-form-item.css 整份没有进包 —— 星号规则（以及标签布局/错误提示）一起丢失。
-// 这里把星号规则显式补回；选择器与 EP 源码保持同构，靠元素链特异性压过上方覆写。
-.el-form-item.is-required:not(.is-no-asterisk).asterisk-left > .el-form-item__label::before {
-  content: '*';
-  color: var(--el-color-danger, var(--t-danger));
-  margin-right: 4px;
-}
+// 必填红星：曾在这里手写补过一条 ::before 规则（当时 el-form-item.css 整份没进包）。
+// 现在 main.js 已显式引入 form-item 样式，星号由 Element Plus 原生规则提供，
+// 这条手写规则就成了「同一决定的第二份实现」—— 删掉，只留 EP 一份。
+// 需要调星号颜色时改 --el-color-danger，不要在这里重写 content。
 
 .el-dialog,
 .el-drawer {

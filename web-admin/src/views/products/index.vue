@@ -32,6 +32,9 @@
               <el-tag v-if="row.billing_mode === 'count'" size="small" effect="light" type="warning" style="margin-left: 6px">按次</el-tag>
               <el-tag v-else size="small" effect="light" type="info" style="margin-left: 6px">时效</el-tag>
               <el-tag v-if="row.transferable" size="small" effect="plain" type="success" style="margin-left: 6px">可转让</el-tag>
+              <!-- 顺延与可转让同属「会影响实际权益的开关」，列表上要能一眼看到，
+                   否则只能逐个点进弹窗才知道这个卡种会不会排队 -->
+              <el-tag v-if="row.defer_enabled" size="small" effect="plain" type="primary" style="margin-left: 6px">顺延</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="权益" min-width="160">
@@ -153,8 +156,11 @@
               :value-on-clear="0"
               class="limit-input"
             />
-            <span class="unit-text">次 / 月（0 表示不限）</span>
+            <span class="unit-text">次 / 月</span>
           </div>
+          <!-- 「0 表示不限」单独成行：塞在单位后面会把「次 / 月」挤到下一行，
+               单位与它对应的输入框脱开，读起来像是两个不同的字段 -->
+          <span class="limit-hint">两项填 0 表示不限次数</span>
         </el-form-item>
         <el-form-item label="赠送积分" prop="pointsReward">
           <el-input-number v-model="cardForm.pointsReward" :min="0" :max="10000" />
@@ -463,16 +469,27 @@ onMounted(loadCourses)
   margin-left: 8px;
   font-size: var(--t-fs-xs);
   color: var(--t-text-3);
+  // 单位是固定短语（次 / 周），不允许被 flex 压成两行
+  white-space: nowrap;
 }
 
 .limit-range {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;   // 窄容器时整组换行，而不是把「次 / 周」压断
   gap: 8px;
 }
 
 .limit-input {
   width: 90px;
+}
+
+.limit-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: var(--t-fs-xs);
+  color: var(--t-text-3);
+  line-height: 1.6;
 }
 
 :deep(.el-dialog__footer) {

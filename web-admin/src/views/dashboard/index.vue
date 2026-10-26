@@ -775,9 +775,14 @@ const initProductDonut = () => {
     series: [
       {
         type: 'pie',
-        radius: ['52%', '76%'],
+        // 半径收小一档：卡片宽约 330px，原 76% 环径 198px 只给两侧留 66px，
+        // 而「1v1私教次卡 22.6%」这类标签约 70px → 被画布裁掉半截（实测右侧文字被切断）。
+        // 收到 64% 后两侧各留 82px，标签完整可读；不改为「标签塞进环内」是因为
+        // 环宽仅 20%，放不下「名称 + 百分比」，而只留百分比又退回纯颜色编码。
+        radius: ['44%', '64%'],
         center: ['50%', '50%'],
         avoidLabelOverlap: true,
+        labelLayout: { hideOverlap: true },
         itemStyle: { borderColor: cssVar('--t-surface'), borderWidth: 3, borderRadius: 6 },
         // 环图此前纯靠颜色编码且 label 关闭 —— 色觉障碍用户无法读出任何占比。
         // 直接显示「名称 + 百分比」作为非颜色区分手段。
@@ -785,7 +790,12 @@ const initProductDonut = () => {
           show: true,
           color: cssVar('--t-text-2'),
           fontSize: 11,
-          formatter: '{b} {d}%'
+          // 名称与百分比分两行：单行「名称 24.32%」在 330px 的卡片里必然被裁成
+          // 「时效月卡 24....」（百分比先丢），分行后宽度只需容纳名称本身。
+          formatter: '{b}\n{d}%',
+          lineHeight: 15,
+          width: 96,
+          overflow: 'break'
         },
         labelLine: { show: true, length: 8, length2: 8, lineStyle: { color: cssVar('--t-line-strong') } },
         emphasis: {

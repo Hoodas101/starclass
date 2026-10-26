@@ -263,7 +263,9 @@ router.get('/card-types', (req, res) => {
     }
     const { type } = req.query;
     // 带上到店限次字段：管理端产品页需要展示/回填，否则「已设置限次」在列表里看不见
-    let sql = `SELECT id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, transferable, refundable, is_active, product_type, unit, description, visit_limit_per_week, visit_limit_per_month
+    // 订阅卡三字段必须一并返回：产品页表单靠它回填，缺了会「显示成默认值 →
+    // 用户点保存 → 已配好的顺延/锚点/公式被静默改回默认」（写侧是 COALESCE，传默认值就真的覆盖了）
+    let sql = `SELECT id, name, total_classes, valid_days, billing_mode, points_reward, price, course_scope, transferable, refundable, is_active, product_type, unit, description, visit_limit_per_week, visit_limit_per_month, defer_enabled, period_anchor, refund_formula
       FROM membership_cards`;
     const params = [];
     if (type === 'membership' || type === 'goods') {

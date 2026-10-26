@@ -928,7 +928,11 @@ router.get('/:id', requireAuth, (req, res) => {
         (SELECT ct.transferable FROM membership_cards ct WHERE ct.id = member_cards.card_type_id) AS transferable,
         -- 顺延卡：activated_at 在未来 → 前端展示「待生效 + 生效日期」并给「提前激活」入口
         activated_at, deferred_from_card_id
-      FROM member_cards WHERE student_id = ? ORDER BY created_at DESC
+      FROM member_cards WHERE student_id = ?
+      -- 待生效的顺延卡排到最后：按创建时间倒序会把「还不能用」的卡顶到最前，
+      -- 学员当前真正在用的那张被挤下去，前台要滑一下才看得见。
+      -- 判据与前端 isCardPending 一致：activated_at 在未来（毫秒 epoch，用 SQLite 当前秒×1000 比较）。
+      ORDER BY (COALESCE(activated_at, 0) > CAST(strftime('%s','now') AS INTEGER) * 1000) ASC, created_at DESC
     `).all(id);
     // 积分（仅返回余额）
     const points = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(id);
