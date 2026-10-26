@@ -435,7 +435,7 @@ onMounted(() => {
 // ============ 角色选择 ============
 .role-group {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 10px;
   margin-bottom: 26px;
 }

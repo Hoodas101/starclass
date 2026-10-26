@@ -740,7 +740,7 @@ const loadStats = async () => {
 
 const studentColumnDefs = [
   // sortable: false —— 序号是展示位次，排序它没有意义；filterable 用于列宽计算时预留筛选触发器占位
-  { key: 'seq', label: '序号', minWidth: 56, align: 'center', sortable: false },
+  { key: 'seq', label: '序号', minWidth: 64, align: 'center', sortable: false, tooltip: true },
   // fixed:'left' 只加在最左侧的「姓名」上。
   // 需求原本希望固定「当前项目/剩余课时/到期日」，但 Element Plus 的固定列会被
   // 抽到独立的左固定层、按 DOM 顺序排在非固定列之前 —— 固定中间列会直接改变列序
@@ -749,9 +749,10 @@ const studentColumnDefs = [
   { key: 'info', label: '姓名', minWidth: 100, tooltip: true, fixed: 'left' },
   { key: 'memberNo', label: t('learner') + '编号', minWidth: 90, align: 'left' },
   // minWidth 130：11 位手机号在 110px 下会被省略号截断（无 tooltip 时看不到全号）
-  { key: 'phone', label: '联系方式', minWidth: 130, tooltip: true },
+  // minWidth 140：11 位手机号在窄列下会被省略号截断（tooltip 兜底全号可见）
+  { key: 'phone', label: '联系方式', minWidth: 140, tooltip: true },
   { key: 'age', label: '年龄', minWidth: 56, align: 'right' },
-  { key: 'birthday', label: '出生日期', minWidth: 100, align: 'left' },
+  { key: 'birthday', label: '出生日期', minWidth: 120, align: 'left', tooltip: true },
   { key: 'level', label: '训练级别', minWidth: 80, align: 'left' },
   { key: 'project', label: '当前项目', minWidth: 120, tooltip: true, filterable: true },
   { key: 'remaining', label: '剩余课时/次数', minWidth: 100, align: 'right' },
@@ -760,7 +761,9 @@ const studentColumnDefs = [
   { key: 'latestPurchase', label: '新购日期', minWidth: 100 },
   { key: 'purchaseCount', label: '购买次数', minWidth: 72, align: 'right' },
   { key: 'spent', label: '累计消费', minWidth: 100, align: 'right', tooltip: true },
-  { key: 'join', label: '加入时间', minWidth: 100 },
+  // 加入时间形如 2026-10-26 13:30（16 字符），minWidth 必须 >= 实际渲染宽度，
+  // 否则整页密集列被压缩到 100 时会被省略号截断；tooltip 兜底可见完整值
+  { key: 'join', label: '加入时间', minWidth: 160, tooltip: true },
   { key: 'lastActivity', label: '最近活跃', minWidth: 90, align: 'right' },
   { key: 'status', label: '状态', minWidth: 80, align: 'center', filterable: true },
 ]

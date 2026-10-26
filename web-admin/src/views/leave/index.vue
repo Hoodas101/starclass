@@ -28,7 +28,7 @@
         <el-table-column label="活动" min-width="140"  show-overflow-tooltip>
           <template #default="{ row }">{{ row.course_name }}</template>
         </el-table-column>
-        <el-table-column label="请假时间" min-width="130" >
+        <el-table-column label="请假时间" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">{{ row.date }} {{ row.start_time }}</template>
         </el-table-column>
         <el-table-column label="请假原因" min-width="160"  show-overflow-tooltip>
@@ -37,7 +37,7 @@
         <el-table-column label="家长电话" min-width="120" >
           <template #default="{ row }">{{ row.parent_phone || '-' }}</template>
         </el-table-column>
-        <el-table-column label="申请时间" min-width="100" >
+        <el-table-column label="申请时间" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
         </el-table-column>
         <el-table-column label="状态" min-width="100">

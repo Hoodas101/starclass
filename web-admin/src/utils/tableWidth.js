@@ -88,7 +88,14 @@ export const resolveColumnWidths = (colDefs, customWidths, autoWidths) => {
   const hasCustom = colDefs.some((c) => isCustomWidth(customWidths, c.key))
   const out = {}
   for (const col of colDefs) {
-    const w = isCustomWidth(customWidths, col.key) ? customWidths[col.key] : autoWidths[col.key]
+    // 非手动列：绑定宽度 = max(自适应实测, 列定义 minWidth)。
+    // 此前只取 autoWidths[key]，会把列定义里显式写明的 minWidth 覆盖掉，
+    // 而 autoWidths 的 cellPadding(20) 又略小于 Element Plus .cell 实际左右内边距(各 12px)，
+    // 导致密集表格下部分列被压到比内容还窄 → 出现省略号截断（审计发现的学员表/请假表缺陷）。
+    // 取两者较大值：自适应够宽时不动，自适应偏窄时退回列定义的保底宽度，绝不把列压到作者意图之下。
+    const w = isCustomWidth(customWidths, col.key)
+      ? customWidths[col.key]
+      : Math.max(autoWidths[col.key] || 0, col.minWidth || 0)
     const fallback = col.minWidth || 80
     out[col.key] = hasCustom ? { width: w || fallback } : { minWidth: w || fallback }
   }

@@ -5,6 +5,46 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased] — 2026-10-26 视觉巡检（Task B）：全 36 页审查 + 列宽截断修复（未发布）
+
+把 Playwright 截图对比纳入常规流程，并系统审查全部页面，定位并修复视觉缺陷、确认无安全漏洞。
+
+### 一、常规化：截图对比纳入 CI / 本地门禁
+
+- 新增 `web-admin/tests/visual-sweep.mjs`：可复用截图巡检（API 登录注入 token、遍历 36 页、采集
+  console 错误 / ≥400 响应 / 4 档断点 1280·1024·768·390 横向溢出 / 与 baseline 像素 diff），输出 REPORT.json + REPORT.md；
+  硬问题（⛔）必失败，`--fail-on-diff` 让像素漂移（🔺≥1.5%）失败。
+- 新增 `tools/serve-ui.mjs`：仓库内静态服务，代理 `/api` 到后端，CI 与本地复用。
+- `package.json` 增加 `visual:serve` / `visual:update` / `visual:sweep` 脚本及 playwright / pixelmatch / pngjs 开发依赖。
+- `.github/workflows/ci.yml` 增加 `visual-sweep` 作业：构建前端 → seed 隔离库 → 启动后端 + 静态服务 →
+  跑 `--update` 采集基线并上传 `tests/shots/` 产物（CI 不卡像素漂移，平台字体敏感；本地 `--fail-on-diff` 为真实闸门）。
+- 提交 36 页 baseline 作为后续对比基准（运行产物 `tests/shots/` 与 `baseline/*.diff.png` 已 gitignore）。
+
+### 二、审查结论：安全无漏洞
+
+- 全仓 grep + 读码确认：无 `v-html` / `innerHTML` / `eval` / `new Function` / `dangerouslySetInnerHTML`。
+- 两处 `document.write` 打印视图（签到表、收据）均对动态字段做 `escapeHtml`，无 XSS。
+- 导出 / 备份 / JSON 导入 / 恢复等端点全部 `isAdminReq` 守卫；`isAdminReq` 由 JWT 校验后的 openid 推导角色，
+  前端无法伪造越权（已核对 `backend/utils/index.js` 的 `getOpenId` / `verifyToken` 显式忽略客户端 `x-openid`）。
+
+### 三、修复的视觉缺陷（已程序化验证 scrollWidth ≤ clientWidth）
+
+- **学员表列被省略号截断**：`resolveColumnWidths` 此前只用 `autoWidths` 覆盖列定义 `minWidth`，而
+  `computeAutoWidths` 的 `cellPadding(20)` 略小于 Element Plus `.cell` 实际左右内边距（各 12px），
+  密集表格下列被压窄 → `联系方式 / 出生日期 / 加入时间 / 序号` 截断。改为取
+  `max(自适应实测, 列定义 minWidth)` 作为保底宽度（全表受益）；并上调 `联系方式(130→140) /
+  出生日期(100→120) / 加入时间(100→160)` 的 minWidth 且加 `tooltip`。修复后该页截断单元格 30 → 0。
+- **请假表「请假时间」截断**：`"2026-10-26 13:30"` 超出 min-width 130 被截断 → 提至 160 并加
+  `show-overflow-tooltip`（「申请时间」同改，min-width 100→160）。
+- **登录页角色网格幽灵第 4 列**：`grid-template-columns: repeat(4, 1fr)` 但只有 3 个角色 chip →
+  改为 `repeat(3, 1fr)`。
+
+### 验证
+
+- 全 36 页 `--update` 巡检：✅36 / ⛔0（无 console 错误、无 ≥400、无横向溢出、无失败请求）。
+- 截断探针（程序化测 `scrollWidth` vs `clientWidth`）：学员表 30 → 0；请假表「请假时间」归零；登录网格 3 列 = 3 chip。
+- 「请假原因」等长自由文本列仍按设计以 `show-overflow-tooltip` 截断、悬停看全文，非缺陷。
+
 ## [Unreleased] — 2026-10-26 订阅卡功能线：真实渲染验收与 UI 修复
 
 上一轮只跑了构建与单测，没有在浏览器里看过实际渲染。本轮用 Playwright（生产构建 + 独立演示库）
