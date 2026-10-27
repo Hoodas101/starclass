@@ -26,6 +26,8 @@
 - **P0-6 退卡不冲销已结转收入**：抽出 `revertRecognitionForCard(cardId, orderId)`，退卡事务内调用，
   与订单退款收敛为同一实现。
 - **P0-7 必填字段传对象 → 500**：抽 `isScalarId()` 等校验，ID/数值类型非法统一 `200 + code!=0` 并带字段名。
+  补丁外复核发现 `/feedback/apply`（`content.trim()` 遇对象抛错）与 `/makeup/assign`（ID 传对象直达 SQL 绑定）
+  两处遗漏，已按同一口径补齐（探针 4/4：对象/数组入参均返回 `200 + code!=0`，不再 500）。
 - **P0-8 销售可冒名挂业绩**：非管理员建单**直接忽略 `salesperson` 入参**，强制 `myStaffName(req)`
   （此前 `||` 兜底永不生效）。
 - **P0-9 班级通知越权**：新增 `canManageClass()`（非管理员须为本班班主任或授课教练）+ 标题/内容长度校验

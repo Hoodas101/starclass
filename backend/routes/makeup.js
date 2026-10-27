@@ -182,7 +182,11 @@ router.post('/assign', (req, res) => {
   try {
     if (!isCoachReq(req)) return res.status(403).json(safeFail('仅管理员或教练可安排补课'));
     const { studentId, originalScheduleId, makeupScheduleId, note = '' } = req.body;
-    if (!studentId || !makeupScheduleId) return res.json(fail('缺少学员或补课排期'));
+    // P0-7：ID 必须是标量。传对象/数组会被 better-sqlite3 拒绝绑定而抛 TypeError → HTTP 500，
+    // 把「参数非法」误报成「服务器故障」。此前只判真值，对象能绕过。
+    const isScalarId = (v) => (typeof v === 'string' && v.trim() !== '') || (typeof v === 'number' && Number.isFinite(v));
+    if (!isScalarId(studentId) || !isScalarId(makeupScheduleId)) return res.json(fail('缺少学员或补课排期'));
+    if (originalScheduleId && !isScalarId(originalScheduleId)) return res.json(fail('原排期ID格式不正确'));
 
     const r = assignOne({ studentId, originalScheduleId, makeupScheduleId, note, openid: req.openid || '' });
     if (r.err) return res.json(fail(r.err));

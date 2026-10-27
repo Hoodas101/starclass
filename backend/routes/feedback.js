@@ -22,7 +22,9 @@ router.post('/apply', (req, res) => {
     const openid = getOpenId(req);
     if (!openid) return res.status(401).json(safeFail('未登录'));
     const { content, contact = '' } = req.body;
-    if (!content || !content.trim()) return res.json(fail('请填写反馈内容'));
+    // P0-7：content/contact 必须是字符串。传对象时 .trim() 抛 TypeError → HTTP 500。
+    if (typeof content !== 'string' || !content.trim()) return res.json(fail('请填写反馈内容'));
+    if (typeof contact !== 'string') return res.json(fail('联系方式格式不正确'));
     if (content.trim().length > 500) return res.json(fail('反馈内容过长（500 字以内）'));
 
     const user = db.prepare('SELECT nickname FROM users WHERE openid = ?').get(openid);
