@@ -134,10 +134,38 @@ function recognizeTimeCardRevenue(asOfDate) {
       const paid = deriveOrderLine(card);
       if (!paid || !(paid.lineTotal > 0)) continue; // 推导不出实付价：不猜测、跳过
 
-      const totalMs = card.expires_at - card.activated_at;
-      // 已过时长夹取到有效区间：未生效记 0，已到期记满额
-      const elapsedMs = Math.min(Math.max(asOf - card.activated_at, 0), totalMs);
-      const shouldRecognize = Math.round(paid.lineTotal * elapsedMs / totalMs);
+      // ── P0-4：有效期与已过时长都必须扣除暂停段 ──
+      // 契约负债是「已收但尚未提供服务」的金额，暂停期间机构并未提供服务，不能确认收入。
+      // 此前 elapsedMs 完全没读 paused_at / pause_total_ms：年卡 ¥3650 第 1 天起暂停 180 天，
+      // 第 180 天已确认 ¥1800；resume 后总时长变成 545 天、应确认 ¥7，而 delta 为负被
+      // 直接 continue（不回冲）→ 永久虚增 ¥1793 且无自愈路径。
+      // 口径必须与 refund.js 一致（退款明确扣暂停），否则同一张卡两条路径算出两个结论。
+      const pauseSettled = Number(card.pause_total_ms) || 0; // 已结算的暂停总时长
+      // 进行中的暂停段：resume 时才把 expires_at 顺延并累加 pause_total_ms，
+      // 因此「总时长」里它尚未被扣、仍在有效期内，两者相抵后只影响已过时长。
+      const pauseOngoing = card.paused_at ? Math.max(0, asOf - Number(card.paused_at)) : 0;
+      const totalMs = Math.max(0, (card.expires_at - card.activated_at) - pauseSettled);
+      const rawElapsed = Math.max(0, asOf - card.activated_at) - pauseSettled - pauseOngoing;
+      const elapsedMs = Math.min(Math.max(rawElapsed, 0), totalMs);
+      if (totalMs <= 0) continue; // 有效期为 0（异常数据）：不猜测，跳过
+
+      // ── P0-2 守卫：应确认额不得超过该卡对应的「净收」（实付 − 已退）──
+      // 部分退款后卡已置 refunded（不再进入本查询），但历史脏数据或退款与摊销并发时
+      // 仍可能算出比净收更大的应确认额，把合同负债推成负数。按整单退款比例折算本卡上限。
+      let cardCap = paid.lineTotal;
+      try {
+        const ord = db.prepare('SELECT payable_amount, refunded_amount FROM orders WHERE id = ?').get(paid.orderId);
+        if (ord) {
+          const paidAmount = Number(ord.payable_amount) || 0;
+          const netPaid = Math.max(0, paidAmount - (Number(ord.refunded_amount) || 0));
+          if (paidAmount > 0) cardCap = Math.round(paid.lineTotal * (netPaid / paidAmount));
+          else cardCap = netPaid > 0 ? paid.lineTotal : 0;
+        }
+      } catch (e) {
+        cardCap = paid.lineTotal;
+      }
+      cardCap = Math.max(0, cardCap);
+      const shouldRecognize = Math.min(cardCap, Math.round(paid.lineTotal * elapsedMs / totalMs));
 
       const scheduleId = `timecard:${card.id}`;
       // 只按 schedule_id 查：`timecard:<cardId>` 本身已经唯一。
@@ -148,13 +176,20 @@ function recognizeTimeCardRevenue(asOfDate) {
         'SELECT COALESCE(SUM(amount), 0) AS s FROM revenue_recognitions WHERE schedule_id = ?'
       ).get(scheduleId).s) || 0;
       const delta = shouldRecognize - already;
-      if (delta <= 0) continue; // 已结转额不小于应结转额：无新增，保持幂等
+      // delta = 0：无变化，保持幂等（可安全重跑）
+      // delta < 0：必须落**负数冲销行**。暂停/请假缩短应确认额、或退款降低净收上限时，
+      // 旧实现直接 continue → 已确认收入永不回冲，账实永久背离且无自愈机制。
+      if (delta === 0) continue;
 
       // 只插「本次增量」行，绝不改写既有行的 recognized_at。
       // 旧实现把唯一一行 UPDATE 成累计额并把 recognized_at 推到当天 ——
       // 财务按 recognized_at 落区间聚合，等于每天把这张卡的历史确认收入整体搬到「今天」，
       // 上月/上季度的已出账报表会逐日缩水直至归零。
-      const basis = `时效卡摊销增量: 累计应结转${shouldRecognize}元(实付${paid.lineTotal}元 × 已过${Math.round(elapsedMs / 86400000)}天 / 总${Math.round(totalMs / 86400000)}天); order=${paid.orderId}; card=${card.id}`;
+      const pausedDays = Math.round((pauseSettled + pauseOngoing) / 86400000);
+      const basis = `${delta >= 0 ? '时效卡摊销增量' : '时效卡摊销冲销'}: 累计应结转${shouldRecognize}元`
+        + `(实付${paid.lineTotal}元${cardCap < paid.lineTotal ? `,净收上限${cardCap}元` : ''}`
+        + ` × 活跃${Math.round(elapsedMs / 86400000)}天 / 总${Math.round(totalMs / 86400000)}天`
+        + `${pausedDays > 0 ? `,扣暂停${pausedDays}天` : ''}); order=${paid.orderId}; card=${card.id}`;
       db.prepare(`
         INSERT INTO revenue_recognitions (id, order_id, student_id, schedule_id, attendance_id,
           course_id, course_name, classes, amount, recognized_at, basis, created_at)
@@ -169,8 +204,44 @@ function recognizeTimeCardRevenue(asOfDate) {
   return { recognized, amount };
 }
 
+/**
+ * 冲销已结转收入（P0-6）—— 退卡路径必须调用。
+ *
+ * 订单退款分支早已 `DELETE FROM revenue_recognitions WHERE order_id = ?`，但退卡路径
+ * 完全没有冲销：年卡 ¥3650 已摊销 ¥1000、扣 20% 手续费退 ¥2920 后，
+ * collected=¥730 而 recognized=¥1000 → 合同负债 = −¥270。量一多整体负债就为负。
+ *
+ * 优先按 order_id 全删（一次订单的多张卡一起退时更彻底）；只退单张卡时按 schedule_id 精确删。
+ * @returns {number} 删除的行数
+ */
+function revertRecognitionForCard(cardId, orderId) {
+  if (!hasRevenueRecognitionTable()) return 0;
+  if (orderId) {
+    return db.prepare('DELETE FROM revenue_recognitions WHERE order_id = ?').run(orderId).changes;
+  }
+  if (cardId) {
+    return db.prepare('DELETE FROM revenue_recognitions WHERE schedule_id = ?').run(`timecard:${cardId}`).changes;
+  }
+  return 0;
+}
+
+/**
+ * 会员卡转让后同步结转归属（P1-18）。
+ *
+ * 时效卡摊销行按 `timecard:<cardId>` 唯一，但行上的 student_id 是发卡时的学员。
+ * 转卡后若不同步，该卡的收入会一直算在原学员名下，学员维度的对账错位。
+ * @returns {number} 更新行数
+ */
+function reassignRecognitionStudent(cardId, newStudentId) {
+  if (!hasRevenueRecognitionTable() || !cardId || !newStudentId) return 0;
+  return db.prepare('UPDATE revenue_recognitions SET student_id = ? WHERE schedule_id = ?')
+    .run(newStudentId, `timecard:${cardId}`).changes;
+}
+
 module.exports = {
   deriveOrderLine,
   deriveUnitPrice,
   recognizeTimeCardRevenue,
+  revertRecognitionForCard,
+  reassignRecognitionStudent,
 };

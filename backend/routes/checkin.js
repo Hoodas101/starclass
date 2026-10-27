@@ -14,7 +14,7 @@ const { requireStaffPerm } = require('../middleware/authz');
 // 每次课消耗的课时数（courses.consume_classes）与扣课选卡：与手工扣课路径共用同一实现
 const { resolveConsumeClasses, pickCardForDeduction } = require('../utils/deduction');
 // 周期锚定（P2）：按卡实例的 period_anchor 切段，与 natural 旧口径共存
-const { periodBoundsForCard, effectiveCycleLimit } = require('../utils/card-lifecycle');
+const { periodBoundsForCard, effectiveCycleLimit, dayEndExclusive } = require('../utils/card-lifecycle');
 // 考勤回滚共享原语（积分 / 扣课 / 收入结转的唯一实现）：
 // 「取消排期」路径（routes/schedules.js）也回滚同一批副作用，必须共用同一份代码，
 // 否则两条回滚路径会各写一份、口径日久漂移。
@@ -542,7 +542,11 @@ function checkTimeCardVisitLimit(studentId, t, anchorDate) {
            activated_at, first_used_at, expires_at, period_anchor, cycle_days_week, cycle_days_month
       FROM member_cards
      WHERE student_id = ? AND status = 'active' AND expires_at > ?
-  `).all(studentId, anchorMs);
+       -- P1-20：未生效的顺延卡不得参与限次计算。它排在未来才开始用，
+       -- 却会把「本周/本月上限」提前压到学员头上，导致当天明明能来却被判超限。
+       -- 与扣课路径（deduction.js）保持同一「已生效」判据（按自然日）。
+       AND (COALESCE(activated_at, 0) = 0 OR activated_at < ?)
+  `).all(studentId, anchorMs, dayEndExclusive(anchorMs));
   if (!cards.length) return null;
 
   const pos = (v) => {

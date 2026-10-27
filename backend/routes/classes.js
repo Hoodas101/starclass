@@ -376,6 +376,48 @@ router.delete('/:id/members/:studentId', (req, res) => {
 });
 
 /**
+ * 班级归属校验（P0-9）：非管理员必须是「本班班主任」或「本班授课教练」。
+ *
+ * 此前 `isClassManager` 只判 `admin || coach`，任意教练都能向任意班级的全体家长推送
+ * 任意标题/内容的通知 —— 越权写入 + 触达全体家长，可用于「停课/退费/加微信转账」类
+ * 社工诈骗，且全程无审计、无法追责。权限必须是「对本班有管理关系」，不是「有教练角色」。
+ */
+function canManageClass(req, cls) {
+  if (isAdminReq(req)) return true;
+  if (!isCoachReq(req)) return false;
+  const openid = getOpenId(req);
+  if (!openid || !cls) return false;
+  const u = db.prepare('SELECT id FROM users WHERE openid = ?').get(openid);
+  const userId = u ? u.id : '';
+  // 班主任：teachers.user_id 关联本用户（兼容存 openid 与存 users.id 两种历史写法）
+  if (cls.coach_id) {
+    const head = db.prepare(
+      'SELECT 1 FROM teachers WHERE id = ? AND (user_id = ? OR user_id = ?) LIMIT 1'
+    ).get(cls.coach_id, openid, userId);
+    if (head) return true;
+  }
+  // 授课教练：本班存在该教练的排期
+  const teaches = db.prepare(`
+    SELECT 1 FROM schedules s
+    JOIN teachers t ON t.id = s.teacher_id
+    WHERE s.class_id = ? AND (t.user_id = ? OR t.user_id = ?)
+    LIMIT 1
+  `).get(cls.id, openid, userId);
+  return !!teaches;
+}
+
+// 通知频控：同一班级每分钟最多 5 次推送（防误操作/脚本刷屏触达全体家长）
+const notifyBuckets = new Map();
+function notifyRateLimited(classId) {
+  const nowMs = Date.now();
+  const win = 60 * 1000;
+  const arr = (notifyBuckets.get(classId) || []).filter((t) => nowMs - t < win);
+  arr.push(nowMs);
+  notifyBuckets.set(classId, arr);
+  return arr.length > 5;
+}
+
+/**
  * POST /api/classes/:id/notify — 发布排期通知
  * 向班级全体成员（经其绑定家长）推送站内通知；可关联某排期（会把该排期挂到本班级）。
  * Body: { scheduleId?, title, content, priority? }
@@ -385,9 +427,18 @@ router.post('/:id/notify', (req, res) => {
     if (!isClassManager(req)) return res.status(403).json(safeFail('仅管理员或教练可发布通知'));
     const cls = getClassOr404(req.params.id);
     if (!cls) return res.json(fail('班级不存在'));
+    // P0-9：必须是对本班有管理关系的管理员/教练，不能「任意教练推任意班」
+    if (!canManageClass(req, cls)) {
+      return res.status(403).json(safeFail('仅本班班主任或授课教练可发布通知'));
+    }
+    if (notifyRateLimited(cls.id)) {
+      return res.json(fail('该班级通知发送过于频繁，请稍后再试'));
+    }
     const { scheduleId, title, content, priority } = req.body || {};
     if (!title || !String(title).trim()) return res.json(fail('通知标题必填'));
     if (!content || !String(content).trim()) return res.json(fail('通知内容必填'));
+    if (String(title).length > 100) return res.json(fail('通知标题过长（最多 100 字）'));
+    if (String(content).length > 2000) return res.json(fail('通知内容过长（最多 2000 字）'));
 
     // 关联排期：发布即把排期挂到本班级（若尚未关联）
     let schedule = null;
@@ -419,6 +470,16 @@ router.post('/:id/notify', (req, res) => {
         priority || 'normal', String(content).trim().slice(0, 60), t, t);
       notified++;
     }
+    // P0-9：触达全体家长属高影响写操作，必须留痕（谁、对本班、推了什么、覆盖多少家长）
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'class',
+      entityId: cls.id,
+      action: 'notify',
+      actorId: actor.id,
+      actorRole: actor.role,
+      after: { notified, title: String(title).trim().slice(0, 100), scheduleId: schedule ? schedule.id : null },
+    });
     res.json(success({
       notified,
       classId: cls.id,

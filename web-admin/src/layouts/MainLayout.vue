@@ -374,7 +374,14 @@ const readNotice = async (n) => {
 }
 
 const markAllRead = async () => {
-  await markAllNoticesRead().catch(() => {})
+  // P2-11：失败时不能照样提示成功并清空未读数 —— 那会让用户以为已读，
+  // 刷新后未读又全回来了（且服务端从未标记，实际什么都没发生）。
+  try {
+    await markAllNoticesRead()
+  } catch (e) {
+    ElMessage.error('标记已读失败，请稍后重试')
+    return
+  }
   notices.value.forEach((n) => { n.isRead = true })
   unreadCount.value = 0
   ElMessage.success('已全部标记为已读')
@@ -538,7 +545,8 @@ const currentTitle = computed(() => resolveTitle(route.meta.title) || '')
 const menuRoutes = computed(() => {
   const rootRoute = router.options.routes.find((r) => r.path === '/')
   return (rootRoute?.children || []).filter(
-    (r) => r.meta && r.meta.title && canAccess(r.meta)
+    // noMenu：有 meta.title 但刻意不进侧栏（如 /no-access 兜底页）
+    (r) => r.meta && r.meta.title && !r.meta.noMenu && canAccess(r.meta)
   ) || []
 })
 

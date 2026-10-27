@@ -79,6 +79,16 @@ const routes = [
         component: () => import('@/views/settings/index.vue'),
         meta: { title: '系统设置', icon: 'Setting', roles: ['admin'], perm: 'settings' }
       },
+      {
+        // 无权限兜底页：只按角色放行、不带任何 perm 约束，保证任何已登录员工都进得去。
+        // 守卫回跳前会对候选目标做可达性判断，全部不可达时落到这里，杜绝回跳自身成环。
+        // noMenu: true —— 有权限也不进侧栏菜单（MainLayout 的菜单过滤会跳过），
+        // 它只是守卫的兜底落点，不是用户可以主动导航的业务页面。
+        path: 'no-access',
+        name: 'NoAccess',
+        component: () => import('@/views/NoAccess.vue'),
+        meta: { title: '无访问权限', noMenu: true, roles: ['admin', 'coach', 'sales'] }
+      },
       // 旧路径兼容重定向（无 meta.title，不进入侧栏菜单）
       { path: 'schedule', redirect: '/operations?tab=schedule' },
       { path: 'checkin', redirect: '/operations?tab=checkin' },
@@ -102,6 +112,25 @@ const router = createRouter({
   routes
 })
 
+// 无权限回跳的候选目标（按业务优先级）。**逐个做可达性判断**后再跳：
+// 此前写死 `role === 'coach' ? '/schedule' : '/dashboard'`，而这两个目标自身带
+// perm/roles 约束（dashboard → perm:'dashboard'、operations → perm:'schedule'）。
+// 员工被自定义授权（例如只勾选 students）时，回跳目标同样无权限 → 守卫再次拒绝 →
+// 再次回跳同一个地址 → 无限重定向：toast 刷屏、页面卡死、侧栏被过滤成空。
+// 兜底页 /no-access 只按角色放行且不含任何 perm，任何已登录员工必然可达，环到此终止。
+const FALLBACK_ROUTE_NAMES = ['Dashboard', 'Operations', 'Students', 'Sales', 'Staff', 'Profile', 'NoAccess']
+
+function resolveFallback(role, perms) {
+  const root = routes.find((r) => r.path === '/')
+  const children = root?.children || []
+  for (const name of FALLBACK_ROUTE_NAMES) {
+    const r = children.find((c) => c.name === name)
+    if (r && hasPageAccess(role, perms, r.meta)) return r.path
+  }
+  // 理论上不可达：NoAccess 对所有员工角色放行。仍保留绝对路径兜底，避免任何情况下返回空
+  return '/no-access'
+}
+
 // 路由守卫 - 检查登录态
 router.beforeEach((to, from, next) => {
   const token = localStorage.getItem('edu_token')
@@ -119,12 +148,22 @@ router.beforeEach((to, from, next) => {
     // 已登录用户：与侧栏菜单共用 hasPageAccess 判定（角色或自定义功能权限）
     // 注意：不再对 parent 无条件放行——家长端走微信小程序，管理后台面向机构员工；
     // 此前 parent 兜底可直达 /settings 等所有页面壳（URL 直达绕过菜单隐藏）
-    if (hasPageAccess(role, permsFromStorage(), to.meta)) {
+    const perms = permsFromStorage()
+    if (hasPageAccess(role, perms, to.meta)) {
+      next()
+    } else if (to.name === 'NoAccess') {
+      // 兜底页自身：无论如何放行，守卫绝不能拒绝它，否则仍会成环
       next()
     } else {
-      // 无权限：回各自默认页。带明确提示，避免掉线重登跳到无权限页时被"静默弹回"误认为页面坏了
-      ElMessage.warning(`没有访问「${to.meta.title || '该页面'}」的权限，已返回主页`)
-      next(role === 'coach' ? '/schedule' : '/dashboard')
+      // 无权限：跳到**当前账号确实可达**的第一个页面（不再写死 coach→/schedule）。
+      // 带明确提示，避免掉线重登跳到无权限页时被"静默弹回"误认为页面坏了
+      const fallback = resolveFallback(role, perms)
+      ElMessage.warning(
+        fallback === '/no-access'
+          ? `没有访问「${to.meta.title || '该页面'}」的权限`
+          : `没有访问「${to.meta.title || '该页面'}」的权限，已返回主页`
+      )
+      next(fallback)
     }
   } else {
     // 未登录（或家长/未知角色会话）跳转登录页

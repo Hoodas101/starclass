@@ -517,7 +517,26 @@ router.post('/leads/:id/stage', (req, res) => {
         converted_at = CASE WHEN ? = 'deal' THEN ? ELSE converted_at END
       WHERE id = ?
     `).run(stage, t, t, stage, stage, stage, t, req.params.id);
-    res.json(success({ id: req.params.id, stage, stageText: STAGE_TEXT[stage] }));
+    // P2-15：阶段推进决定线索生命周期（deal 会把 status 直接写成 converted），
+    // 此前完全无审计 —— 业绩归属争议、线索被「手动成交」后无人建档，都无从追溯。
+    const actor = getActor(req);
+    recordAudit(db, {
+      entity: 'lead',
+      entityId: req.params.id,
+      action: 'stage_change',
+      actorId: actor.id,
+      actorRole: actor.role,
+      before: { stage: row.stage, status: row.status },
+      after: { stage, status: stage === 'deal' ? 'converted' : stage === 'lost' ? 'lost' : row.status },
+    });
+    res.json(success({
+      id: req.params.id,
+      stage,
+      stageText: STAGE_TEXT[stage],
+      // 提醒：标记成交 ≠ 完成建档。真正发卡/建学员必须走「转为正式学员」，
+      // 否则线索已算成交、正式学员表里却没有这个人。
+      hint: stage === 'deal' ? '已标记为成交，请继续执行「转为正式学员」完成建档' : undefined,
+    }));
   } catch (err) {
     console.error('[lead stage]', err);
     res.status(500).json(safeFail('推进阶段失败'));
@@ -830,8 +849,14 @@ router.post('/points/adjust', (req, res) => {
     // 都能对【任意学员】（非自己名下）发放积分（上限 9999、无审批），属资损风险。
     // 若确有销售赠送场景，应改为「申请 → 管理员审批」。
     if (!isAdminReq(req)) return res.status(403).json(safeFail('积分调整仅管理员可操作'));
-    const { studentId, type, amount, reason = '' } = req.body;
-    if (!studentId || !type || !amount || amount <= 0) return res.json(fail('参数不完整'));
+    const { studentId, type, reason = '' } = req.body;
+    let amount = req.body.amount;
+    if (typeof studentId !== 'string' && typeof studentId !== 'number') return res.json(fail('成员ID格式不正确'));
+    if (!studentId || !type || amount === undefined || amount === null || amount === '') return res.json(fail('参数不完整'));
+    // P1-4 / P1-12：积分必须是正整数，与 /api/points/add、/consume 同一口径
+    amount = Number(amount);
+    if (!Number.isInteger(amount) || amount <= 0) return res.json(fail('积分必须为正整数'));
+    if (amount > 100000) return res.json(fail('单次积分不能超过 100000'));
     if (!['earn', 'consume'].includes(type)) return res.json(fail('类型无效'));
     const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
     if (!student) return res.json(fail('成员不存在'));

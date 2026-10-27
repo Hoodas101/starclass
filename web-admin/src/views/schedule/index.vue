@@ -671,6 +671,27 @@ const applyRange = () => {
   localStorage.setItem('edu_schedule_range', JSON.stringify({ start: rangeStart.value, end: rangeEnd.value }))
 }
 
+// P1-33：把时间轴扩展到能完整覆盖当日课块（仅在越界时触发）。
+// 默认 8–21 点会把早课（如 7:00 体适能）和晚课（如 21:30）挤出网格：
+// 课在库里、名额被占着，但周视图上完全看不见。自动扩展不写入 localStorage，
+// 以免覆盖管理者手动设置的时间范围。
+const autoExpandRange = (list) => {
+  let min = rangeStart.value
+  let max = rangeEnd.value
+  for (const c of list || []) {
+    const s = toMinutes(c.start_time)
+    const e = toMinutes(c.end_time)
+    if (Number.isFinite(s) && s >= 0) min = Math.min(min, Math.floor(s / 60))
+    if (Number.isFinite(e) && e > 0) max = Math.max(max, Math.ceil(e / 60))
+  }
+  min = Math.max(0, min)
+  max = Math.min(24, max)
+  if (min === rangeStart.value && max === rangeEnd.value) return
+  rangeStart.value = min
+  rangeEnd.value = max
+  ElMessage.info(`已自动调整时间轴为 ${min}:00 - ${max}:00，以完整显示当日课程`)
+}
+
 const timeSlots = computed(() => {
   const arr = []
   for (let h = rangeStart.value; h < rangeEnd.value; h++) arr.push(h)
@@ -736,6 +757,9 @@ const loadSchedules = async () => {
       color: teacherColor(s.teacher_id, courseColor(s.course_id))
     }))
     totalSchedules.value = res.total || 0
+    // P1-33：时间轴默认 8–21 点，早于/晚于该窗口的课块会被挤出网格 —— 课还在、名额还占着，
+    // 但管理者在周视图里看不见（以为没排课）。检测到越界时自动扩展时间轴并提示。
+    if (viewMode.value === 'week' || viewMode.value === 'day') autoExpandRange(schedules.value);
   } catch (e) {
     error.value = e?.message || '数据加载失败，请稍后重试'
     schedules.value = []
@@ -1402,10 +1426,19 @@ const deactivateRule = async (row) => {
       openRulesDialog()
       return
     }
-    // 注：后端读取的是 query 参数 ?cascade=1，而 api 封装走的是请求体，
-    // 该次级联可能不生效（规则本身已在第一次调用中停用），详见交付报告。
-    await deleteScheduleRule(row.id, { cascade: 1 })
-    ElMessage.success(`规则已停用，并取消 ${affected} 场未来排期`)
+    // api 封装为 request.delete(url, { params })，cascade 走的是 **query**，
+    // 后端读的也是 req.query.cascade —— 此前注释误判为「走请求体、级联不生效」，
+    // 属注释与实现不一致（易导致后来者按错误前提改代码）。
+    const cascadeRes = await deleteScheduleRule(row.id, { cascade: 1 })
+    // 以后端返回的 cancelled 为准：第一次调用用的 affected 是「受影响数量」，
+    // 两者在并发或部分排期已带考勤时会不同，直接用 affected 会虚报取消场次。
+    const cancelledCount = Number(cascadeRes?.cancelled ?? cascadeRes?.affected ?? affected) || 0
+    if (affected > 0 && cancelledCount === 0) {
+      // 明确区分「规则停了但课没取消」，避免管理者以为家长已收到停课通知
+      ElMessage.warning('规则已停用，但未来排期未取消，请到排期列表手动处理')
+    } else {
+      ElMessage.success(`规则已停用，并取消 ${cancelledCount} 场未来排期`)
+    }
     openRulesDialog()
   } catch (e) {
     // 拦截器已提示

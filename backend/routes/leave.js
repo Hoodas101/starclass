@@ -14,6 +14,8 @@ const { requireStaffPerm } = require('../middleware/authz');
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 // 选卡收口到统一实现（含课程范围隔离），与签到/手工扣课路径同一口径
 const { pickCardForDeduction } = require('../utils/deduction');
+// 自然日边界：判断会员卡是否已生效（扣有效天数时必须先扣「当前在用」的卡）
+const { dayEndExclusive } = require('../utils/card-lifecycle');
 
 // 请假规则默认值（可在 Web 管理端「系统设置 → 请假规则」中配置）
 function getLeaveRules() {
@@ -80,11 +82,15 @@ function applyLeaveDeduction(studentId, scheduleId, currentTime) {
 
   if (rules.deductMode === 'days') {
     // 扣有效天数：直接在名义到期日上调减；暂停期间到期日尚未顺延，恢复时会自动加上暂停时长，扣减随之保留
+    // P1-22：只扣「已生效」的时效卡，且按 expires_at ASC 先扣当前在用的那张。
+    // 此前 ORDER BY expires_at DESC 会选中排在未来才生效的顺延卡 —— 请假一次就把
+    // 尚未开始的那张卡期限砍掉，而正在用的卡一天没少。
     const card = db.prepare(`
       SELECT * FROM member_cards
       WHERE student_id = ? AND status = 'active' AND billing_mode = 'time'
-      ORDER BY expires_at DESC LIMIT 1
-    `).get(studentId);
+        AND (COALESCE(activated_at, 0) = 0 OR activated_at < ?)
+      ORDER BY expires_at ASC LIMIT 1
+    `).get(studentId, dayEndExclusive(currentTime));
     if (!card) return { deducted: false, reason: 'no_time_card' };
     const newExpires = (card.expires_at || currentTime) - rules.deductAmount * 86400000;
     const newStatus = newExpires <= currentTime ? 'expired' : 'active';
@@ -120,8 +126,22 @@ router.post('/:id/cancel', (req, res) => {
     if (!openid) return res.status(401).json(safeFail('未登录'));
     const row = db.prepare('SELECT * FROM leave_requests WHERE id = ?').get(req.params.id);
     if (!row) return res.json(fail('请假记录不存在'));
+    // P1-14：员工代录请假时 parent_openid 写的是家长，代录人自己撤销会恒 403 ——
+    // 「代录成功、撤销无门」。员工（教练/管理员）本就拥有请假管理权限，
+    // 允许其撤销待审批请假，并留痕以便追责。
     if (row.parent_openid !== openid) {
-      return res.status(403).json(safeFail('仅可撤销本人提交的请假'));
+      if (!(isCoachReq(req) || isAdminReq(req))) {
+        return res.status(403).json(safeFail('仅可撤销本人提交的请假'));
+      }
+      const actor = getActor(req);
+      recordAudit(db, {
+        entity: 'leave',
+        entityId: row.id,
+        action: 'cancel_by_staff',
+        actorId: actor.id,
+        actorRole: actor.role,
+        before: { status: row.status },
+      });
     }
     if (row.status !== 'pending') {
       return res.json(fail('仅待审批的请假可撤销'));

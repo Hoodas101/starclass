@@ -69,6 +69,12 @@
         <span class="order-stat-value num-display is-md">{{ totalOrders }}</span>
       </div>
     </div>
+    <!-- 口径说明：三张金额卡来自后端全量汇总（净额、已扣退款，不受上方筛选影响），
+         而「销售单数」取自列表接口 total（随状态与日期筛选变化）。
+         两者同屏却口径不同，此前无任何说明，用户会把「金额远大于单数×单价」误读成统计错误。 -->
+    <p class="order-stats-note">
+      金额按全部订单统计（净额，已扣退款）；单数随上方筛选条件变化。
+    </p>
 
     <!-- 订单表格 -->
     <div class="card table-container">
@@ -142,7 +148,9 @@
         </el-table-column>
       </el-table>
 
-      <div class="pagination-wrap">
+      <!-- 出错时隐藏分页器：错误态下 total 已复位为 0，留着分页器会出现
+           「加载失败」提示与「共 0 条」分页器同屏，且用户还能翻页触发新请求 -->
+      <div v-if="!error" class="pagination-wrap">
         <el-pagination
           v-model:current-page="currentPage"
           v-model:page-size="pageSize"
@@ -417,7 +425,13 @@
           >
             确认收款
           </el-button>
-          <el-button v-if="detailOrder.status === 'paid'" type="danger" @click="openRefundDialog(detailOrder)">退款</el-button>
+          <!-- 退款仅管理员可操作：后端 POST /orders/:id/refund 与 /refund-preview 均为 isAdminReq，
+               此前按钮无角色守卫，销售点开弹窗后请求必然 403（且预览失败会禁用提交，等于空转） -->
+          <el-button
+            v-if="isAdmin && detailOrder.status === 'paid'"
+            type="danger"
+            @click="openRefundDialog(detailOrder)"
+          >退款</el-button>
           <el-button
             v-if="detailOrder.status === 'paid'"
             type="danger"
@@ -500,6 +514,8 @@ const RECEIPT_AMOUNT_COLOR = '#C92A2A'
 const settingsStore = useSettingsStore()
 const userStore = useUserStore()
 const t = settingsStore.t
+// 退款、取消订单等写操作后端均为 isAdminReq，按钮需按角色显隐
+const isAdmin = computed(() => userStore.userRole === 'admin')
 
 const route = useRoute()
 const router = useRouter()
@@ -1001,6 +1017,12 @@ const refundPreview = ref(null)
 const refundPreviewFailed = ref(false)
 
 const openRefundDialog = async (order) => {
+  // 二次拦截：模板 v-if 只挡住正常点击，键盘触发/状态滞后等场景仍可能进来，
+  // 这里再判一次，避免销售拿到一个必然 403 的弹窗
+  if (!isAdmin.value) {
+    ElMessage.warning('仅管理员可办理退款')
+    return
+  }
   refundOrder.value = order
   refundMode.value = 'rule'
   refundAmount.value = 0
@@ -1292,7 +1314,13 @@ const loadStaffOptions = async () => {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 16px;
-  margin-bottom: var(--t-spacing-lg);
+  margin-bottom: var(--t-spacing-sm);
+}
+
+.order-stats-note {
+  margin: 0 0 var(--t-spacing-lg);
+  font-size: var(--t-fs-xs);
+  color: var(--t-text-3);
 }
 
 .order-stat-card {

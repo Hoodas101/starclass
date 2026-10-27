@@ -421,7 +421,9 @@ const submitGoods = async () => {
 const courseOptions = ref([])
 const loadCourses = async () => {
   try {
-    const res = await getCourses({ pageSize: 200 })
+    // P1-34：上限 200 会让更多课程从「限定课程」下拉里消失
+    const res = await getCourses({ pageSize: 500 })
+    if (Number(res.total) > (res.list || []).length) ElMessage.warning('课程较多，下拉仅显示前 500 门，请先用筛选缩小范围')
     courseOptions.value = res.list || []
   } catch (e) { /* 拦截器已提示 */ }
 }

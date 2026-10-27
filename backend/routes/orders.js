@@ -244,6 +244,21 @@ function grantOrderBenefits(order, paidAt) {
   })();
 }
 
+/** 布尔类入参归一为 0/1：字符串 "0"/"false"/"" 必须判为假。
+ *  此前用 JS 真值判断，"0" 为真 → revenue_excluded 被置 1，该单从财务汇总、月报、
+ *  销售业绩、看板 KPI 全部静默消失（revenue_excluded 是全站营收硬过滤），属账实不符。 */
+function flag01(v) {
+  if (v === true || v === 1 || v === '1' || v === 'true') return 1;
+  return 0;
+}
+
+/** ID 类入参只接受标量（字符串/数字）。
+ *  传对象或数组会一路传到 better-sqlite3 绑定层抛 TypeError → HTTP 500，
+ *  把「参数非法」误报成「服务器故障」。此处提前拦截，统一走 HTTP 200 + code!=0。 */
+function isScalarId(v) {
+  return (typeof v === 'string' && v.trim() !== '') || (typeof v === 'number' && Number.isFinite(v));
+}
+
 /**
  * POST /api/orders — 创建订单
  * Body: { studentId, cardTypeId, items, discountAmount, orderType, salesperson, remark, status, paidAt }
@@ -254,10 +269,15 @@ router.post('/', (req, res) => {
     if (!canSales(req)) return res.status(403).json(safeFail('无销售录入权限'));
     const { studentId, cardTypeId, items, discountAmount = 0, orderType = 'membership', salesperson = '', remark = '', status = 'pending', paidAt, is1v1 = 0, revenueExcluded = 0, channel, payableAmount: overrideAmount } = req.body;
     const openid = getOpenId(req);
-    if (!studentId) return res.json(fail('缺少成员ID'));
+    if (!isScalarId(studentId)) return res.json(fail('成员ID格式不正确'));
+    if (cardTypeId !== undefined && cardTypeId !== null && cardTypeId !== '' && !isScalarId(cardTypeId)) {
+      return res.json(fail('会员卡类型ID格式不正确'));
+    }
 
-    const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
-    if (!student) return res.json(fail('成员不存在'));
+    // P1-9：已归档/已删除学员不得建单。资产链路此前缺此校验，而上课链路
+    // （checkin / leave / enroll）一直有 —— 结果能给归档学员卖卡、发积分，却上不了课。
+    const student = db.prepare(`SELECT s.name FROM students s WHERE s.id = ? AND ${ACTIVE_STUDENT_SQL}`).get(studentId);
+    if (!student) return res.json(fail('成员不存在或已归档'));
 
     // items 来自请求体，入口必须做形状校验：此前传字符串（有 length、无 reduce）
     // 或数组里混入 null / 裸字符串元素，都会让下方的 reduce 与属性访问抛 TypeError → 500。
@@ -306,9 +326,11 @@ router.post('/', (req, res) => {
     // 会在报表里分裂成两个业绩组。批量导入路径（下方 /import）本就 trim，两条路径策略须一致。
     // M2：业绩归属是提成依据。非管理员一律强制为本人昵称 —— 否则销售可把单子
     // 挂到任意人名下（伪造他人业绩，或改归属后绕过 canOperateOrder 的归属校验）。
+    // 此前写成 `String(salesperson||'').trim() || myStaffName(req)`，传了值就直接采用，
+    // 兜底永不生效（注释与实现相反）；现改为非管理员**直接忽略入参**。
     const salespersonNorm = isAdminReq(req)
       ? String(salesperson || '').trim()
-      : (String(salesperson || '').trim() || myStaffName(req));
+      : myStaffName(req);
 
     let orderItems = items;
     let totalAmount = 0;
@@ -318,7 +340,9 @@ router.post('/', (req, res) => {
       const cardType = db.prepare('SELECT * FROM membership_cards WHERE id = ?').get(cardTypeId);
       if (!cardType) return res.json(fail('会员卡类型不存在'));
       const cardPrice = Number(cardType.price);
-      if (!Number.isFinite(cardPrice)) return res.json(fail('会员卡价格不合法'));
+      // 负价 / 非数字一律拒绝。此前只挡 isFinite，price=-1 会算出负的订单总额，
+      // 随后被折扣校验误判成「折扣金额不能超过订单总额」，报错文案与真实原因不符。
+      if (!Number.isFinite(cardPrice) || cardPrice < 0) return res.json(fail('会员卡价格不合法，请先在卡种设置中修正'));
       orderItems = [{ itemType: 'membershipCard', itemId: cardTypeId, itemName: cardType.name, quantity: 1, unitPrice: cardPrice, totalPrice: cardPrice }];
       totalAmount = cardPrice;
     } else if (items?.length) {
@@ -326,6 +350,11 @@ router.post('/', (req, res) => {
     } else {
       return res.json(fail('缺少订单项或会员卡类型'));
     }
+
+    // 金额上限：item 单价已限 1e9、数量限 9999，但多行叠加仍可算出 1e13 级总额，
+    // 会溢出前端展示与月度汇总。此处按「单笔实收」做业务上限。
+    if (!Number.isFinite(totalAmount) || totalAmount < 0) return res.json(fail('订单总额不合法'));
+    if (totalAmount > 1e8) return res.json(fail('订单总额超出单笔上限（1 亿元），请拆单'));
 
     // H3-1：折扣必须是有限数且落在 [0, totalAmount]。
     // 此前传 "abc" 会让 discount_amount='abc'、payable_amount=NULL，后续统计全失真。
@@ -348,7 +377,10 @@ router.post('/', (req, res) => {
     // M1：0 元单强制标记「不计入销售」。此前只写审计标记，仍照常计入销售统计 →
     // 赠课/让价单会虚增业绩，若提成以销售看板为准就会多发。
     const isZeroAmount = payableAmount <= 0;
-    const revenueExcludedFinal = (revenueExcluded || isZeroAmount) ? 1 : 0;
+    // 布尔字段必须真值归一：客户端传字符串 "0" 时，`"0" || isZeroAmount` 会把
+    // 普通订单也置成 revenue_excluded=1，该单随即从全部营收报表消失且无任何报错。
+    const is1v1Final = flag01(is1v1);
+    const revenueExcludedFinal = (flag01(revenueExcluded) === 1 || isZeroAmount) ? 1 : 0;
 
     const currentTime = now();
     const id = generateId('ORD');
@@ -359,7 +391,7 @@ router.post('/', (req, res) => {
       db.prepare(`
         INSERT INTO orders (id, order_no, user_id, student_id, student_name, order_type, items, total_amount, discount_amount, payable_amount, status, salesperson, remark, is_1v1, revenue_excluded, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, orderNo, openid, studentId, student.name, orderType, JSON.stringify(orderItems), totalAmount, discountVal, payableAmount, status, salespersonNorm, remark, is1v1 ? 1 : 0, revenueExcludedFinal, currentTime, currentTime);
+      `).run(id, orderNo, openid, studentId, student.name, orderType, JSON.stringify(orderItems), totalAmount, discountVal, payableAmount, status, salespersonNorm, remark, is1v1Final, revenueExcludedFinal, currentTime, currentTime);
 
       // 直接录入已收款订单：立即结算并激活会员卡（settleOrder/grantOrderBenefits 内部按 reference_id 幂等去重）
       if (status === 'paid') {
@@ -749,7 +781,11 @@ router.get('/:id/refund-preview', (req, res) => {
     const { id } = req.params;
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
     if (!order) return res.json(fail('订单不存在'));
-    if (order.status !== 'paid') return res.json(fail('只有已支付订单可退款'));
+    if (order.status !== 'paid') {
+      // P2-23：已退款的单再点退款时，不能再笼统说「只有已支付订单可退款」——
+      // 用户看到的是「我这单明明付过钱」，会误以为系统丢了支付记录。
+      return res.json(fail(order.status === 'refunded' ? '该订单已全额退款，无需再次退款' : '只有已支付订单可退款'));
+    }
 
     const s = computeRefundSuggestion(order);
     res.json(success({
@@ -790,7 +826,9 @@ router.post('/:id/refund', (req, res) => {
     const result = db.transaction(() => {
       const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
       if (!order) return { err: '订单不存在' };
-      if (order.status !== 'paid') return { err: '只有已支付订单可退款' };
+      if (order.status !== 'paid') {
+        return { err: order.status === 'refunded' ? '该订单已全额退款，无需再次退款' : '只有已支付订单可退款' };
+      }
 
       const paidAmount = Number(order.payable_amount) || 0;
       const refundedSoFar = Number(order.refunded_amount) || 0;
@@ -887,7 +925,7 @@ router.post('/:id/refund', (req, res) => {
             `).run(generateId('PLG'), order.student_id, -actual, newBal, 'order_' + order.id, currentTime);
           }
         }
-      } else if (appliedSuggestion && (suggestion.mode === 'custom' || suggestion.mode === 'ratio') && suggestion.cardId) {
+      } else if (appliedSuggestion && (suggestion.mode === 'custom' || suggestion.mode === 'ratio')) {
         // 注意：**不能**带 `suggestion.started &&`。
         // beforeStart='percent' 的规则分支（refund.js）在定义上就是「未开始消耗」，started 恒为 false，
         // 带上这个条件会让「开课前按 (100−X)% 退现金」整体跳过权益回收 ——
@@ -898,29 +936,42 @@ router.post('/:id/refund', (req, res) => {
         // 此前只回收 custom 分支，ratio 分支既不回收权益也不标记 refunded → 直接资金漏洞。
         // 只有协商金额（appliedSuggestion 为假，即显式 confirmOverride 偏离规则）才视为
         // 自愿折扣，保留卡权益。
-        const card = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(suggestion.cardId);
-        if (card && card.status !== 'refunded') {
+        // P1-35：必须回收订单下**全部**卡。此前只回收 suggestion.cardId 一张，
+        // 多卡订单会出现「退款按全部卡计算、权益只终止一张」，学员保留其余卡的课时/有效期。
+        const refundCards = db.prepare('SELECT * FROM member_cards WHERE order_id = ?').all(order.id);
+        const clawbacks = [];
+        for (const card of refundCards) {
+          if (!card || card.status === 'refunded') continue;
           if ((card.billing_mode || 'time') === 'count') {
-            // 被回收的课时必须计入 used_classes：只把 remaining 置 0 会破坏
-            // 「total = remaining + used」恒等式（例：24 节课用了 6 节，退后变成
-            // 24 = 0 + 6，不成立）。恒等式一破，就无法从卡本身回答「这张卡一共
-            // 消耗了多少课时」，且没有任何自愈机制。
-            // SQL 里两处赋值都基于更新前的行值，故先后顺序不影响结果。
+            // 次数卡：只把剩余课时成对回收进 used（remaining 归零即自然不可用），
+            // **不改 status** —— 部分退款只是「买回一部分权益」，卡本身没作废；
+            // 只有全额退款（上方 isFull 分支）才置 status='refunded'。
+            // 恒等式 total = remaining + used 由这一次 UPDATE 同时保证。
             db.prepare('UPDATE member_cards SET used_classes = used_classes + remaining_classes, remaining_classes = 0, updated_at = ? WHERE id = ?').run(currentTime, card.id);
-            clawback = `已同步回收卡内剩余 ${card.remaining_classes || 0} 次课时`;
+            clawbacks.push(`卡内剩余 ${card.remaining_classes || 0} 次课时`);
           } else {
-            // 三个占位符必须三个实参：此前漏传第二个 currentTime，better-sqlite3 抛
-            // RangeError → 退款事务整体回滚 → 默认规则下任意时效卡部分退款都是 500。
-            db.prepare('UPDATE member_cards SET expires_at = ?, updated_at = ? WHERE id = ?').run(currentTime, currentTime, card.id);
-            clawback = '已同步清零卡内剩余有效期';
+            // P0-2：必须**同时置 status='refunded'**（权益终止）。
+            // 此前只把 expires_at 截断到当前却保留 active —— 次日摊销按 elapsed=total
+            // 把整单确认为 100% 收入，contractLiability 直接变负且不可逆（实测 −¥2650）。
+            db.prepare('UPDATE member_cards SET status = ?, expires_at = ?, updated_at = ? WHERE id = ?').run('refunded', currentTime, currentTime, card.id);
+            clawbacks.push('卡内剩余有效期');
           }
         }
+        if (clawbacks.length) clawback = `已同步回收：${clawbacks.join('、')}`;
       }
 
       // Refund payment record
+      // P1-7：渠道不能硬编码 'wechat' —— 现金/转账收款单会被记成微信退款，
+      // 渠道对账与手续费核算随之失真。取原支付流水渠道，缺失时记 'manual'。
+      const paidRow = db.prepare(`
+        SELECT channel FROM payments
+        WHERE order_id = ? AND status <> 'refunded'
+        ORDER BY COALESCE(paid_at, created_at) DESC LIMIT 1
+      `).get(order.id);
+      const refundChannel = (paidRow && paidRow.channel) || 'manual';
       const paymentId = generateId('REF');
       db.prepare('INSERT INTO payments (id, order_id, order_no, user_id, amount, channel, status, paid_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(paymentId, order.id, order.order_no, order.user_id, amount, 'wechat', 'refunded', currentTime, currentTime);
+        .run(paymentId, order.id, order.order_no, order.user_id, amount, refundChannel, 'refunded', currentTime, currentTime);
 
       // Audit every money-out
       recordAudit(db, {
@@ -1097,7 +1148,13 @@ router.post('/:id/cancel', (req, res) => {
         // 「钱退了、卡暂停着还能恢复使用」，权益逃逸。
         const cards = db.prepare("SELECT * FROM member_cards WHERE order_id = ? AND status IN ('active','paused')").all(id);
         for (const card of cards) {
-          db.prepare("UPDATE member_cards SET status = 'cancelled', updated_at = ? WHERE id = ?").run(currentTime, card.id);
+          // P1-21：状态置 cancelled 之外还要清零剩余权益，与退款分支同一台账口径。
+          // 只置状态会让「剩余课时/有效期」留在卡上，台账与恒等式(total=remaining+used)失真。
+          if ((card.billing_mode || 'time') === 'count') {
+            db.prepare("UPDATE member_cards SET status = 'cancelled', used_classes = used_classes + remaining_classes, remaining_classes = 0, updated_at = ? WHERE id = ?").run(currentTime, card.id);
+          } else {
+            db.prepare("UPDATE member_cards SET status = 'cancelled', expires_at = ?, updated_at = ? WHERE id = ?").run(currentTime, currentTime, card.id);
+          }
         }
         // 回收购买赠送的积分（按 订单+商品 维度查找）
         const logs = db.prepare("SELECT * FROM point_logs WHERE reference_id GLOB ? AND type = 'earn'").all('order_' + id + '*');
@@ -1265,6 +1322,57 @@ router.get('/', (req, res) => {
     }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
+  }
+});
+
+/**
+ * GET /api/orders/:id — 订单详情（P0-12）
+ *
+ * ⚠️ 必须注册在 `/my`、`/stats`、`/` 之后：Express 按注册顺序匹配，`/:id` 会吞掉它们。
+ * 此前缺这个接口，支付后无法按 ID 回读状态/实付/退款累计，订单页、退款单页、对账页链路断开。
+ */
+router.get('/:id', (req, res) => {
+  try {
+    const { id } = req.params;
+    const order = db.prepare('SELECT * FROM orders WHERE id = ? OR order_no = ?').get(id, id);
+    if (!order) return res.json(fail('订单不存在'));
+
+    // 权限：管理员与销售可查全部；家长只能查自己孩子的订单
+    if (!isAdminReq(req) && !canSales(req)) {
+      const openid = getOpenId(req);
+      const isOwner = openid && db.prepare(
+        'SELECT 1 FROM parent_bindings WHERE student_id = ? AND parent_openid = ? LIMIT 1'
+      ).get(order.student_id, openid);
+      if (!isOwner) return res.status(403).json(safeFail('无权查看该订单'));
+    }
+
+    const cards = db.prepare(`
+      SELECT id, card_type_name, billing_mode, status,
+             total_classes, remaining_classes, used_classes, activated_at, expires_at
+      FROM member_cards WHERE order_id = ? ORDER BY created_at ASC
+    `).all(order.id);
+    const payments = db.prepare(`
+      SELECT id, amount, channel, status, paid_at, created_at
+      FROM payments WHERE order_id = ? ORDER BY created_at ASC
+    `).all(order.id);
+
+    let items = [];
+    try { items = JSON.parse(order.items || '[]'); } catch (e) { items = []; }
+
+    const paidAmount = Number(order.payable_amount) || 0;
+    const refundedAmount = Number(order.refunded_amount) || 0;
+    res.json(success({
+      ...order,
+      items,
+      paid_amount: paidAmount,
+      refunded_amount: refundedAmount,
+      refundable: Math.max(0, paidAmount - refundedAmount),
+      cards,
+      payments,
+    }));
+  } catch (err) {
+    console.error('[orders detail]', err);
+    res.status(500).json(safeFail('操作失败，请稍后重试'));
   }
 });
 

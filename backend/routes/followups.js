@@ -293,8 +293,22 @@ router.get('/', (req, res) => {
       const kw = `%${escapeLike(req.query.keyword)}%`;
       params.push(kw, kw);
     }
-    if (req.query.startDate) { where.push('due_at >= ?'); params.push(new Date(req.query.startDate + 'T00:00:00').getTime()); }
-    if (req.query.endDate) { where.push('due_at <= ?'); params.push(new Date(req.query.endDate + 'T23:59:59.999').getTime()); }
+    // P1-5：日期必须校验格式。此前 `new Date('abc' + 'T00:00:00').getTime()` 得 NaN，
+    // 绑定到 sqlite 后要么抛错（500）、要么被当空条件 → 静默返回全量，报表口径被悄悄放大。
+    if (req.query.startDate) {
+      const v = String(req.query.startDate);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return res.json(fail('开始日期格式应为 YYYY-MM-DD'));
+      const t = new Date(v + 'T00:00:00').getTime();
+      if (!Number.isFinite(t)) return res.json(fail('开始日期不合法'));
+      where.push('due_at >= ?'); params.push(t);
+    }
+    if (req.query.endDate) {
+      const v = String(req.query.endDate);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return res.json(fail('结束日期格式应为 YYYY-MM-DD'));
+      const t = new Date(v + 'T23:59:59.999').getTime();
+      if (!Number.isFinite(t)) return res.json(fail('结束日期不合法'));
+      where.push('due_at <= ?'); params.push(t);
+    }
     if (req.query.overdue === '1') {
       where.push("status = 'pending' AND due_at <= ?");
       params.push(now());

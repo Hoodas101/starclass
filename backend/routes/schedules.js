@@ -460,8 +460,28 @@ router.post('/recursive', (req, res) => {
     if (!finalName) return res.json(fail('活动名称不能为空'));
     const effectiveCourseId = courseId || ensureTempCourse();
 
+    // 幂等闸门：同一「规则签名 + 日期区间」只允许存在一条规则。
+    // 此前本接口必然 500 而事务已提交，用户重试就再生成一整套排期（课表重复）。
+    // 修好 500 后仍需此闸门，抵御双击 / 网络重试 / 前端重发。
+    const dupRule = db.prepare(`
+      SELECT id FROM schedule_rules
+      WHERE course_id = ? AND COALESCE(teacher_id,'') = ? AND COALESCE(classroom_id,'') = ?
+        AND start_time = ? AND end_time = ? AND start_date = ? AND end_date = ?
+        AND COALESCE(repeat_type,'') = ? AND COALESCE(interval_days,0) = ?
+        AND COALESCE(group_course_id,'') = ? AND COALESCE(group_name,'') = ?
+      LIMIT 1
+    `).get(effectiveCourseId, teacherId || '', classroomId || '', startTime, endTime, startDate, endDate,
+      repeatType || '', intervalDays || 0, groupCourseId || '', groupName || '');
+    if (dupRule) {
+      return res.json(fail(`相同周期的排课规则已存在（${dupRule.id}），请勿重复创建；如需重建请先删除原规则`));
+    }
+
     const ruleId = generateId('rule_');
     const createdSchedules = [];
+    // F3：冲突被跳过的日期必须留痕。声明必须在事务回调之外 —— 事务结束后成功响应要回传
+    // skipped/skippedCount，此前声明在回调内导致外层 ReferenceError（500），而事务已提交，
+    // 用户重试即重复生成整套排期。任何「事务内声明、事务外引用」都会复现同类事故。
+    const skipped = [];
     // 规则 INSERT 与逐日排期 INSERT 必须同一事务：此前整个循环无事务，中途抛错会留下
     //「规则已建、排期只建一半」的中间态，且无法从数据判断哪些已生成。
     // 冲突检测在事务内逐日重做，不依赖事务外预检。
@@ -481,9 +501,7 @@ router.post('/recursive', (req, res) => {
         String(student_ids || '').split(',').map((x) => x.trim()).filter(Boolean)
       );
 
-      // F3：冲突被跳过的日期必须留痕。此前静默 continue，全部跳过仍返回 code=0，
-      // 管理者收到「成功」提示但课表是空的（学员到店才发现没课）。
-      const skipped = [];
+      // F3：冲突被跳过的日期必须留痕（skipped 已提到事务外声明，此处不再重复声明）。
       let intervalCounter = 0;
       for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
         const dayOfWeek = d.getDay();
@@ -1241,7 +1259,14 @@ router.get('/coach/stats', (req, res) => {
     if (!requireStaffPerm(req, res, 'coachstats', '课时统计')) return;
     if (!user.phone) return res.json(fail('账号未绑定手机号'));
     const teacher = db.prepare("SELECT id, name FROM teachers WHERE phone = ?").get(user.phone);
-    if (!teacher) return res.json(fail('尚未配置教练档案，请联系管理员'));
+    if (!teacher) {
+      // P2-26：管理员账号通常没有 teachers 档案。此前对所有身份统一提示「请联系管理员」，
+      // 管理员看到的是「请联系我自己」这种循环无解的死胡同，只能以为系统坏了。
+      if (isAdminReq(req)) {
+        return res.json(fail('管理员账号没有教练档案，请到「课时统计」查看全部教练数据'));
+      }
+      return res.json(fail('尚未配置教练档案，请联系管理员'));
+    }
     res.json(success({ teacherId: teacher.id, name: teacher.name, ...coachStats(teacher.id, req.query.month) }));
   } catch (err) {
     console.error('[coach stats]', err);
@@ -1318,6 +1343,9 @@ router.post('/:id/enroll', (req, res) => {
       }
       bind = { student_id: stu.id, student_name: stu.name, parent_name: '管理员' };
     } else if (isStaffReq(req)) {
+      // P1-2：员工代报名必须校验排课权限。此前只判 isStaffReq，于是销售（默认无 schedule
+      // 权限）也能替任意学员报任意排期 —— 权限边界被绕过，名单与课时归属随之失控。
+      if (!requireStaffPerm(req, res, 'schedule', '排课')) return;
       // 员工代录名（教练/销售等有排课权限的员工账号）。员工账号在数据结构上不存在
       // parent_bindings 记录，若落入下方家长分支必然 100% 失败（「该成员未绑定到当前账号」），
       // 导致教练「排课→录名→点名」闭环断裂。此处走独立分支，不复用家长路径。
@@ -1436,34 +1464,40 @@ router.delete('/:id/enroll', (req, res) => {
     // 支持指定孩子取消报名（多孩家庭）；未指定时仅取消第一个孩子的报名，避免误删
     const { studentId } = req.body || {};
     const actor = getActor(req);
-    let result, removed = [];
-    if (isAdmin) {
-      // 管理员代取消：直接按成员 ID 操作
-      if (!studentId) return res.json(fail('管理员代取消请指定成员ID'));
-      removed = db.prepare("SELECT id, student_id, status FROM enrollments WHERE schedule_id = ? AND student_id = ? AND status = 'active'").all(s.id, studentId);
-      result = db.prepare(`
-        DELETE FROM enrollments
-        WHERE schedule_id = ? AND student_id = ? AND status = 'active'
-      `).run(s.id, studentId);
-    } else {
-      let studentClause = '';
-      const params = [s.id, openid];
-      if (studentId) {
-        studentClause = 'AND student_id = ?';
-        params.push(studentId);
+    let result;
+    let removed = [];
+    let errMsg = '';
+    // P1-3：删除报名与名额回退必须同一事务 —— 此前 DELETE 已生效而计数更新失败时，
+    // 名额会被永久多占（报不上名也退不掉）。家长未指定孩子时只取消**最早的一条**：
+    // 原注释承诺「仅取消第一个」，实现却按 parent_openid 删掉了该家长**全部孩子**的报名。
+    db.transaction(() => {
+      if (isAdmin) {
+        if (!studentId) { errMsg = '管理员代取消请指定成员ID'; return; }
+        removed = db.prepare("SELECT id, student_id, status FROM enrollments WHERE schedule_id = ? AND student_id = ? AND status = 'active'").all(s.id, studentId);
+        result = db.prepare("DELETE FROM enrollments WHERE schedule_id = ? AND student_id = ? AND status = 'active'").run(s.id, studentId);
+      } else {
+        let targetStudentId = studentId || '';
+        if (!targetStudentId) {
+          const first = db.prepare(`
+            SELECT e.student_id FROM enrollments e
+            JOIN parent_bindings pb ON pb.student_id = e.student_id
+            WHERE e.schedule_id = ? AND pb.parent_openid = ? AND e.status = 'active'
+            ORDER BY e.created_at ASC, e.id ASC LIMIT 1
+          `).get(s.id, openid);
+          targetStudentId = first ? first.student_id : '';
+        }
+        if (!targetStudentId) { result = { changes: 0 }; return; }
+        removed = db.prepare("SELECT id, student_id, status FROM enrollments WHERE schedule_id = ? AND student_id = ? AND status = 'active'").all(s.id, targetStudentId);
+        result = db.prepare("DELETE FROM enrollments WHERE schedule_id = ? AND student_id = ? AND status = 'active'").run(s.id, targetStudentId);
       }
-      removed = db.prepare(`SELECT id, student_id, status FROM enrollments WHERE schedule_id = ? AND student_id IN (SELECT student_id FROM parent_bindings WHERE parent_openid = ?) AND status = 'active' ${studentClause}`).all(...params);
-      result = db.prepare(`
-        DELETE FROM enrollments
-        WHERE schedule_id = ? AND student_id IN (
-          SELECT student_id FROM parent_bindings WHERE parent_openid = ?
-        ) AND status = 'active' ${studentClause}
-      `).run(...params);
-    }
-    if (result.changes === 0) return res.json(fail('未找到报名记录'));
+      if (result.changes > 0) {
+        db.prepare('UPDATE schedules SET enrolled_count = MAX(0, enrolled_count - ?), updated_at = ? WHERE id = ?')
+          .run(result.changes, now(), s.id);
+      }
+    }).immediate();
 
-    db.prepare('UPDATE schedules SET enrolled_count = MAX(0, enrolled_count - ?), updated_at = ? WHERE id = ?')
-      .run(result.changes, now(), s.id);
+    if (errMsg) return res.json(fail(errMsg));
+    if (!result || result.changes === 0) return res.json(fail('未找到报名记录'));
 
     for (const r of removed) {
       recordAudit(db, {

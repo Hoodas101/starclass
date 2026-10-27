@@ -27,6 +27,16 @@
     </div>
 
     <!-- 汇总卡片 -->
+    <!-- P1-27：上方卡片按「所选时间段」汇总（本月/本季/本年/自定义），下方月度表按「所选年份」整年统计。
+         两组数字口径不同，不加说明会被当成「有一组算错了」，进而照着错的一方去对账。 -->
+    <el-alert
+      v-if="activeMode === 'monthly'"
+      type="info"
+      :closable="false"
+      show-icon
+      class="finance-scope-tip"
+      title="口径说明：上方汇总按所选时间段统计，下方月度表按所选年份的整年统计，两者不可直接对比。"
+    />
     <div class="metric-row">
       <div class="metric-card">
         <div class="stat-label">总收入</div>

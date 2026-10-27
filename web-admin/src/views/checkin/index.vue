@@ -237,10 +237,16 @@ const loadTodayCourses = async () => {
     const res = await getSchedules({
       startDate: selectedDate.value,
       endDate: selectedDate.value,
-      pageSize: 50
+      // P1-32：此前固定 pageSize:50，单日排期超过 50 场时多出的课在到店页静默消失
+      //（教练找不到课、点不了名，且没有任何提示）。提高上限并对超限明确告知。
+      pageSize: 200
     })
+    const todayList = res.list || []
+    if (Number(res.total) > todayList.length) {
+      ElMessage.warning(`当日排期较多，仅显示前 ${todayList.length} 场（共 ${res.total} 场），请到「排期」页查看全部`)
+    }
     const now = dayjs()
-    todayCourses.value = (res.list || []).map((s) => {
+    todayCourses.value = todayList.map((s) => {
       const start = dayjs(`${s.date}T${s.start_time}`)
       const end = dayjs(`${s.date}T${s.end_time}`)
       const isOngoing = now.isAfter(start) && now.isBefore(end)

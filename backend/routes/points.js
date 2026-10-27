@@ -12,6 +12,8 @@ const router = express.Router();
 const db = require('../db');
 const { generateId, success, fail, safeFail, getOpenId, now, parsePagination, isAdminReq, isStaffReq, canViewStudentData, recordAudit } = require('../utils');
 const { computeExpiry } = require('../utils/points-expiry');
+// P1-9：已归档/已删除学员不得发放积分（与上课链路同一判定）
+const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
 /**
  * GET /api/points/balance — 积分余额
@@ -53,11 +55,21 @@ router.get('/balance', (req, res) => {
 router.post('/add', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可发放积分'));
-    const { studentId, amount, reason = '', referenceId = '' } = req.body;
-    if (!studentId || !amount || amount <= 0) return res.json(fail('成员ID和积分数不能为空'));
+    const { studentId, reason = '', referenceId = '' } = req.body;
+    let amount = req.body.amount;
+    // P0-7：ID 传对象/数组会一路传到 sqlite 绑定层抛 TypeError → HTTP 500（误报成服务故障）
+    if (typeof studentId !== 'string' && typeof studentId !== 'number') {
+      return res.json(fail('成员ID格式不正确'));
+    }
+    if (amount === undefined || amount === null || amount === '') return res.json(fail('成员ID和积分数不能为空'));
+    // P1-4 / P1-12：积分必须是正整数。此前只判 >0，1.5 可穿透 → points.balance 出现小数，
+    // 而消费流水按整数记，导致 SUM(point_logs.amount) ≠ points.balance 永久失配且无自愈。
+    amount = Number(amount);
+    if (!Number.isInteger(amount) || amount <= 0) return res.json(fail('积分必须为正整数'));
+    if (amount > 100000) return res.json(fail('单次积分不能超过 100000'));
 
-    const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
-    if (!student) return res.json(fail('成员不存在'));
+    const student = db.prepare(`SELECT s.name FROM students s WHERE s.id = ? AND ${ACTIVE_STUDENT_SQL}`).get(studentId);
+    if (!student) return res.json(fail('成员不存在或已归档'));
 
     const currentTime = now();
     // 幂等检查 + 建账/累加 + 流水写入同事务原子完成：
@@ -108,8 +120,18 @@ router.post('/add', (req, res) => {
 router.post('/consume', (req, res) => {
   try {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可扣减积分'));
-    const { studentId, amount, reason = '', referenceId = '' } = req.body;
-    if (!studentId || !amount || amount <= 0) return res.json(fail('成员ID和积分数不能为空'));
+    const { studentId, reason = '', referenceId = '' } = req.body;
+    let amount = req.body.amount;
+    // P0-7：ID 传对象/数组会一路传到 sqlite 绑定层抛 TypeError → HTTP 500（误报成服务故障）
+    if (typeof studentId !== 'string' && typeof studentId !== 'number') {
+      return res.json(fail('成员ID格式不正确'));
+    }
+    if (amount === undefined || amount === null || amount === '') return res.json(fail('成员ID和积分数不能为空'));
+    // P1-4 / P1-12：积分必须是正整数。此前只判 >0，1.5 可穿透 → points.balance 出现小数，
+    // 而消费流水按整数记，导致 SUM(point_logs.amount) ≠ points.balance 永久失配且无自愈。
+    amount = Number(amount);
+    if (!Number.isInteger(amount) || amount <= 0) return res.json(fail('积分必须为正整数'));
+    if (amount > 100000) return res.json(fail('单次积分不能超过 100000'));
 
     const points = db.prepare('SELECT * FROM points WHERE student_id = ?').get(studentId);
     if (!points || points.balance < amount) return res.json(fail('积分余额不足'));

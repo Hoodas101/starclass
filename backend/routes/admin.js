@@ -32,6 +32,21 @@ const { EXPIRY_WINDOWS, buildExpiringWhere } = require('../utils/renewal');
 // 只有在裸列比较（paid_at >= ? AND paid_at < ?）下才会被选中。
 // paid_at 存的是 epoch 毫秒整数；区间一律取半开 [start, end)，与原来的 date(...) >= 'D' / <= 'D' 等价。
 const dayStartMs = (d) => new Date(`${d}T00:00:00`).getTime();        // 'YYYY-MM-DD' 当日 00:00 本地
+
+/**
+ * P2-13：只读端点的员工身份校验。
+ * 此前 /staff-options、/classrooms、/courses 没有任何鉴权：未登录即可拉到
+ * 全体员工姓名 + 手机号（隐私泄露面）与内部场地/课程配置，家长端也能读到内部名册。
+ * 只读不等于可以公开 —— 员工名册与场地配置属机构内部信息。
+ */
+function requireStaffRead(req, res) {
+  const u = getReqUser(req);
+  if (!u || !['admin', 'coach', 'sales'].includes(u.role)) {
+    res.status(403).json(safeFail('无查看权限'));
+    return false;
+  }
+  return true;
+}
 const dayEndMs = (d) => dayStartMs(d) + 86400000;                      // 次日 00:00（开区间上界）
 const monthStartMs = (ym) => new Date(`${ym}-01T00:00:00`).getTime();  // 'YYYY-MM' 当月 1 日 00:00
 const nextMonthStartMs = (ym) => {
@@ -632,8 +647,16 @@ router.get('/export', adminOnly, (req, res) => {
     const { type, startDate, endDate } = req.query;
     // E1：导出是 SELECT * 全表装载（orders 分支还要逐行 JSON.parse items），无界导出在大库上会打爆内存。
     // 强制要求时间范围 —— 七种导出类型都有可用的 epoch 毫秒日期列，见下方各分支的 range() 调用。
+    // P2-29：改用全站约定 HTTP 200 + code!=0，不再用 400（前端统一按 code 判断，400 会被当网络故障）
     if (!startDate || !endDate) {
-      return res.status(400).json({ code: 400, data: null, message: '导出需指定时间范围（startDate 与 endDate，格式 YYYY-MM-DD）' });
+      return res.json(fail('导出需指定时间范围（startDate 与 endDate，格式 YYYY-MM-DD）'));
+    }
+    // P1-5：日期格式与可解析性校验。此前 'abc' 会一路算成 NaN，导出结果为空却不报错。
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(startDate)) || !/^\d{4}-\d{2}-\d{2}$/.test(String(endDate))) {
+      return res.json(fail('日期格式应为 YYYY-MM-DD'));
+    }
+    if (!Number.isFinite(dayStartMs(startDate)) || !Number.isFinite(dayEndMs(endDate))) {
+      return res.json(fail('日期不合法'));
     }
     let data = [];
     let filename = '';
@@ -784,13 +807,18 @@ router.post('/suppressions', adminOnly, (req, res) => {
   try {
     const { phone, name = '', type = 'marketing', reason = '' } = req.body;
     if (!phone) return res.json(fail('手机号必填'));
-    const exist = db.prepare('SELECT id FROM suppressions WHERE phone = ?').get(phone);
+    // P2-19：手机号必须归一化后再存。勿扰是按 `sp.phone = pb.parent_phone` **严格相等**匹配的，
+    // 录入时多一个空格或写成 138-0000-0000，这条勿扰就永远不会命中 ——
+    // 家长已被登记勿扰，营销通知仍照发（合规风险，且界面上完全看不出问题）。
+    const phoneNorm = String(phone).replace(/[\s-]/g, '');
+    if (!/^1\d{10}$/.test(phoneNorm)) return res.json(fail('手机号格式不正确（应为 11 位手机号）'));
+    const exist = db.prepare('SELECT id FROM suppressions WHERE phone = ?').get(phoneNorm);
     if (exist) return res.json(fail('该手机号已在勿扰名单'));
     const id = generateId('SUP_');
     db.prepare(`
       INSERT INTO suppressions (id, phone, name, type, reason, created_by, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, phone, name, type, reason, getOpenId(req) || '', now());
+    `).run(id, phoneNorm, name, type, reason, getOpenId(req) || '', now());
     // 勿扰名单影响营销触达范围，需留痕（手机号为敏感信息，不写入审计）
     const actor = getActor(req);
     recordAudit(db, {
@@ -957,6 +985,10 @@ router.get('/parents', adminOnly, (req, res) => {
  */
 router.get('/staff-options', (req, res) => {
   try {
+    // P2-13：只读端点也必须校验员工身份。此前 /staff-options、/classrooms、/courses
+    // 对外完全开放 —— 未登录就能拉到全体员工姓名与手机号（隐私泄露），
+    // 家长端也能读到内部名册与场地配置。
+    if (!requireStaffRead(req, res)) return;
     const teachers = db.prepare(`
       SELECT id, name, phone FROM teachers WHERE status = 'active' ORDER BY created_at ASC
     `).all();
@@ -1010,11 +1042,17 @@ router.post('/teachers', adminOnly, (req, res) => {
 
     // 同步创建/启用教练登录账号
     syncCoachAccount(phone, name.trim());
+    // P0-11：新建员工必须一并下发临时口令。此前 POST 分支丢弃 tempPassword，
+    // 账号虽已创建但没有任何人知道密码 —— 该员工用任意口令登录都是 403，
+    // 「开通员工」这条链路实际是断的。此处与 PUT resetPassword 复用同一生成器与返回形态。
+    let tempPassword = null;
     if (phone) {
       const u = db.prepare('SELECT id FROM users WHERE phone = ?').get(phone);
       if (u) {
-        db.prepare('UPDATE users SET role = ?, permissions = ?, updated_at = ? WHERE id = ?')
-          .run(role, Array.isArray(permissions) ? JSON.stringify(permissions) : '', now(), u.id);
+        const init = initStaffPassword();
+        tempPassword = init.temp;
+        db.prepare('UPDATE users SET role = ?, permissions = ?, password = ?, token_version = COALESCE(token_version,0) + 1, updated_at = ? WHERE id = ?')
+          .run(role, Array.isArray(permissions) ? JSON.stringify(permissions) : '', hashPassword(init.password), now(), u.id);
       }
     }
     // 新增教师会同步创建/提权登录账号（role/permissions），属权限变更，必须留痕
@@ -1027,7 +1065,8 @@ router.post('/teachers', adminOnly, (req, res) => {
       actorRole: actor.role,
       after: { name: name.trim(), role, has_phone: !!phone, permissions: Array.isArray(permissions) ? permissions : [] },
     });
-    res.json(success({ id }));
+    // 临时口令仅在此次响应中返回一次（前端弹窗展示后即不可再查），与 PUT 重置口令行为一致
+    res.json(success({ id, ...(tempPassword ? { tempPassword } : {}) }));
   } catch (err) {
     console.error('[admin teachers create]', err);
     res.status(500).json(safeFail('新增教师失败'));
@@ -1265,6 +1304,7 @@ router.delete('/teachers/:id', adminOnly, (req, res) => {
  */
 router.get('/classrooms', (req, res) => {
   try {
+    if (!requireStaffRead(req, res)) return;
     const list = db.prepare(`
       SELECT id, name, capacity, area, equipment, location, status, color
       FROM classrooms WHERE status = 'active' ORDER BY created_at ASC
@@ -1369,7 +1409,7 @@ router.put('/classrooms/:id', adminOnly, (req, res) => {
         return res.status(400).json({
           code: 400,
           data: classroomConflictPayload(conflicts),
-          message: `该场地仍有 ${conflicts.length} 场未来排期，停用前请先调整；如确认强制停用请带 confirmCascade:true 解除占用`,
+          message: `该场地仍有 ${conflicts.length} 场未来排期，停用前请先调整；如确认继续停用，请再次确认`,
         });
       }
     }
@@ -1479,6 +1519,7 @@ router.delete('/classrooms/:id', adminOnly, (req, res) => {
  */
 router.get('/courses', (req, res) => {
   try {
+    if (!requireStaffRead(req, res)) return;
     // includeInactive=1 时同时返回停用/归档活动（管理页需要看到以便恢复）；
     // 默认仅返回在售且未归档的活动，归档后的班级从可报名/可选列表中隐藏
     const where = req.query.includeInactive === '1' ? '' : 'WHERE is_active = 1 AND archived = 0';
@@ -1501,6 +1542,7 @@ router.get('/courses', (req, res) => {
  */
 router.get('/courses/options', (req, res) => {
   try {
+    if (!requireStaffRead(req, res)) return;
     const { q, includeInactive } = req.query;
     let where = '';
     const params = [];

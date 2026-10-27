@@ -126,6 +126,14 @@ router.post('/', (req, res) => {
       return res.status(403).json(safeFail('无成员建档权限'));
     }
     const { name, gender, birthday, school, grade, hobby, remark, level, height, weight, bmi, phone, parentName, confirmDuplicate } = req.body;
+    // P1-13：对象/数组必须在 String() 之前拦掉 —— 否则会静默得到「[object Object]」
+    // 或「1,2」这类脏姓名入库，学员列表与导出随即被污染且无从追溯。
+    if (name !== undefined && name !== null && typeof name !== 'string') {
+      return res.json(fail('成员姓名格式不正确'));
+    }
+    if (gender !== undefined && gender !== null && typeof gender !== 'string') {
+      return res.json(fail('性别格式不正确'));
+    }
     const nameVal = String(name || '').trim();
     const genderVal = String(gender == null ? '' : gender).trim();
     const basicErr = validateStudentBasics(nameVal, genderVal);

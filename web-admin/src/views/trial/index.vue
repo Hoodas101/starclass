@@ -87,9 +87,11 @@
                   <el-button type="primary" link size="small" @click.stop="openAssignDialog(row)">安排</el-button>
                   <el-button type="danger" link size="small" @click.stop="handleReject(row)">拒绝</el-button>
                 </template>
-                <!-- 已安排的试听：可一键转正式学员，打通「试听 → 学员 → 开卡」主链路 -->
+                <!-- 已安排的试听：可一键转正式学员，打通「试听 → 学员 → 开卡」主链路。
+                     仅管理员可见：转化要调 POST /students（后端限管理员），
+                     此前 isAdmin 定义了却从未引用，教练/销售点进去必然 403。 -->
                 <el-button
-                  v-else-if="row.status === 'assigned'"
+                  v-else-if="row.status === 'assigned' && isAdmin"
                   type="primary"
                   link
                   size="small"
@@ -470,6 +472,11 @@ const convertRules = {
 }
 
 const openConvertDialog = async (row) => {
+  // 二次拦截：模板 v-if 只覆盖正常点击，这里兜住任何绕过视图的调用
+  if (!isAdmin.value) {
+    ElMessage.warning('仅管理员可将试听转为正式学员')
+    return
+  }
   convertingTrial.value = row
   createdStudentId.value = ''
   Object.assign(convertForm, {

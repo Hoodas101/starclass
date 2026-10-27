@@ -456,7 +456,10 @@ function runCardExpirySweep() {
   }
 }
 runCardExpirySweep();
-setInterval(runCardExpirySweep, 24 * 3600 * 1000);
+// P1-37：24h 一次会让「已到期但 status 仍 active」的窗口长达一天，期间只按 status
+// 过滤的查询会把过期卡当有效卡（可继续上课/扣课）。改为每小时一次，窗口缩到 1h；
+// 该流转是幂等 UPDATE，多跑无副作用。
+setInterval(runCardExpirySweep, 60 * 60 * 1000);
 
 // ============================================
 // 时效卡收入摊销结转（P1-A3）

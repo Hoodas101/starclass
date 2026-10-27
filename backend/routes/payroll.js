@@ -396,9 +396,14 @@ router.get('/me', (req, res) => {
     if (!u.phone) return res.json(fail('账号未绑定手机号'));
     const teacher = db.prepare("SELECT * FROM teachers WHERE phone = ?").get(u.phone);
     if (!teacher) return res.json(fail('尚未配置教练档案'));
+    // P2-22：默认月份必须按**本地时区**生成。toISOString() 返回 UTC，
+    // 每月 1 日 00:00~08:00（东八区）会被算成上一个月 —— 教练在月初查薪资，
+    // 看到的是上月数据却以为当月还没结算。
+    const nowD = new Date();
+    const localMonth = `${nowD.getFullYear()}-${String(nowD.getMonth() + 1).padStart(2, '0')}`;
     const month = /^\d{4}-\d{2}$/.test(req.query.month || '')
       ? req.query.month
-      : new Date().toISOString().slice(0, 7);
+      : localMonth;
     const range = monthRange(month);
     const data = lessonRows(teacher.id, range.startDate, range.endDate);
     res.json(success({ ...data, month }));

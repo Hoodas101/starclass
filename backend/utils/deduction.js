@@ -58,6 +58,42 @@ function resolveConsumeClasses(scheduleId) {
  * @returns {object|null} member_cards 行（含 course_scope 便于调用方留痕）；
  *                        无合格卡时 null；有卡但范围不匹配时 { scopeMismatch: true }
  */
+/**
+ * 卡是否适用于该排期的课程（P1-23 抽出，供「显式指定 cardId 手工扣课」复用）。
+ *
+ * 结构化范围优先：scope_course_ids 非空时按 course_id 精确匹配，
+ * 不再依赖「中文名互相包含」的巧合（迁移 033）。
+ * @param {object} card 需含 course_scope / scope_course_ids（来自卡种 LEFT JOIN）
+ * @param {object|null} sch 排期行（course_id / course_name）；null 表示排期不存在
+ */
+function cardScopeMatches(card, sch) {
+  if (!card) return false;
+  // 排期不存在（如手工扣课传入尚未落库的 scheduleId）：课程范围无从判定，沿用兜底不阻断
+  if (!sch) return true;
+  // 结构化范围优先
+  const ids = String(card.scope_course_ids || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (ids.length) return !!(sch.course_id && ids.includes(String(sch.course_id)));
+  const scope = String(card.course_scope || '').trim();
+  if (!scope) return true;                                  // 空 = 不限
+  if (scope.includes('通用') || scope.includes('全部')) return true; // 自由文本的「通用」约定
+  if (sch.course_id && scope.includes(sch.course_id)) return true;
+  if (sch.course_name) {
+    const name = String(sch.course_name).trim();
+    // P2-32：双向包含必须按「词段」比较，不能整串互相 includes。
+    // 否则 scope='球' 会把「篮球」也算作适用（1v1 私教卡被团课/临时活动误扣），
+    // 单字匹配是最典型的误放行来源。这里按常见分隔符切分，只让长度 ≥2 的段参与匹配，
+    // 同时保留「scope 比课程名长」（'1v1私教' vs '1v1私教课'）这类合法场景。
+    if (name.length >= 2) {
+      const segs = scope
+        .split(/[,，、;；\s|/]+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length >= 2);
+      if (segs.some((seg) => seg === name || name.includes(seg) || seg.includes(name))) return true;
+    }
+  }
+  return false;
+}
+
 function pickCardForDeduction(studentId, scheduleId, t, per) {
   // LEFT JOIN 卡种取 course_scope：member_cards 上只有 card_type_id，范围策略存在卡种（membership_cards）。
   // mc.* 展开保证调用方拿到的仍是完整的 member_cards 行（order_id / card_type_name 等结转所需字段）。
@@ -76,23 +112,7 @@ function pickCardForDeduction(studentId, scheduleId, t, per) {
   if (!cards.length) return null;
 
   const sch = db.prepare('SELECT course_id, course_name FROM schedules WHERE id = ?').get(scheduleId);
-  const scopeMatches = (card) => {
-    // 结构化范围优先：scope_course_ids 非空时按 course_id 精确匹配，
-    // 不再依赖「中文名互相包含」的巧合（迁移 033）。
-    const ids = String(card.scope_course_ids || '').split(',').map((s) => s.trim()).filter(Boolean);
-    if (ids.length) return !!(sch && sch.course_id && ids.includes(String(sch.course_id)));
-    const scope = String(card.course_scope || '').trim();
-    if (!scope) return true;                                  // 空 = 不限
-    if (scope.includes('通用') || scope.includes('全部')) return true; // 自由文本的「通用」约定
-    if (sch && sch.course_id && scope.includes(sch.course_id)) return true;
-    if (sch && sch.course_name) {
-      const name = String(sch.course_name).trim();
-      // 双向包含：范围串可能比课程名长（scope「1v1私教」 vs 课程名「1v1私教课」），
-      // 单向 scope.includes(name) 会把这类合法场景误拒。反向包含兜住它，避免「防误扣」变成「误拒」。
-      if (name && (scope.includes(name) || name.includes(scope))) return true;
-    }
-    return false;
-  };
+  const scopeMatches = (card) => cardScopeMatches(card, sch);
 
   const matched = cards.filter(scopeMatches);
   // 已按 expires_at ASC，matched[0] 即「匹配范围内最先到期的卡」
@@ -109,4 +129,4 @@ function pickCardForDeduction(studentId, scheduleId, t, per) {
   return { scopeMismatch: true, cardTypeName: (cards[0] && cards[0].card_type_name) || '' };
 }
 
-module.exports = { resolveConsumeClasses, pickCardForDeduction };
+module.exports = { resolveConsumeClasses, pickCardForDeduction, cardScopeMatches };

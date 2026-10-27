@@ -190,7 +190,9 @@ const onApplyStudentChange = async () => {
   if (!applyForm.value.studentId) return
   scheduleLoading.value = true
   try {
-    const res = await getSchedules({ studentId: applyForm.value.studentId, pageSize: 100 })
+    // P1-34：上限 100 会让超出部分从下拉里静默消失（学员看不到可请假的课）
+    const res = await getSchedules({ studentId: applyForm.value.studentId, pageSize: 500 })
+    if (Number(res.total) > (res.list || []).length) ElMessage.warning('待请假排期较多，下拉仅显示前 500 场，请先用筛选缩小范围')
     scheduleOptions.value = res.list || []
   } catch (e) {
     scheduleOptions.value = []

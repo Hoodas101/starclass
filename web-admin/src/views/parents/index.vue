@@ -282,6 +282,12 @@ const loadParents = async () => {
         }
       }
     }
+    // P1-31：「电话」列绑的是 prop="phone"，而行对象只有 parents[].parent_phone，
+    // 于是该列恒为空白、sortable 也没有字段可排。这里把家长电话去重汇总写回 phone。
+    for (const m of map.values()) {
+      const phones = [...new Set(m.parents.map((p) => p.parent_phone).filter(Boolean))]
+      m.phone = phones.join(' / ')
+    }
     list.value = [...map.values()]
     total.value = list.value.length
   } catch (e) {

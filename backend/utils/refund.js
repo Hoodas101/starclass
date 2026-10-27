@@ -110,23 +110,47 @@ function computeRefundSuggestion(order, opts = {}) {
   }
   refundFactor = Math.max(0, Math.min(1, refundFactor));
 
-  // ── 公式化（P3）：卡种 → 全局 → 内置默认 ──
-  // 三层优先级：卡种上配的公式优先（发卡时并不快照公式，退款时读卡种当前值 ——
-  // 与「已收的钱不能因改配置而变」的冲突在此处刻意选择「可调」：退款是事后行为，
-  // 机构调公式的本意就是修正后续退款口径；历史已退金额已落库，不受影响）。
+  // ── 退费口径：三档优先级，且必须互斥，避免两套配置各自为政 ──
+  //   1) 卡种上显式填了公式 / 全局切到 formula → 高级表达式
+  //   2) 卡规则中心「简易」里真的填了数字 → 基数 × (1 − 手续费%) − 最低手续费
+  //   3) 都没配 → 沿用「退费规则」页 beforeStart / afterStart（存量口径，默认值即此路）
+  // 第 3 档存在的理由：简易模式的默认值（unused + 0% + ¥0）与旧口径在金额上等价，
+  // 却会丢掉 beforeStart=full / afterStart=percent 的百分比语义 —— 若让它无条件接管，
+  // 机构只在「退费规则」页配的 30% 手续费就静默失效（少退钱，直接客诉）。
+  // 故简易模式按「显式配置才生效」处理，并在返回值里带 ruleSource 便于排查。
   let amount = Math.round(remain * refundFactor);
   let formulaInfo = null;
-  let formulaSrc = '';
+  let calcInfo = null;
+  let ruleSource = 'refund_rules';
+  let rcfg = {};
   try {
     const cfg = getCardRules();
+    rcfg = (cfg && cfg.refund) || {};
+  } catch (e) {
+    rcfg = {};
+  }
+
+  const simplePct = Math.max(0, Math.min(100, Number(rcfg.deductPercent) || 0));
+  const simpleMinFee = Math.max(0, Number(rcfg.minFee) || 0);
+  const simpleConfigured = simplePct > 0 || simpleMinFee > 0 || rcfg.base === 'remain';
+
+  // 卡种级公式优先于全局开关：管理员在卡种上填了公式就是显式意图，
+  // 不该因为全局还停在 mode='simple' 而让该卡种的公式变成死配置。
+  let cardTypeFormula = '';
+  try {
     const ct = card
       ? db.prepare('SELECT refund_formula FROM membership_cards WHERE id = ?').get(card.card_type_id)
       : null;
-    formulaSrc = String((ct && ct.refund_formula) || '').trim() || String(cfg.refund.formula || '').trim();
+    cardTypeFormula = String((ct && ct.refund_formula) || '').trim();
   } catch (e) {
-    formulaSrc = '';
+    cardTypeFormula = '';
   }
+  const formulaSrc = cardTypeFormula
+    || (rcfg.mode === 'formula' ? String(rcfg.formula || '').trim() : '');
+
   if (formulaSrc) {
+    ruleSource = cardTypeFormula ? 'card_type_formula' : 'card_rules_formula';
+    {
     const DAY = 86400000;
     const act = Number(card && card.activated_at) || 0;
     const exp = Number(card && card.expires_at) || 0;
@@ -147,7 +171,8 @@ function computeRefundSuggestion(order, opts = {}) {
     };
     const r = evaluateRefund(formulaSrc, vars);
     if (r.ok) {
-      amount = r.amount;
+      // 公式可任意书写，必须夹取到 [0, 整单可退额]：否则一个写错的表达式就能退超净收。
+      amount = Math.max(0, Math.min(remain, Math.round(Number(r.amount) || 0)));
       // 因子同步回写：退卡路径按「本卡份额 × 因子」算，两者不能漂移
       refundFactor = remain > 0 ? amount / remain : 0;
       formulaInfo = { formula: formulaSrc, vars, raw: r.raw, amount };
@@ -155,11 +180,86 @@ function computeRefundSuggestion(order, opts = {}) {
       // 公式坏了不能把退款算成 0 —— 回落既有规则，并留痕便于排查
       console.warn('[refund] 退费公式求值失败，回落默认规则:', r.error, '|', formulaSrc);
     }
+    }
+  } else if (simpleConfigured) {
+    // 简易模式：基数 × (1 − 手续费%) − 最低手续费（全数字配置，不写表达式）
+    ruleSource = 'card_rules_simple';
+    const baseKind = rcfg.base === 'remain' ? 'remain' : 'unused';
+    const baseVal = baseKind === 'remain' ? remain : remain * unusedRatio;
+    const pct = simplePct;
+    const minFee = simpleMinFee;
+    let amt = Math.round(baseVal * (1 - pct / 100));
+    if (minFee > 0) amt = Math.min(amt, Math.max(0, Math.round(baseVal - minFee)));
+    amt = Math.max(0, Math.min(remain, amt));
+    amount = amt;
+    refundFactor = remain > 0 ? amount / remain : 0;
+    mode = amount >= remain ? 'full' : 'custom';
+    const ratioText = Math.round(unusedRatio * 100);
+    reason = `退费规则：基数 ¥${Math.round(baseVal)}`
+      + (baseKind === 'remain' ? '（整单剩余额）' : `（未消耗 ${ratioText}%）`)
+      + (pct ? ` × (1 − ${pct}%)` : '')
+      + (minFee ? ` − 最低手续费 ¥${minFee}` : '')
+      + ` = ¥${amount}`;
+    calcInfo = { baseKind, base: Math.round(baseVal), deductPercent: pct, minFee, unusedRatio: ratioText };
+    // P1-36：base='remain' 是显式选择（保留管理者的操作空间），但必须让人知道代价 ——
+    // 已消耗的部分也会被计算进退款基数，只适用于「整单未开课」的补退场景。
+    if (baseKind === 'remain' && ratioText < 100) {
+      calcInfo.warn = `已消耗 ${100 - ratioText}% 仍按整单剩余额计算，仅适用于整单未开课场景`;
+      reason += `｜注意：${calcInfo.warn}`;
+    }
+  }
+
+  // ── P0-5：多卡订单必须按卡分别定价 ──
+  // 旧实现只取「最新一张卡」的消耗状态给**整单**定价：订单含卡A（已用 20/24）与卡B（未用）时，
+  // 取到卡B → unusedRatio=1 → 整单全额退 ¥6000，而正确值是卡A 500 + 卡B 3000 = ¥3500。
+  // 现改为：未显式指定 cardId 且订单下有多张卡时，按卡种标价占比拆分整单可退额，
+  // 逐卡套用各自规则因子后求和，并夹取到 [0, remain]。
+  if (!opts.cardId) {
+    try {
+      const rows = db.prepare(`
+        SELECT c.id, COALESCE(t.price, 0) AS price
+        FROM member_cards c LEFT JOIN membership_cards t ON t.id = c.card_type_id
+        WHERE c.order_id = ? ORDER BY c.created_at ASC
+      `).all(order.id);
+      if (rows.length > 1) {
+        const posSum = rows.reduce((s, r) => s + Math.max(0, Number(r.price) || 0), 0);
+        let sum = 0;
+        const parts = [];
+        rows.forEach((r) => {
+          // 标价全为 0（赠卡单）时退化为均分，避免除零后每张卡都算 0 元
+          const w = posSum > 0 ? Math.max(0, Number(r.price) || 0) / posSum : 1 / rows.length;
+          const sub = computeRefundSuggestion(order, { cardId: r.id });
+          const part = Math.round(remain * w * sub.refundFactor);
+          sum += part;
+          parts.push({
+            cardId: r.id,
+            weight: Math.round(w * 1000) / 10,
+            factor: Math.round(sub.refundFactor * 1000) / 1000,
+            amount: part,
+          });
+        });
+        amount = Math.max(0, Math.min(remain, sum));
+        refundFactor = remain > 0 ? amount / remain : 0;
+        mode = amount >= remain ? 'full' : 'custom';
+        reason = `按 ${rows.length} 张卡分别计算后合计 ¥${amount}`
+          + `（${parts.map((p) => `¥${p.amount}`).join(' + ')}）`;
+        calcInfo = { multiCard: parts, total: amount };
+        ruleSource = 'multi_card';
+      }
+    } catch (e) {
+      // 明细拆分失败不能把退款算错：回落到单卡口径，并留痕便于排查
+      console.warn('[refund] 多卡分别定价失败，回落单卡口径:', e && e.message);
+    }
   }
 
   return { started, mode, amount, reason, cardInfo, remain, needApproval, processDays, refundFactor,
     // 公式明细：预览页要展示「怎么算出来的」，不能只给一个数字
     formula: formulaInfo,
+    // 简易模式明细：同样要能解释「怎么算出来的」
+    calc: calcInfo,
+    // 本次实际生效的口径：refund_rules | card_rules_simple | card_rules_formula |
+    // card_type_formula | multi_card。设置页两处配置冲突时，以这里为准排查。
+    ruleSource,
     cardId: card ? card.id : null,
     rules: { beforeStart, beforeStartPercent, afterStart, afterStartPercent } };
 }

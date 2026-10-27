@@ -176,6 +176,10 @@ router.get('/', (req, res) => {
  */
 router.put('/', (req, res) => {
   try {
+    // 仅管理员可写入系统设置（机构信息、积分/退费/推送规则、各表格字段配置等）。
+    // 全局中间件只校验 JWT 身份（填充 req.openid），不区分角色；此处必须按角色二次把关，
+    // 否则任意已登录的非管理员（销售/教练）都能篡改经营口径与表格列配置。
+    if (!isAdminReq(req)) return res.status(403).json({ code: 403, data: null, message: '仅管理员可操作' });
     const body = req.body || {};
     const currentTime = now();
     const upsert = db.prepare(`

@@ -5,6 +5,63 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased] — 2026-10-27 全站审计 87 项修复落地（v1.0.10）
+
+来源：`starclass全站扫描与自动化测试报告-20261026`（87 条：14 P0 / 37 P1 / 36 P2）+
+`starclass优化与修复方案-20261027` + 统一补丁。补丁 40 文件 / +1308 −163，在 `1dfd7b4` 干净树上
+`git apply --check` 通过后整体落地；每处改动以根因为准，参数非法统一走「HTTP 200 + `code != 0`」。
+
+### P0（14 条，全部修复）
+
+- **P0-1 周期排课必然 500**：`skipped` 声明从事务回调内提到事务外（此前 `ReferenceError` 而事务已提交，
+  用户重试即重复生成整套排期）；并加「规则签名 + 日期区间」幂等闸门。
+- **P0-2 部分退款截断时效卡却保留 active**：回收时效卡时同时置 `status='refunded'`（此前次日摊销把整单
+  确认成 100%，负债被推成 −¥2650）；`revenue.js` 增加「应确认额 ≤ 净收（实付−已退）」守卫。
+- **P0-3 顺延基准选中 2100 年次卡**：`findDeferralBase` 排除 `billing_mode='count'` 与
+  `expires_at > now+3650天` 的哨兵卡，基准卡须已生效。
+- **P0-4 摊销不扣暂停 + `delta<=0` 不回冲**：`elapsedMs/totalMs` 统一扣除已结算与进行中的暂停段；
+  `delta<0` 落负数冲销行（此前 `continue` → 收入永久虚增且不可逆）。
+- **P0-5 多卡订单退款按「最新一张卡」定价可超退**：未指定 `cardId` 且订单多卡时，按卡种标价占比拆分、
+  逐卡套用因子后求和并夹取到 `[0, remain]`；支持显式 `cardId`。
+- **P0-6 退卡不冲销已结转收入**：抽出 `revertRecognitionForCard(cardId, orderId)`，退卡事务内调用，
+  与订单退款收敛为同一实现。
+- **P0-7 必填字段传对象 → 500**：抽 `isScalarId()` 等校验，ID/数值类型非法统一 `200 + code!=0` 并带字段名。
+- **P0-8 销售可冒名挂业绩**：非管理员建单**直接忽略 `salesperson` 入参**，强制 `myStaffName(req)`
+  （此前 `||` 兜底永不生效）。
+- **P0-9 班级通知越权**：新增 `canManageClass()`（非管理员须为本班班主任或授课教练）+ 标题/内容长度校验
+  + 同班每分钟 5 次频控 + `recordAudit`。
+- **P0-10 布尔字段真值判断**：`flag01()` 归一，字符串 `"0"` 不再被判为真（此前订单从全部营收报表静默消失）。
+- **P0-11 新建员工不下发临时口令**：POST 复用 PUT 的 `tempPassword` 返回形态，员工登录链路打通。
+- **P0-12 订单详情接口不存在**：新增 `GET /api/orders/:id`（注册在所有具名路由之后，避免吞 `/my`、`/stats`）。
+- **P0-13 路由守卫无限重定向**：`resolveFallback()` 逐个做可达性判断，全部不可达时落到无条件可达的
+  `/no-access` 兜底页，杜绝回跳自身成环。
+- **P0-14 退款按钮对销售可见必 403**：`v-if="isAdmin && status==='paid'"` + `openRefundDialog` 二次拦截。
+
+### P1 / P2（主要项）
+
+- **资金/卡口径**：退款渠道取原支付记录（不再硬编码 `wechat`）、退卡写 `payments` 负额流水、取消已支付订单
+  同步清零剩余权益、部分退款遍历订单下全部卡回收、到店限次只统计已生效卡、请假扣天数改扣在用卡、
+  手工扣课校验 `activated_at` 与课程范围。
+- **校验/健壮性**：积分限定正整数且 ≤ 100000、卡种价格拒绝负数/非数字、姓名拒绝对象/数组、性别非空枚举、
+  日期参数统一格式校验、订单总额上限 1 亿、`/finance/monthly` 年份范围校验、薪资默认月份改本地时区。
+- **权限/审计**：`/staff-options`、`/classrooms`、`/courses`、`/courses/options` 补员工只读校验（此前未登录
+  即可拉全员姓名+手机号）、`/admin/export` 改回全站约定 `200 + code!=0`、线索 `/stage` 与勿扰名单补校验与留痕。
+- **前端体验**：试听「转正式学员」加 `isAdmin` 守卫、成员「导出为导入模板」改全量、增长中心预警补错误态与
+  重试、家长通讯录电话列修正字段映射、到店页 `pageSize` 50→200 且超限提示、Logo 上限 2MB→200KB 并压缩、
+  财务报表加口径说明、排期时间轴按当日实际课块动态扩展、下拉上限放宽并提示。
+
+### 保留未改（需产品决策 / 外部依赖，方案见文档第十节）
+
+- **P1-1 微信支付**：`utils/wechat-pay.js` 维持 fail-closed（未接入真实商户证书前不放宽，避免伪造回调免费开卡）。
+- **P1-6 退卡 `order_type='refund'` 台账行**：收敛为显式状态字段需单独提交并同步更新
+  `finance-refund-regression.cjs`（该测试依赖当前形态）。
+- **P2-33 卡实例范围快照**：需新增 `member_cards.scope_snapshot` 迁移，属 schema 变更，待确认后执行。
+
+### 验证
+
+- 后端全量回归：**PASS 367 / FAIL 0 / WARN 0**，**46/46 套件通过**（含新增 `settings-columns-persistence`）。
+- 前端 `npm run build` 通过；前端静态守卫 **19 PASS / 0 FAIL**；简易退费独立回归 **10 PASS / 0 FAIL**。
+
 ## [Unreleased] — 2026-10-26 视觉巡检（Task B）：全 36 页审查 + 列宽截断修复（未发布）
 
 把 Playwright 截图对比纳入常规流程，并系统审查全部页面，定位并修复视觉缺陷、确认无安全漏洞。
@@ -27,6 +84,10 @@
 - 导出 / 备份 / JSON 导入 / 恢复等端点全部 `isAdminReq` 守卫；`isAdminReq` 由 JWT 校验后的 openid 推导角色，
   前端无法伪造越权（已核对 `backend/utils/index.js` 的 `getOpenId` / `verifyToken` 显式忽略客户端 `x-openid`）。
 
+> **结论修正（2026-10-27）**：经回归测试复查，上述「全部 `isAdminReq` 守卫」只覆盖了**子端点**（导出/备份/导入/恢复），
+> 而 `PUT /api/settings` **主写入端点本身此前漏加守卫**——任意已登录的非管理员（销售/教练）均可篡改系统设置
+> （机构信息、积分/退费/推送规则、各表格字段配置）。已补守卫，详见第四节。
+
 ### 三、修复的视觉缺陷（已程序化验证 scrollWidth ≤ clientWidth）
 
 - **学员表列被省略号截断**：`resolveColumnWidths` 此前只用 `autoWidths` 覆盖列定义 `minWidth`，而
@@ -39,9 +100,22 @@
 - **登录页角色网格幽灵第 4 列**：`grid-template-columns: repeat(4, 1fr)` 但只有 3 个角色 chip →
   改为 `repeat(3, 1fr)`。
 
+### 四、复查补洞：PUT /api/settings 越权写（安全）
+
+- **问题**：`PUT /api/settings` 主写入端点此前**没有 `isAdminReq` 守卫**。全局中间件只校验 JWT 身份
+  （填充 `req.openid`），不区分角色，于是任意已登录的非管理员（销售/教练）都能写入系统设置 ——
+  机构信息、积分/退费/推送规则、各表格字段配置（`*_columns`）。第二节「导出/备份/导入/恢复等端点全部
+  守卫」只覆盖了子端点，主写入端点被漏掉。
+- **修复**：`routes/settings.js` 的 `router.put('/')` 入口补 `if (!isAdminReq(req)) return res.status(403)…`，
+  与同文件其它写端点一致。
+- **回归**：新增 `backend/tests/settings-columns-persistence.test.cjs`（11 项）——`growth/trial/finance/
+  students/orders_columns` 落库并原样读回、键级 upsert 不互相抹除、白名单外键被忽略、非管理员 PUT 返回 403；
+  已注册进 `run-all.cjs`。
+
 ### 验证
 
 - 全 36 页 `--update` 巡检：✅36 / ⛔0（无 console 错误、无 ≥400、无横向溢出、无失败请求）。
+- 设置列配置持久化回归：11/11 PASS（`settings-columns-persistence.test.cjs`）。
 - 截断探针（程序化测 `scrollWidth` vs `clientWidth`）：学员表 30 → 0；请假表「请假时间」归零；登录网格 3 列 = 3 chip。
 - 「请假原因」等长自由文本列仍按设计以 `show-overflow-tooltip` 截断、悬停看全文，非缺陷。
 

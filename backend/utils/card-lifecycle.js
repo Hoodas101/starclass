@@ -83,6 +83,11 @@ function dayEndExclusive(ms) {
  */
 function isCardUsable(card, t) {
   if (!card || card.status !== 'active') return false;
+  // P1-37：到期也必须校验。status 靠定时扫描刷新（最长 24h 一次），
+  // 期间存在「已过期但 status 仍 active」的窗口，只信 status 会让过期卡继续上课、继续扣课。
+  // 次卡的 expires_at 是 2100-01-01 哨兵值，不会误杀。
+  const exp = Number(card.expires_at) || 0;
+  if (exp > 0 && exp < t) return false;
   const act = Number(card.activated_at) || 0;
   // 历史数据可能没有 activated_at：视为已生效，不误伤存量卡
   if (!act) return true;
@@ -112,16 +117,25 @@ function usableCardSql(alias = 'mc') {
  */
 function findDeferralBase(studentId, opts = {}) {
   const t = Number(opts.t) || Date.now();
+  // 十年上限：次卡的 valid_days=0 会被写成 expires_at=2100-01-01（4102444800000）这种
+  // 「永久」哨兵值。若不设上限，买过次卡的学员再购年卡时，顺延基准会选中这张 2100 年卡，
+  // 新卡 activated_at 被排到 2100-01-02 —— 学员付了钱却在上课前就被判「未生效」，
+  // 既不扣课也不报错，权益被全额冻结（资损且极难排查）。
+  const horizon = t + 3650 * 24 * 3600 * 1000;
   const rows = db.prepare(`
     SELECT mc.*, COALESCE(ct.course_scope, '') AS type_scope
       FROM member_cards mc
       LEFT JOIN membership_cards ct ON ct.id = mc.card_type_id
      WHERE mc.student_id = ?
        AND mc.status IN ('active', 'paused')
+       -- 次卡没有「期限」概念：budget 用完即止，不该成为时效卡的顺延基准
+       AND COALESCE(mc.billing_mode, 'time') <> 'count'
        AND (mc.expires_at IS NULL OR mc.expires_at > ?)
+       -- 排除 2100-01-01 一类哨兵到期日（合法年卡不会超过十年）
+       AND COALESCE(mc.expires_at, 0) <= ?
        AND (? = '' OR mc.id != ?)
      ORDER BY COALESCE(mc.expires_at, 0) DESC, mc.created_at DESC
-  `).all(studentId, t, opts.excludeCardId || '', opts.excludeCardId || '');
+  `).all(studentId, t, horizon, opts.excludeCardId || '', opts.excludeCardId || '');
 
   if (!rows.length) return null;
   if (opts.crossScope) return rows[0];

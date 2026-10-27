@@ -121,6 +121,8 @@ const ROUTES = [
   ['POST', '/api/orders'], ['POST', '/api/orders/import'], ['GET', '/api/orders/my'],
   ['POST', '/api/orders/ID1/pay'], ['GET', '/api/orders/ID1/refund-preview'], ['POST', '/api/orders/ID1/refund'],
   ['PUT', '/api/orders/ID1'], ['POST', '/api/orders/ID1/cancel'], ['GET', '/api/orders/stats'], ['GET', '/api/orders'],
+  // 订单详情（P0-12：此前无此路由，退款/改单页拿不到明细）
+  ['GET', '/api/orders/ID1'],
   ['GET', '/api/messages/list'], ['GET', '/api/messages/detail'], ['GET', '/api/messages/unread-count'],
   ['POST', '/api/messages/create'], ['POST', '/api/messages/generate-renewal'], ['POST', '/api/messages/read'],
   ['POST', '/api/messages/read-all'], ['GET', '/api/messages/group-notice'], ['POST', '/api/messages/send'],

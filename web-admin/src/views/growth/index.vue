@@ -301,7 +301,11 @@
               </template>
             </el-table-column>
           </el-table>
-          <div v-if="renewalList.length === 0" class="empty-tip">暂无需要续费的成员：近 15 天内没有到期卡，也没有过期未续的卡。</div>
+          <div v-if="renewalError" class="empty-tip">
+            {{ renewalError }}
+            <el-button link type="primary" @click="loadRenewal">重试</el-button>
+          </div>
+          <div v-else-if="renewalList.length === 0" class="empty-tip">暂无需要续费的成员：近 15 天内没有到期卡，也没有过期未续的卡。</div>
         </div>
       </template>
 
@@ -353,7 +357,11 @@
               </template>
             </el-table-column>
           </el-table>
-          <div v-if="lowClassList.length === 0" class="empty-tip">暂无课时不足的成员，消耗节奏健康。</div>
+          <div v-if="lowClassError" class="empty-tip">
+            {{ lowClassError }}
+            <el-button link type="primary" @click="loadLowClasses">重试</el-button>
+          </div>
+          <div v-else-if="lowClassList.length === 0" class="empty-tip">暂无课时不足的成员，消耗节奏健康。</div>
         </div>
       </template>
 
@@ -1135,22 +1143,34 @@ const formatDateTime = (ts) => {
 // 续费预警
 const renewalList = ref([])
 const renewalLoading = ref(false)
+// P1-30：接口失败时若不置错误态，界面会显示「暂无需要续费的成员」——
+// 管理者会据此认为「大家都还没到期」，而真实原因是请求失败（静默误导决策）。
+const renewalError = ref('')
 const loadRenewal = async () => {
   renewalLoading.value = true
+  renewalError.value = ''
   try {
     const res = await getRenewalList({ warnIn: 15 })
     renewalList.value = res?.list || []
+  } catch (e) {
+    renewalList.value = []
+    renewalError.value = e?.message || '续费预警加载失败'
   } finally { renewalLoading.value = false }
 }
 
 // 低课时预警
 const lowClassList = ref([])
 const lowClassLoading = ref(false)
+const lowClassError = ref('')
 const loadLowClasses = async () => {
   lowClassLoading.value = true
+  lowClassError.value = ''
   try {
     const res = await getLowClasses({ threshold: 5 })
     lowClassList.value = res?.list || []
+  } catch (e) {
+    lowClassList.value = []
+    lowClassError.value = e?.message || '低课时预警加载失败'
   } finally { lowClassLoading.value = false }
 }
 

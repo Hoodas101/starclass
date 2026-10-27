@@ -46,6 +46,31 @@ function staffMustChangePassword(user) {
     && verifyPassword(getStaffDefaultPassword(), user.password).valid;
 }
 
+/**
+ * 弱口令判定（P1-8）。
+ *
+ * 只比对「系统默认口令」是不成立的判据：生产模式下 getStaffDefaultPassword() 返回空串，
+ * 于是 staffMustChangePassword 永远为 false，强制改密闸门永久失效 ——
+ * 员工把密码设成 123456 也不会被拦，且登录时不会被要求修改。
+ * 因此改为直接判断口令本身的弱度，与「是否等于默认值」解耦。
+ */
+const WEAK_PASSWORDS = new Set([
+  '123456', '1234567', '12345678', '123456789', '1234567890',
+  '000000', '111111', '222222', '333333', '666666', '888888', '999999',
+  'abc123', 'a123456', 'a1234567', 'password', 'password1', 'admin', 'admin123',
+  'qwerty', 'qwerty123', '1qaz2wsx', 'iloveyou', '520520', 'woaini', 'woaini1314',
+]);
+
+function isWeakPassword(plain) {
+  const s = String(plain || '');
+  if (!s) return true;
+  if (WEAK_PASSWORDS.has(s.toLowerCase())) return true;
+  if (/^\d+$/.test(s)) return true;                        // 纯数字
+  if (/^(.)\1+$/.test(s)) return true;                     // 单一字符重复（如 aaaaaa）
+  if (/^(012345|123456|654321|abcdef)/i.test(s)) return true; // 顺子开头
+  return false;
+}
+
 // 头像类型与扩展名按文件头（魔数）识别，不依赖客户端声明的 MIME / 扩展名。
 function detectImageType(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 12) return null;
@@ -868,6 +893,10 @@ router.post('/changePassword', (req, res) => {
     // 每次登录都被拦却又无法解除。
     if (newPassword === getStaffDefaultPassword()) {
       return res.json(fail('新密码不能是系统默认口令'));
+    }
+    // P1-8：拒绝弱口令（纯数字 / 常见口令 / 单一字符重复）。
+    if (isWeakPassword(newPassword)) {
+      return res.json(fail('密码过于简单：不能是纯数字或常见弱口令，建议字母 + 数字组合'));
     }
     if (oldPassword && newPassword === oldPassword) {
       return res.json(fail('新密码不能与原密码相同'));

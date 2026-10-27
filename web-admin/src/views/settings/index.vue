@@ -256,12 +256,40 @@
 
           <h4 class="section-subtitle">退费公式</h4>
           <el-form :model="cardRulesForm.refund" label-width="auto" label-position="left">
-            <el-form-item label="自定义公式">
+            <el-form-item label="计算方式">
+              <el-radio-group v-model="cardRulesForm.refund.mode">
+                <el-radio value="simple">简易（直接填数字）</el-radio>
+                <el-radio value="formula">高级（自定义表达式）</el-radio>
+              </el-radio-group>
+              <span class="form-hint form-hint--block">
+                简易模式下：退款 = 基数 × (1 − 手续费比例) − 最低手续费。此处填的数字即为最终口径，
+                不再叠加「退费规则」页的百分比（两处都填会重复扣减）。需要按天/按次自定义折算时再切到高级。
+              </span>
+            </el-form-item>
+
+            <template v-if="cardRulesForm.refund.mode !== 'formula'">
+              <el-form-item label="退款基数">
+                <el-select v-model="cardRulesForm.refund.base" style="width: 280px">
+                  <el-option label="按未消耗比例（剩余课时/剩余有效期）" value="unused" />
+                  <el-option label="按整单剩余可退额" value="remain" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="手续费比例">
+                <el-input-number v-model="cardRulesForm.refund.deductPercent" :min="0" :max="100" :step="1" />
+                <span class="form-hint">直接填数字：20 表示扣 20%，填 0 表示不扣</span>
+              </el-form-item>
+              <el-form-item label="最低手续费">
+                <el-input-number v-model="cardRulesForm.refund.minFee" :min="0" :step="10" />
+                <span class="form-hint">单位：元。填 100 表示至少扣 100 元，填 0 表示不设</span>
+              </el-form-item>
+            </template>
+
+            <el-form-item v-else label="自定义公式">
               <el-input
                 v-model="cardRulesForm.refund.formula"
                 type="textarea"
                 :rows="3"
-                placeholder="留空 = 使用内置默认（按剩余天数/剩余次数折算）"
+                placeholder="留空 = 回退到简易口径（按基数与手续费计算）"
               />
               <span class="form-hint form-hint--block">
                 可用变量：paid 实付、remain 可退基数、total_days / used_days / remain_days、
@@ -1423,9 +1451,10 @@ const orgRules = {
   name: [{ required: true, message: '请输入机构名称', trigger: 'blur' }]
 }
 
-// Logo 上传（base64 预览并随机构信息保存）
-// 限制文件类型与体积，防止 base64 过大撑爆机构设置存储
-const MAX_LOGO_SIZE = 2 * 1024 * 1024 // 2MB
+// P1-28：Logo 以 base64 存进机构设置，并随登录页与每次布局挂载全量下发。
+// 2MB 原图 base64 后约 2.7MB 字符串，等于每次进后台都传一遍 —— 因此收窄到 200KB，
+// 并统一压缩到 256×256（Logo 展示尺寸远小于此，无损观感）。
+const MAX_LOGO_SIZE = 200 * 1024 // 200KB
 const LOGO_TYPES = ['image/png', 'image/jpeg', 'image/svg+xml', 'image/webp']
 const handleLogoChange = (file) => {
   if (!file || !file.raw) return
@@ -1434,12 +1463,32 @@ const handleLogoChange = (file) => {
     return
   }
   if (file.raw.size > MAX_LOGO_SIZE) {
-    ElMessage.warning('Logo 图片不能超过 2MB，请压缩后再上传')
+    ElMessage.warning('Logo 图片不能超过 200KB，请压缩后再上传')
     return
   }
   const reader = new FileReader()
   reader.onload = (e) => {
-    orgForm.logo = e.target.result
+    const dataUrl = e.target.result
+    // SVG 是矢量、本身很小，保持原样（canvas 栅格化反而会丢清晰度）
+    if (file.raw.type === 'image/svg+xml') {
+      orgForm.logo = dataUrl
+      return
+    }
+    const img = new Image()
+    img.onload = () => {
+      const max = 256
+      const scale = Math.min(1, max / Math.max(img.width, img.height))
+      const w = Math.max(1, Math.round(img.width * scale))
+      const h = Math.max(1, Math.round(img.height * scale))
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h)
+      orgForm.logo = canvas.toDataURL('image/png')
+    }
+    // 解码失败时回退原图，至少不让上传流程卡死
+    img.onerror = () => { orgForm.logo = dataUrl }
+    img.src = dataUrl
   }
   reader.readAsDataURL(file.raw)
 }
@@ -1575,7 +1624,7 @@ const refundForm = reactive({
 const cardRulesForm = reactive({
   defer: { enabled: true, startAnchor: 'day', crossScope: false, allowActivateNow: true },
   period: { defaultAnchor: 'activated' },
-  refund: { formula: '', allowPartial: true },
+  refund: { mode: 'simple', base: 'unused', deductPercent: 0, minFee: 0, formula: '', allowPartial: true },
 })
 const savingCardRules = ref(false)
 

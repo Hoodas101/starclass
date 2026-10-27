@@ -82,6 +82,7 @@ const SUITES = [
   ['audit-log-query-regression.cjs', '操作日志可查（adminOnly + 过滤/分页/注入防护）'],
   ['leave-deduct-double-charge-regression.cjs', '手工扣课不得重复扣（两套账本交叉校验）'],
   ['batch7-security-guards.test.cjs', 'S3-S11 安全守卫（导入黑名单/课表可见性/广播已读/口令/jwt算法/绑卡频控）'],
+  ['settings-columns-persistence.test.cjs', '设置列配置持久化（growth/trial/finance 入库 + 键级不互抹 + 白名单）'],
   ['full-system.test.js', '全功能系统'],
 ];
 

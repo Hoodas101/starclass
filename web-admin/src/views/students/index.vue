@@ -1656,8 +1656,22 @@ const doExport = async (range) => {
 
 // 导出为「导入模板」格式：列名/顺序与导入模板一致，便于「导出 → 修改 → 再导入」闭环。
 // 默认导出的是 23 个数据库原始字段（含 id / created_at 等内部列），无法直接再导入。
-const doExportTemplate = () => {
-  const list = filteredStudents.value || []
+const doExportTemplate = async () => {
+  // P1-29：模板导出必须与「导出」同口径（全量 + 当前筛选）。此前直接取 filteredStudents，
+  // 那只是当前页（10 行）—— 管理者以为导出了全部成员，改完再导入实际上只覆盖了 10 个人，
+  // 其余人「以为更新了、其实没有」，是极易被忽略的数据事故。
+  let list = []
+  try {
+    list = await fetchAllPages(getStudents, {
+      keyword: searchKeyword.value || undefined,
+      status: filterStatus.value && filterStatus.value !== 'archived' ? filterStatus.value : undefined,
+      archived: filterStatus.value === 'archived' ? '1' : undefined,
+      project: filterProject.value || undefined,
+    })
+  } catch (e) {
+    ElMessage.warning('部分数据拉取失败，仅导出当前页')
+    list = filteredStudents.value.length ? filteredStudents.value : students.value
+  }
   if (!list.length) {
     ElMessage.warning('暂无可导出的成员数据')
     return
@@ -1695,10 +1709,15 @@ onMounted(() => {
   if (q.project) filterProject.value = String(q.project)
   if (q.page) currentPage.value = Number(q.page) || 1
   // 记录关联直达（借鉴 trycompai/crm 的 RecordLink）：/students?focus=id 直接打开详情
-  if (q.focus) {
-    openDetailDrawer({ id: String(q.focus) })
-  }
-  loadStudents()
+  // P2-7：必须等列表加载完成后再定位。此前在数据未就绪时直接开抽屉，会弹出一个只有 id、
+  // 其余字段全空的壳；若该成员已删除/归档，则是一个永远填不满的空抽屉，用户以为系统出错。
+  loadStudents().then(() => {
+    if (!q.focus) return
+    const focusId = String(q.focus)
+    const found = students.value.some((s) => s.id === focusId)
+    if (found) openDetailDrawer({ id: focusId })
+    else ElMessage.warning('未找到该成员，可能已被删除或归档')
+  })
   loadStats()
   loadColumnSettings()
   getCardTypes().then((res) => {

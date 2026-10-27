@@ -220,7 +220,17 @@ router.get('/summary', (req, res) => {
  */
 router.get('/monthly', (req, res) => {
   try {
-    const year = parseInt(req.query.year) || new Date().getFullYear();
+    // P2-20：year 必须校验范围。此前 parseInt 失败即静默回退到今年 ——
+    // 管理者查历史年报（传 20255 或 'abc'）时看到的是今年数据，且没有任何提示，
+    // 属于「看起来查到了、其实查错了」的隐性错误。
+    let year = new Date().getFullYear();
+    if (req.query.year !== undefined && req.query.year !== '') {
+      const y = Number(req.query.year);
+      if (!Number.isInteger(y) || y < 2000 || y > 2100) {
+        return res.json(fail('年份需为 2000 ~ 2100 的整数'));
+      }
+      year = y;
+    }
     const startMs = new Date(year, 0, 1).getTime();
     const endMs = new Date(year, 11, 31, 23, 59, 59, 999).getTime();
 

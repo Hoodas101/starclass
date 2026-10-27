@@ -17,9 +17,13 @@ const { getCardRules } = require('../utils/card-rules');
 const { validateFormula } = require('../utils/formula');
 // 订单明细解析 / 每次课消耗课时数：与签到扣课、导出报表共用同一实现
 const { parseItems, itemLineTotal } = require('../utils/items');
-const { resolveConsumeClasses, pickCardForDeduction } = require('../utils/deduction');
+const { resolveConsumeClasses, pickCardForDeduction, cardScopeMatches } = require('../utils/deduction');
+// 自然日边界：判断会员卡是否已生效（与扣课/签到同一口径，避免精确时刻比较误判当天开卡）
+const { dayEndExclusive } = require('../utils/card-lifecycle');
 // 退卡与订单退款共用同一套退费规则引擎（refund_rules），避免同一笔钱两条路径两个金额
 const { computeRefundSuggestion } = require('../utils/refund');
+// 退卡必须冲销已结转收入，与订单退款同一实现（P0-6）
+const { revertRecognitionForCard } = require('../utils/revenue');
 // 已删除（status='refunded'）/ 已归档学员的统一排除条件（学员表别名须为 s）
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
@@ -80,8 +84,17 @@ function canManageCard(req) {
  */
 router.post('/pause', (req, res) => {
   try {
-    const { cardId, reason = '' } = req.body;
+    const { cardId, reason = '', days } = req.body;
     if (!cardId) return res.json(fail('缺少会员卡 ID'));
+    // P1-15：days 是「预计暂停天数」，只用于提示与提醒（真正顺延按恢复时的实际暂停时长结算）。
+    // 传了就必须是正整数：此前非法值被静默按 0 处理，管理者以为暂停了 30 天，
+    // 恢复时才发现只顺延了几小时，属于「操作已成功但结果不符预期」的隐性缺陷。
+    let expectDays = 0;
+    if (days !== undefined && days !== null && days !== '') {
+      const d = Number(days);
+      if (!Number.isInteger(d) || d < 1 || d > 3650) return res.json(fail('预计暂停天数需为 1~3650 的整数'));
+      expectDays = d;
+    }
     const card = db.prepare('SELECT * FROM member_cards WHERE id = ?').get(cardId);
     if (!card) return res.json(fail('会员卡不存在'));
     if (!canManageCard(req)) return res.status(403).json(safeFail('仅教练或管理员可暂停/恢复会员卡'));
@@ -102,10 +115,17 @@ router.post('/pause', (req, res) => {
       actorId: actor.id,
       actorRole: actor.role,
       before: { status: card.status },
-      after: { status: 'paused', reason },
+      after: { status: 'paused', reason, expect_days: expectDays || null },
     });
 
-    res.json(success({ id: cardId, status: 'paused', pausedAt: currentTime }));
+    res.json(success({
+      id: cardId,
+      status: 'paused',
+      pausedAt: currentTime,
+      expectDays: expectDays || null,
+      // 预估恢复日期（仅供参考，实际以恢复操作时的真实暂停时长为准）
+      expectResumeAt: expectDays ? currentTime + expectDays * 86400000 : null,
+    }));
   } catch (err) {
     console.error('[pause card]', err);
     res.status(500).json(safeFail('暂停会员卡失败'));
@@ -175,6 +195,18 @@ router.post('/card-type', (req, res) => {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可管理产品'));
     const { name, totalClasses, validDays, billingMode = 'time', price, pointsReward = 0, courseScope, scopeCourseIds, transferable, refundable, productType = 'membership', unit = '', description = '', visitLimitPerWeek, visitLimitPerMonth, deferEnabled, periodAnchor, refundFormula } = req.body;
     if (!name) return res.json(fail('名称为必填'));
+    // P1-10：价格必须是 ≥0 的有限数。此前 `price:-1` / `price:"免费"` 都能创建成功，
+    // 负价卡种下单会算出负总额（被折扣校验误报成「折扣金额不能超过订单总额」），
+    // 非数字则让后续所有金额聚合变 NaN。
+    if (price !== undefined && price !== null && price !== '') {
+      const p = Number(price);
+      if (!Number.isFinite(p) || p < 0 || p > 1e8) return res.json(fail('价格需为 0 ~ 1 亿之间的数字'));
+    }
+    // 赠送积分同样只接受非负整数，小数会让「流水合计 = 余额」恒等式破裂
+    if (pointsReward !== undefined && pointsReward !== null && pointsReward !== '') {
+      const pr = Number(pointsReward);
+      if (!Number.isInteger(pr) || pr < 0 || pr > 100000) return res.json(fail('赠送积分需为 0 ~ 100000 的整数'));
+    }
     const type = productType === 'goods' ? 'goods' : 'membership';
     // 到店限次（0/NULL = 不限次）；负数与非法值一律归 0
     const vw = Math.max(0, Number(visitLimitPerWeek) || 0);
@@ -755,10 +787,27 @@ router.post('/deduct', (req, res) => {
     // 显式路径此前漏了，于是已过期卡在过期窗口内（最长 24h）仍可被手工扣课。
     let card;
     if (cardId) {
-      card = db.prepare("SELECT * FROM member_cards WHERE id = ? AND student_id = ? AND status = 'active'").get(cardId, studentId);
+      // P1-23：显式指定卡时也要把卡种范围带上，才能校验「这张卡是否适用于本节课」。
+      card = db.prepare(`
+        SELECT mc.*, mct.course_scope AS course_scope, mct.scope_course_ids AS scope_course_ids
+        FROM member_cards mc
+        LEFT JOIN membership_cards mct ON mct.id = mc.card_type_id
+        WHERE mc.id = ? AND mc.student_id = ? AND mc.status = 'active'
+      `).get(cardId, studentId);
       // 卡存在但已过期 → 给出明确原因，而不是笼统的「没有可用会员卡」
       if (card && !(Number(card.expires_at) > now())) {
         return res.json(fail('该卡已过期'));
+      }
+      // 显式路径还必须校验「已生效」：顺延卡发卡即 activated_at（可能在未来）、status 仍 active，
+      // 只按 status 过滤就可用未来才生效的卡提前扣课，当期在用卡的额度被跳过。
+      if (card) {
+        const act = Number(card.activated_at) || 0;
+        if (act && act >= dayEndExclusive(now())) return res.json(fail('该卡尚未生效，不能用它扣课'));
+        // 课程范围：复用扣课选卡的同一实现，避免自由文本子串误判（如 scope='球' 命中「篮球」）
+        const sch = db.prepare('SELECT course_id, course_name FROM schedules WHERE id = ?').get(scheduleId);
+        if (!cardScopeMatches(card, sch)) {
+          return res.json(fail('该学员所持卡不适用于本课程，请确认课程范围或更换卡'));
+        }
       }
     } else {
       // 自动选卡收口到 utils/deduction.pickCardForDeduction：与签到路径同一口径（含课程范围隔离）。
@@ -1001,6 +1050,19 @@ router.post('/refund', (req, res) => {
         db.prepare("UPDATE member_cards SET status = 'refunded', expires_at = ?, updated_at = ? WHERE id = ?").run(currentTime, currentTime, cardId);
       }
 
+      // ── P0-6：退卡必须冲销该卡已结转的收入 ──
+      // 订单退款分支早已 `DELETE FROM revenue_recognitions WHERE order_id = ?`，但退卡路径
+      // 此前完全没有冲销：年卡 ¥3650 已摊销 ¥1000、扣 20% 手续费退 ¥2920 后，
+      // collected=¥730 而 recognized=¥1000 → 合同负债 = −¥270，量一多整体负债为负。
+      // 只按本卡（schedule_id = timecard:<cardId>）删，避免退一张卡把同订单其他卡的结转一起清掉。
+      // 次数卡的收入结转来自签到（schedule_id 为考勤 ID），此处不匹配 → 已上课收入正确保留。
+      let revertedRecognitions = 0;
+      try {
+        revertedRecognitions = revertRecognitionForCard(cardId, null);
+      } catch (e) {
+        console.error('[membership refund] 冲销结转失败', e && e.message);
+      }
+
       // 回收购买时赠送的积分（仅本卡对应商品的奖励，订单含多商品时不影响其他商品权益）
       if (orderId) {
         const refId = 'order_' + orderId + '_' + card.card_type_id;
@@ -1110,7 +1172,7 @@ router.post('/refund', (req, res) => {
         `).run(refundOrderId, orderNo, studentId, card.student_name, JSON.stringify([{ cardId, reason }]), refundAmount, refundAmount, currentTime, currentTime);
       }
 
-      return { ok: true, refundAmount, orderId: refundOrderId, noPaidOrder: !hasPaidOrder };
+      return { ok: true, refundAmount, orderId: refundOrderId, noPaidOrder: !hasPaidOrder, revertedRecognitions };
     })();
 
     if (result.err) return res.json(fail(result.err));
@@ -1127,10 +1189,12 @@ router.post('/refund', (req, res) => {
         student_id: studentId,
         refund_amount: result.refundAmount,
         no_paid_order: !!result.noPaidOrder,
+        // 冲销的已结转收入行数：审计页可据此判断「退款是否同步冲了收入」
+        reverted_recognitions: result.revertedRecognitions || 0,
         reason: reason || '',
       },
     });
-    const payload = { cardId, refundAmount: result.refundAmount, orderId: result.orderId };
+    const payload = { cardId, refundAmount: result.refundAmount, orderId: result.orderId, revertedRecognitions: result.revertedRecognitions || 0 };
     // 明确告知前端：本次只作废卡、未产生任何退款，避免财务误以为有一笔退款
     if (result.noPaidOrder) payload.message = '无收款记录，仅作废卡，不产生退款';
     res.json(success(payload));

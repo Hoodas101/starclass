@@ -485,13 +485,22 @@ router.get('/admin/list', (req, res) => {
     if (keyword) { where += " AND title LIKE ? ESCAPE '\\'"; params.push(`%${escapeLike(keyword)}%`); }
     if (priority) { where += ' AND priority = ?'; params.push(priority); }
     if (category) { where += ' AND category = ?'; params.push(category); }
+    // P1-5：日期格式必须校验，非法值会把 NaN 绑进 SQL（500）或静默不带条件（返回全量）
     if (startDate) {
+      const v = String(startDate);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return res.json(fail('开始日期格式应为 YYYY-MM-DD'));
+      const t = new Date(v + 'T00:00:00').getTime();
+      if (!Number.isFinite(t)) return res.json(fail('开始日期不合法'));
       where += ' AND created_at >= ?';
-      params.push(new Date(startDate + 'T00:00:00').getTime());
+      params.push(t);
     }
     if (endDate) {
+      const v = String(endDate);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return res.json(fail('结束日期格式应为 YYYY-MM-DD'));
+      const t = new Date(v + 'T23:59:59.999').getTime();
+      if (!Number.isFinite(t)) return res.json(fail('结束日期不合法'));
       where += ' AND created_at <= ?';
-      params.push(new Date(endDate + 'T23:59:59.999').getTime());
+      params.push(t);
     }
 
     const total = db.prepare(`SELECT COUNT(*) as count FROM notifications ${where}`).get(...params).count;

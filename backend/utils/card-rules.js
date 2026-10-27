@@ -25,10 +25,21 @@ const DEFAULTS = {
     defaultAnchor: 'activated',
   },
   refund: {
-    formula: '',            // 空 = 用内置默认公式（与改造前行为一致）
+    // 简易模式（默认）：机构只需填数字，不写表达式。
+    //   退款 = 基数 × (1 − 手续费比例%) − 最低手续费
+    //   基数 base：unused = 整单剩余额 × 未消耗比例；remain = 整单剩余额
+    // 高级模式 formula：沿用原表达式引擎，仅对需要按天/按次自定义折算的机构开放。
+    mode: 'simple',         // simple | formula
+    base: 'unused',         // unused | remain
+    deductPercent: 0,       // 手续费比例 %（0~100，直接填数字）
+    minFee: 0,              // 最低手续费 ¥（≥0，直接填数字；0 = 不设）
+    formula: '',            // 仅 mode==='formula' 生效
     allowPartial: true,     // 是否允许中途部分退款
   },
 };
+
+const REFUND_MODES = ['simple', 'formula'];
+const REFUND_BASES = ['unused', 'remain'];
 
 const ANCHORS = ['natural', 'activated', 'first_use'];
 const START_ANCHORS = ['day', 'exact'];
@@ -67,6 +78,15 @@ function normalizePeriod(raw) {
 function normalizeRefund(raw) {
   const src = raw && typeof raw === 'object' ? raw : {};
   const out = { ...DEFAULTS.refund };
+  if (REFUND_MODES.includes(src.mode)) out.mode = src.mode;
+  if (REFUND_BASES.includes(src.base)) out.base = src.base;
+  // 数字字段：非数字/负数/超范围一律丢弃保默认 —— 配置写坏不能让退款算成负数或超退
+  if (Number.isFinite(Number(src.deductPercent))) {
+    out.deductPercent = Math.max(0, Math.min(100, Number(src.deductPercent)));
+  }
+  if (Number.isFinite(Number(src.minFee))) {
+    out.minFee = Math.max(0, Number(src.minFee));
+  }
   if (typeof src.formula === 'string' && src.formula.length <= 500) out.formula = src.formula.trim();
   if (typeof src.allowPartial === 'boolean') out.allowPartial = src.allowPartial;
   return out;
@@ -104,6 +124,8 @@ module.exports = {
   DEFAULTS,
   ANCHORS,
   START_ANCHORS,
+  REFUND_MODES,
+  REFUND_BASES,
   getCardRules,
   mergeGroup,
   normalizeDefer,
