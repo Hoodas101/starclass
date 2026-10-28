@@ -49,14 +49,26 @@
 - 看板状态点：`danger/error` 正确映射为红点（此前缺席/请假显示灰点）。
 - 课时统计：金额列 `Number(x||0).toLocaleString()`（单条脏数据不再整表崩）。
 
+### 六、退款幂等与时效卡部分退款（本轮追加）
+
+- **退款事务 `.immediate()`**：退款是资金写操作，多进程部署下必须一开始就拿写锁串行化，
+  否则两个连接可能都读到旧 `refunded_amount`，乐观锁在快照隔离下无法可靠拦截。配合既有
+  `WHERE refunded_amount = ?` 乐观锁 + `newRefunded > paidAmount` 守卫，杜绝并发超额退款。
+- **时效卡部分退款不再作废卡**：此前部分退款把 `status='refunded'` 且 `expires_at=当前时间`，
+  原摊销区间丢失、剩余金额永不确认、退款额反被当收入（负债变负）。现改为**保留原 status 与
+  expires_at**，由 `revenue.js` 的「净收上限（实付−已退）+ 负数冲销行」按比例回冲已确认收入。
+  全额退款仍走 `isFull` 分支（作废 + 冲销结转）。
+- **回归**：`card-classes-invariant` 新增 **T6**（时效卡部分退款后 `status='active'` 且
+  `expires_at` 不变），套件 37 → 41 项全过；`finance-refund` 36/36 无回归。
+
 ### 验证
 
 - 后端全量回归：**367 PASS / 0 FAIL / 0 WARN，46/46 套件**；前端 `npm run build` 通过。
 
 ### 仍待处理（需单独提交 / 需决策）
 
-- 退款幂等键、时效卡部分退款「不得改写 expires_at/作废」与结转冲销（牵动
-  `finance-refund-regression`/`card-classes-invariant`，需配套改测试）。
+- 退款**幂等键**（可选 `Idempotency-Key`）：当前已杜绝「超额退款」，但用户双击仍会产生两条
+  同额部分退款流水（不超额，属 UX/幂等语义）。
 - 同卡种多订单结转翻倍（需 `member_cards.face_amount` 快照，schema 变更）。
 - 前端 localStorage 提权（需启动拉 `/auth/profile` 校正 + 去 `role==='admin'` 全放行）。
 - 只读退化（P0）：需写探针 + 登录写入 best-effort + 错误码区分。

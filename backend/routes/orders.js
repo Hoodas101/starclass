@@ -955,6 +955,7 @@ router.post('/:id/refund', (req, res) => {
         // 多卡订单会出现「退款按全部卡计算、权益只终止一张」，学员保留其余卡的课时/有效期。
         const refundCards = db.prepare('SELECT * FROM member_cards WHERE order_id = ?').all(order.id);
         const clawbacks = [];
+        const notes = [];
         for (const card of refundCards) {
           if (!card || card.status === 'refunded') continue;
           if ((card.billing_mode || 'time') === 'count') {
@@ -965,14 +966,15 @@ router.post('/:id/refund', (req, res) => {
             db.prepare('UPDATE member_cards SET used_classes = used_classes + remaining_classes, remaining_classes = 0, updated_at = ? WHERE id = ?').run(currentTime, card.id);
             clawbacks.push(`卡内剩余 ${card.remaining_classes || 0} 次课时`);
           } else {
-            // P0-2：必须**同时置 status='refunded'**（权益终止）。
-            // 此前只把 expires_at 截断到当前却保留 active —— 次日摊销按 elapsed=total
-            // 把整单确认为 100% 收入，contractLiability 直接变负且不可逆（实测 −¥2650）。
-            db.prepare('UPDATE member_cards SET status = ?, expires_at = ?, updated_at = ? WHERE id = ?').run('refunded', currentTime, currentTime, card.id);
-            clawbacks.push('卡内剩余有效期');
+            // 时效卡：部分退款**不改 status、不改 expires_at**（保留原摊销区间）。
+            // 第二轮 P0-4：改写 expires_at=当前时间会让 totalMs→0、原区间丢失，剩余金额
+            // 永不确认、退款额反被当收入（负债变负）。已确认收入由 revenue.js 的
+            // 「净收上限（实付−已退）+ 负数冲销行」按比例回冲，无需在此作废卡。
+            notes.push('时效卡保留原有效期（已确认收入按退款比例回冲）');
           }
         }
         if (clawbacks.length) clawback = `已同步回收：${clawbacks.join('、')}`;
+        if (notes.length) clawback = (clawback ? clawback + '；' : '') + notes.join('、');
       }
 
       // Refund payment record
@@ -1009,7 +1011,9 @@ router.post('/:id/refund', (req, res) => {
       });
 
       return { ok: true, amount, full: isFull, reason };
-    })();
+      // .immediate()：退款是资金写操作，多进程部署下必须一开始就拿写锁串行化，
+      // 否则两个连接可能都读到旧 refunded_amount，乐观锁在快照隔离下无法可靠拦截（重复退款）。
+    }).immediate();
 
     if (result.err) return res.json(fail(result.err));
     if (result.conflict) return res.json(fail('退款处理冲突，请稍后重试'));

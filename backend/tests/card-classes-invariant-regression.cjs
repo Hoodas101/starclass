@@ -454,6 +454,33 @@ console.log('\n\x1b[1m[T5] 跨路径不变量：全表恒等式扫描\x1b[0m');
 }
 
 // ============================================================
+// T6. 订单部分退款（时效卡）—— 不得作废卡 / 不得改写 expires_at（第二轮 P0-4）
+//     此前部分退款把 expires_at 置为当前时间并 status='refunded'：原摊销区间丢失、
+//     剩余金额永不确认、退款额反被当收入（负债变负）。修复后保留原区间，
+//     由 revenue.js 的「净收上限 + 负数冲销行」按比例回冲。
+// ============================================================
+console.log('\n\x1b[1m[T6] 订单部分退款（时效卡）→ 保留原区间，不作废\x1b[0m');
+{
+  const CT6 = 'ct_ci_refund_time';
+  mkStudent('stu_ci6', '恒等式T6学员');
+  mkCardType(CT6, '恒等式时效卡退', { total: 0, days: 200, mode: 'time', price: 2400 });
+  mkPaidOrder('ord_ci6', 'OCI006', 'stu_ci6', CT6, '恒等式时效卡退', 2400);
+  mkCard('mc_ci6', CT6, '恒等式时效卡退', 'stu_ci6', '恒等式T6学员', { mode: 'time', total: 0, remaining: 0, used: 0, orderId: 'ord_ci6' });
+  const before6 = db.prepare('SELECT status, expires_at FROM member_cards WHERE id = ?').get('mc_ci6');
+  const res6 = orderRefund('ord_ci6');
+  const d6 = res6.body && res6.body.data;
+  rec('T6 部分退款成功（未 403/500）',
+    res6.statusCode === 200 && res6.body && res6.body.code === 0, `status=${res6.statusCode} body=${JSON.stringify(res6.body)}`);
+  rec('T6 前置：本次为部分退款（full === false）', !!d6 && d6.full === false, JSON.stringify(d6));
+  const after6 = db.prepare('SELECT status, expires_at FROM member_cards WHERE id = ?').get('mc_ci6');
+  rec('T6 [判别] 部分退款后卡仍为 active（不得作废）',
+    !!after6 && after6.status === 'active', `status=${after6 && after6.status}`);
+  rec('T6 [判别] expires_at 未被改写（保留原摊销区间）',
+    !!after6 && Number(after6.expires_at) === Number(before6.expires_at),
+    `before=${before6.expires_at} after=${after6 && after6.expires_at}`);
+}
+
+// ============================================================
 // 收尾：临时库由 _bootstrap.cjs 在进程退出时整目录删除
 // ============================================================
 console.log(`\n\x1b[1m结果汇总：PASS ${passed}  FAIL ${failed}\x1b[0m`);
