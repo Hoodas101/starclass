@@ -207,9 +207,10 @@ router.post('/', (req, res) => {
             h.value === undefined ? 0 : h.value,
             w.value === undefined ? 0 : w.value,
             b.value === undefined ? 0 : b.value,
-            // join_date 是 TEXT 列：必须绑字符串。绑数字时 better-sqlite3 按 REAL 写入，
-            // SQLite 的 TEXT 亲和性会落成 '1788059200000.0'，前端按 epoch 解析失败 → 整列显示 `-`。
-            remark || '', String(now()), nextMemberNo(), now(), now());
+            // join_date 是 TEXT 列且全站按 'YYYY-MM-DD' 字符串比较筛选（students.js 筛选分支）。
+            // 此前写 String(now())（毫秒串 '1793...'），与既有 'YYYY-MM-DD' 行混用 →
+            // 字符串比较下 '1...' < '2026-...' 恒不命中，按加入日期筛选/统计静默漏数。
+            remark || '', formatDate(now()), nextMemberNo(), now(), now());
           inserted = true;
         } catch (e) {
           // 仅对「会员编号唯一冲突」重试；主键/其它唯一约束冲突直接抛出（重试无意义）
@@ -433,7 +434,8 @@ router.post('/import', (req, res) => {
           || (VALID_STUDENT_STATUS.includes(statusInput) ? statusInput : 'active');
         const statusUnknown = !!statusInput && !mappedStatus && !VALID_STUDENT_STATUS.includes(statusInput);
         // 同建档路径：join_date 为 TEXT 列，绑字符串避免落成 '...0'（前端会解析失败显示 `-`）
-        const joinDateVal = String(joinNorm ? (new Date(joinNorm + 'T12:00:00').getTime() || t) : t);
+        // 与建档/既有行统一为 'YYYY-MM-DD'：此前写毫秒串，与日期筛选的字符串比较不兼容 → 静默漏数
+        const joinDateVal = joinNorm || formatDate(t);
         // 姓名长度 / 性别值域：与建档、编辑同一判据。超长姓名会撑坏列表列宽、
         // 打印排版与 Excel 导出；越界性别会让按性别分组的统计出现野值。
         // 单行记 failed 不中断整批（与其它行级校验一致）。
@@ -632,9 +634,9 @@ router.get('/', (req, res) => {
         CASE
           WHEN s.birthday IS NOT NULL AND s.birthday != ''
             AND date(s.birthday) IS NOT NULL
-            AND date(s.birthday) <= date('now', 'localtime')
-          THEN CAST(strftime('%Y', 'now', 'localtime') AS INTEGER) - CAST(strftime('%Y', s.birthday) AS INTEGER)
-            - (strftime('%m-%d', 'now', 'localtime') < strftime('%m-%d', s.birthday))
+            AND date(s.birthday) <= date('now', '+8 hours')
+          THEN CAST(strftime('%Y', 'now', '+8 hours') AS INTEGER) - CAST(strftime('%Y', s.birthday) AS INTEGER)
+            - (strftime('%m-%d', 'now', '+8 hours') < strftime('%m-%d', s.birthday))
           ELSE NULL
         END AS age,
         (SELECT COALESCE(SUM(mc.remaining_classes), 0) FROM member_cards mc
@@ -648,7 +650,7 @@ router.get('/', (req, res) => {
           WHEN EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id AND mc.status = 'paused') THEN 'paused'
           WHEN EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id AND mc.status = 'refunded') THEN 'refunded'
           WHEN EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id)
-            AND NOT EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', 'localtime', '-${churnDays} days')) THEN 'churn'
+            AND NOT EXISTS (SELECT 1 FROM attendances a WHERE a.student_id = s.id AND a.date >= date('now', '+8 hours', '-${churnDays} days')) THEN 'churn'
           WHEN EXISTS (SELECT 1 FROM member_cards mc WHERE mc.student_id = s.id) THEN 'graduated'
           ELSE 'none'
         END) AS mem_status,
@@ -1406,7 +1408,7 @@ router.get('/:id/activities', requireAuth, (req, res) => {
       FROM attendances a
       LEFT JOIN schedules s ON s.id = a.schedule_id
       WHERE a.student_id = ?
-      ORDER BY COALESCE(a.date, datetime(a.checkin_time/1000, 'unixepoch', 'localtime')) DESC
+      ORDER BY COALESCE(a.date, datetime(a.checkin_time/1000, 'unixepoch', '+8 hours')) DESC
     `).all(id);
     // 原带 LIMIT 50：单个学员的历史出勤攒过 50 条后，家长/教务翻不到更早的记录，
     // 且接口不返回总数，调用方无从知道被截断了。这里保持返回数组（前端按数组消费，

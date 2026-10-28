@@ -76,7 +76,7 @@
           </el-table-column>
           <el-table-column v-if="showCol('amount')" label="本月应发" min-width="140" align="right">
             <template #default="{ row }">
-              <span class="fee-amount">¥{{ row.amount.toLocaleString() }}</span>
+              <span class="fee-amount">¥{{ Number(row.amount || 0).toLocaleString() }}</span>
             </template>
           </el-table-column>
           <el-table-column v-if="showCol('fee')" label="课时费/节" min-width="120" align="right">
@@ -234,7 +234,7 @@
           </el-table-column>
           <el-table-column label="金额（元）" min-width="110" align="right">
             <template #default="{ row }">
-              <span class="fee-amount">{{ row.lessonAmount.toLocaleString() }}</span>
+              <span class="fee-amount">{{ Number(row.lessonAmount || 0).toLocaleString() }}</span>
             </template>
           </el-table-column>
         </el-table>

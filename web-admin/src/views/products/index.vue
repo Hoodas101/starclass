@@ -335,8 +335,10 @@ const openCardDialog = (row) => {
   Object.assign(cardForm, {
     name: row?.name || '',
     billingMode: row?.billing_mode || 'time',
-    validDays: row?.valid_days || 30,
-    totalClasses: row?.total_classes || 8,
+    // 用 ?? 而非 ||：valid_days=0（不限天数）与 total_classes=0 是合法值，
+    // 用 || 会被回显成 30/8，编辑保存后静默改写卡种权益。
+    validDays: row?.valid_days ?? 30,
+    totalClasses: row?.total_classes ?? 8,
     pointsReward: row?.points_reward || 0,
     price: row?.price || 0,
     courseScope: row?.course_scope || '',

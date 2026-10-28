@@ -5,6 +5,63 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased] — 2026-10-28 第三轮深度测试修复（时区 / 跨期退款口径 / 导入闸门 / join_date）
+
+来源：`starclass-web端深度测试报告-20261028`（67 条）+ `-第二轮-`（45 条）+
+`starclass数据口径一致性审查报告-20261028`。本轮先落地**根因级、高杠杆**的一批，
+其余按页面分批跟进（见文末「仍待处理」）。
+
+### 一、时区（P0，影响 6 个查询）
+
+- `server.js` 的 `process.env.TZ='Asia/Shanghai'` 在裸机 Windows 下会让 SQLite 的 `'localtime'`
+  解析成 **UTC+1**（与 JS 的 UTC+8 差 7 小时）→ 月报「每月 1 日凌晨收入记进上月/上年 12 月」、
+  趋势错桶、漏斗/流失窗口偏移。把全部 11 处 SQL `'localtime'` 改为显式 `'+8 hours'`
+  （`finance.js` / `growth.js` / `students.js` / `admin.js`），与宿主时区解耦；`TZ` 仅保留给 JS Date。
+
+### 二、跨期退款口径（P0，统一到 finance）
+
+- `GET /orders/stats`：由「`status='paid'` + `SUM(payable-refunded)` 按 paid_at」改为
+  「收入按 paid_at + 退款按退款发生时间（`last_refunded_at`）两段相减」，并补**销售作用域**
+  （销售只看本人，此前返回全机构）。与看板/财务/月报同口径，消除「跨月/跨年退款订单页不扣」。
+- 看板「本年」净营收：同样改为两段相加并补上界（此前只按 `paid_at >= 年初`，去年支付今年退款整笔消失）。
+- 导出销售报表：收入/退款分段后按签单人合并（此前跨月退款在导出里不扣）。
+- 收入趋势：拆成「支付日收入」「退款日退款」两张图合并（此前按支付日冲减）。
+- 增长漏斗「本月成交额」：补 `revenue_excluded=0`、时间上界、减退款（此前比看板多 1,925）。
+
+### 三、导入与改单闸门（P0）
+
+- `PUT /orders/:id`：`revenue_excluded` 改 `flag01()` 归一（字符串 `"0"` 不再把订单踢出全部营收统计）；
+  改价补单笔 1 亿上限。
+- `POST /orders/import`：补金额上限、入账时间合理区间（2000-01-01 至今天，允许历史台账、拒绝未来）、
+  非管理员业绩强制本人（此前直接采信文件内容，可冒名）。
+
+### 四、数据口径与安全
+
+- `students.join_date`：建档/导入/增长中心三条写入路径统一为 `formatDate()`（`'YYYY-MM-DD'`）；
+  新增迁移 **041** 把存量毫秒串一次性转为日期串（此前日期筛选静默漏数）；`v105` 回归断言同步更新。
+- `GET /admin/teachers`：非管理员不再返回 `permissions`（他人功能授权清单）；`phone/payRule/classFee` 早已剔除。
+- `finance.js`：补导入 `fail`（`/finance/monthly?year=abc` 此前走异常分支 500）。
+
+### 五、前端（P0/P1 小改）
+
+- 员工创建：提交后弹出**一次性临时口令**（此前文案写死 123456、真实随机口令被丢弃，新员工永不可登录）。
+- 卡种编辑：`valid_days/total_classes` 用 `??` 而非 `||`（0 不再被回显成 30/8，避免静默改写权益）。
+- 看板状态点：`danger/error` 正确映射为红点（此前缺席/请假显示灰点）。
+- 课时统计：金额列 `Number(x||0).toLocaleString()`（单条脏数据不再整表崩）。
+
+### 验证
+
+- 后端全量回归：**367 PASS / 0 FAIL / 0 WARN，46/46 套件**；前端 `npm run build` 通过。
+
+### 仍待处理（需单独提交 / 需决策）
+
+- 退款幂等键、时效卡部分退款「不得改写 expires_at/作废」与结转冲销（牵动
+  `finance-refund-regression`/`card-classes-invariant`，需配套改测试）。
+- 同卡种多订单结转翻倍（需 `member_cards.face_amount` 快照，schema 变更）。
+- 前端 localStorage 提权（需启动拉 `/auth/profile` 校正 + 去 `role==='admin'` 全放行）。
+- 只读退化（P0）：需写探针 + 登录写入 best-effort + 错误码区分。
+- 页面级「越权接口静默兜底为 0/空」、CSP 内联脚本、Google Fonts 本地化等，按页面分批。
+
 ## [Unreleased] — 2026-10-27 全站审计 87 项修复落地（v1.0.10）
 
 来源：`starclass全站扫描与自动化测试报告-20261026`（87 条：14 P0 / 37 P1 / 36 P2）+

@@ -10,7 +10,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { success, safeFail, isAdminReq } = require('../utils');
+const { success, fail, safeFail, isAdminReq } = require('../utils');
 
 // 退款归属时间（全站唯一口径）：优先 last_refunded_at（迁移 022 起记录「最后一次退款发生时间」），
 // 仅在历史行尚未回填（last_refunded_at=0）时回退到 updated_at（旧口径），
@@ -239,7 +239,7 @@ router.get('/monthly', (req, res) => {
     // 收入/折扣按「订单支付月份」（paid_at）归属。
     const months = db.prepare(`
       SELECT
-        strftime('%m', datetime(paid_at/1000, 'unixepoch', 'localtime')) as month,
+        strftime('%m', datetime(paid_at/1000, 'unixepoch', '+8 hours')) as month,
         COUNT(CASE WHEN status = 'paid' THEN 1 END) as order_count,
         COALESCE(SUM(payable_amount), 0) as revenue,
         COALESCE(SUM(discount_amount), 0) as discount
@@ -254,7 +254,7 @@ router.get('/monthly', (req, res) => {
     // 若沿用 paid_at，跨月退款会落在原支付月，导致同一年内 summary 与 monthly 的退款额永远对不平。
     const refundsByMonth = db.prepare(`
       SELECT
-        strftime('%m', datetime(${REFUND_TS_SQL}/1000, 'unixepoch', 'localtime')) as month,
+        strftime('%m', datetime(${REFUND_TS_SQL}/1000, 'unixepoch', '+8 hours')) as month,
         COALESCE(SUM(refunded_amount), 0) as refunded
       FROM orders
       WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND COALESCE(refunded_amount, 0) > 0

@@ -5,8 +5,9 @@
  *  1) 金额宽松解析：台账金额列混用「199 / ¥199.00 / ￥29.90 / ¥2,699.00 / 199元」时不再整行失败，
  *     失败时错误文案回显原值（用户才知道是哪个写法不被接受）。
  *  2) 购买日期三格式：Excel 序列号 / 美式 M/D/YY / ISO 非零填充；解析失败**不再静默回退为当前时间**。
- *  3) join_date 文本形态：TEXT 列绑数字会被 SQLite REAL 亲和写成 '...0'（前端解析失败整列显示 `-`），
- *     建档与导入路径必须写纯整数文本。
+ *  3) join_date 文本形态：全站按 'YYYY-MM-DD' 字符串比较筛选，建档与导入必须写日期串；
+ *     历史上曾写毫秒串（'1793...'），字符串比较下恒不命中 → 日期筛选静默漏数，
+ *     迁移 041 已把存量毫秒串一次性转为日期串。
  *
  * 运行：node tests/v105-fixes-regression.cjs
  */
@@ -121,7 +122,7 @@ console.log('\n\x1b[1m[2] 订单导入：金额与日期\x1b[0m');
   rec('★ 非法日期不再静默回退为当前时间（该行入 failed）', Array.isArray(d4.fail) && d4.fail.length === 1, `fail=${JSON.stringify(d4.fail)}`);
 }
 
-// [3] join_date 文本形态（TEXT 列不得写入 '...0'）
+// [3] join_date 文本形态（全站按 'YYYY-MM-DD' 字符串比较筛选，必须落日期串而非毫秒串）
 console.log('\n\x1b[1m[3] join_date 文本形态\x1b[0m');
 {
   const create = getHandler(studentsRouter, 'post', '/');
@@ -129,16 +130,16 @@ console.log('\n\x1b[1m[3] join_date 文本形态\x1b[0m');
   create(mockReq({ userRole: 'admin', openid: 'admin_x', body: { name: '建档时间测试', phone: '13700008888' } }), r);
   const sid = r.body && r.body.data && r.body.data.id;
   const row = sid ? db.prepare('SELECT join_date FROM students WHERE id = ?').get(sid) : null;
-  rec('★ 建档 join_date 为纯整数文本（无 .0）', !!row && /^\d{10,}$/.test(String(row.join_date)), `join_date=${row && row.join_date}`);
+  rec('★ 建档 join_date 为日期串（YYYY-MM-DD）', !!row && /^\d{4}-\d{2}-\d{2}$/.test(String(row.join_date)), `join_date=${row && row.join_date}`);
 
   // 导入路径同样
   const imp = getHandler(studentsRouter, 'post', '/import');
   const r2 = mockRes();
   imp(mockReq({ userRole: 'admin', openid: 'admin_x', body: { rows: [{ name: '导入时间测试', joinDate: '2026-01-05' }] } }), r2);
   const row2 = db.prepare("SELECT join_date FROM students WHERE name = '导入时间测试'").get();
-  rec('★ 导入 join_date 为纯整数文本（无 .0）', !!row2 && /^\d{10,}$/.test(String(row2.join_date)), `join_date=${row2 && row2.join_date}`);
+  rec('★ 导入 join_date 为日期串（YYYY-MM-DD）', !!row2 && /^\d{4}-\d{2}-\d{2}$/.test(String(row2.join_date)), `join_date=${row2 && row2.join_date}`);
   rec('导入 join_date 落在指定日期（2026-01-05）',
-    !!row2 && new Date(Number(row2.join_date)).getFullYear() === 2026 && new Date(Number(row2.join_date)).getMonth() === 0 && new Date(Number(row2.join_date)).getDate() === 5,
+    !!row2 && String(row2.join_date) === '2026-01-05',
     `join_date=${row2 && row2.join_date}`);
 }
 

@@ -205,18 +205,25 @@ router.get('/dashboard', dashboardGuard, (req, res) => {
     `).get(monthStartMs(prevMonthStart), nextMonthStartMs(prevMonthStart), ...spParams);
     const prevMonthRevenue = (prevMonthRevenueRow?.total || 0) - (prevMonthRefundRow?.total || 0);
 
-    // 本年 / 去年收入
-    const yearRevenueRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ?${spSql}
-    `).get(yearStartMs(today.slice(0, 4)), ...spParams);
-    const yearRevenue = yearRevenueRow?.total || 0;
-    const prevYear = String(Number(today.slice(0, 4)) - 1);
-    const prevYearRevenueRow = db.prepare(`
-      SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as total FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?${spSql}
-    `).get(yearStartMs(prevYear), yearStartMs(today.slice(0, 4)), ...spParams);
-    const prevYearRevenue = prevYearRevenueRow?.total || 0;
+    // 本年 / 去年收入 —— 与本月同口径：收入按支付年、退款按退款年，两段各自落区间再相减。
+    // 此前只按 paid_at 过滤并直接 SUM(payable-refunded)：去年支付、今年退款整笔从「本年」消失
+    // （看板 0 vs 财务 -1000）；且缺上界，未来单也会混入。
+    const _yKey = today.slice(0, 4);
+    const _yStart = yearStartMs(_yKey);
+    const _yEnd = yearStartMs(String(Number(_yKey) + 1));
+    const _refTs = 'COALESCE(NULLIF(last_refunded_at,0), updated_at)';
+    const _yearNet = (from, to) => {
+      const inc = db.prepare(`SELECT COALESCE(SUM(payable_amount), 0) as total FROM orders
+        WHERE status IN ('paid','refunded') AND order_type != 'refund' AND revenue_excluded = 0
+          AND paid_at >= ? AND paid_at < ?${spSql}`).get(from, to, ...spParams).total || 0;
+      const ref = db.prepare(`SELECT COALESCE(SUM(refunded_amount), 0) as total FROM orders
+        WHERE status IN ('paid','refunded') AND order_type != 'refund' AND revenue_excluded = 0
+          AND refunded_amount > 0 AND ${_refTs} >= ? AND ${_refTs} < ?${spSql}`).get(from, to, ...spParams).total || 0;
+      return inc - ref;
+    };
+    const yearRevenue = _yearNet(_yStart, _yEnd);
+    const prevYear = String(Number(_yKey) - 1);
+    const prevYearRevenue = _yearNet(yearStartMs(prevYear), _yStart);
 
     // 本月签单人排名
     const monthSales = db.prepare(`
@@ -615,13 +622,29 @@ router.get('/charts', dashboardGuard, (req, res) => {
     }
     // 区间放宽取上界（当前时刻 +1 天）与下界（60 天前，早于所需最早一天 00:00）：
     // 精确归属由 GROUP BY 的日期表达式决定，放宽区间不影响结果，只保证不漏。
-    const revMap = new Map(db.prepare(`
-      SELECT date(paid_at/1000, 'unixepoch', 'localtime') AS d,
-             COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) AS total
+    // 收入按支付日落桶、退款按退款日落桶，再逐日相减（此前按支付日冲减退款：
+    // 跨月退款会落在原单月，凌晨退款也随 paid_at 偏移，趋势与 KPI 对不上）
+    const _trendFrom = Date.now() - 60 * 86400000;
+    const _trendTo = Date.now() + 86400000;
+    const _refTs = 'COALESCE(NULLIF(last_refunded_at,0), updated_at)';
+    const incMap = new Map(db.prepare(`
+      SELECT date(paid_at/1000, 'unixepoch', '+8 hours') AS d,
+             COALESCE(SUM(payable_amount), 0) AS total
       FROM orders
       WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at <= ?
       GROUP BY d
-    `).all(Date.now() - 60 * 86400000, Date.now() + 86400000).map((r) => [r.d, r.total]));
+    `).all(_trendFrom, _trendTo).map((r) => [r.d, r.total]));
+    const refMap = new Map(db.prepare(`
+      SELECT date(${_refTs}/1000, 'unixepoch', '+8 hours') AS d,
+             COALESCE(SUM(refunded_amount), 0) AS total
+      FROM orders
+      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0
+        AND refunded_amount > 0 AND ${_refTs} >= ? AND ${_refTs} <= ?
+      GROUP BY d
+    `).all(_trendFrom, _trendTo).map((r) => [r.d, r.total]));
+    const revMap = new Map();
+    for (const [d, v] of incMap) revMap.set(d, (revMap.get(d) || 0) + v);
+    for (const [d, v] of refMap) revMap.set(d, (revMap.get(d) || 0) - v);
 
     const revLabels = revDays.map((d) => d.label);
     const revCurrent = revDays.map((d) => revMap.get(d.cur) || 0);
@@ -741,12 +764,31 @@ router.get('/export', adminOnly, (req, res) => {
         // 绑定毫秒区间（半开 [from, to+1d)），使 paid_at 上的索引可用
         const fromMs = dayStartMs(dayFrom);
         const toMs = dayEndMs(dayTo);
-        const rank = db.prepare(`
-          SELECT TRIM(salesperson) AS salesperson, COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count
+        // 收入按 paid_at、退款按退款时间，两段各自落区间后再按签单人合并。
+        // 此前直接 SUM(payable-refunded) 且按 paid_at 过滤：跨月退款在导出里不扣（与财务差 1000）。
+        const _refTs = 'COALESCE(NULLIF(last_refunded_at,0), updated_at)';
+        const rankInc = db.prepare(`
+          SELECT TRIM(salesperson) AS sp, COALESCE(SUM(payable_amount), 0) as inc, COUNT(*) as cnt
           FROM orders ${where} AND TRIM(COALESCE(salesperson, '')) != ''
-          GROUP BY TRIM(salesperson) ORDER BY amount DESC
+          GROUP BY TRIM(salesperson)
         `).all(fromMs, toMs);
-        const revenue = db.prepare(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount, 0)), 0) as amount, COUNT(*) as count FROM orders ${where}`).get(fromMs, toMs);
+        const rankRef = db.prepare(`
+          SELECT TRIM(salesperson) AS sp, COALESCE(SUM(refunded_amount), 0) as ref
+          FROM orders
+          WHERE status IN ('paid','refunded') AND order_type != 'refund' AND revenue_excluded = 0
+            AND refunded_amount > 0 AND ${_refTs} >= ? AND ${_refTs} < ?
+            AND TRIM(COALESCE(salesperson, '')) != ''
+          GROUP BY TRIM(salesperson)
+        `).all(fromMs, toMs);
+        const _refMap = new Map(rankRef.map((r) => [r.sp, r.ref]));
+        const rank = rankInc
+          .map((r) => ({ salesperson: r.sp, amount: r.inc - (_refMap.get(r.sp) || 0), count: r.cnt }))
+          .sort((a, b) => b.amount - a.amount);
+        const _revInc = db.prepare(`SELECT COALESCE(SUM(payable_amount), 0) as amount, COUNT(*) as count FROM orders ${where}`).get(fromMs, toMs);
+        const _revRef = db.prepare(`SELECT COALESCE(SUM(refunded_amount), 0) as amount FROM orders
+          WHERE status IN ('paid','refunded') AND order_type != 'refund' AND revenue_excluded = 0
+            AND refunded_amount > 0 AND ${_refTs} >= ? AND ${_refTs} < ?`).get(fromMs, toMs);
+        const revenue = { amount: (_revInc.amount || 0) - (_revRef.amount || 0), count: _revInc.count || 0 };
         const itemMap = {};
         // items 解析统一走 utils/items（与退卡退款、财务报表同一实现，口径不再分叉）。
         // 历史数据存在「数组元素为 JSON 字符串」的双重编码，且元素未必是对象。
@@ -880,7 +922,7 @@ router.get('/teachers', staffRead, (req, res) => {
     const scheduleCountByTeacher = {};
     db.prepare(`
       SELECT teacher_id, COUNT(*) as count FROM schedules
-      WHERE status = 'scheduled' AND date >= date('now', 'localtime') GROUP BY teacher_id
+      WHERE status = 'scheduled' AND date >= date('now', '+8 hours') GROUP BY teacher_id
     `).all().forEach((r) => { scheduleCountByTeacher[r.teacher_id] = r.count; });
     const list = teachers.map((t) => {
       const out = { ...t };
@@ -898,7 +940,9 @@ router.get('/teachers', staffRead, (req, res) => {
       // 关联登录账号角色与自定义权限
       const linked = (t.phone && userByPhone[t.phone]) || null;
       out.role = linked ? (linked.role || 'coach') : 'coach';
-      out.permissions = resolvePerms(linked || { role: 'coach' });
+      // permissions 属管理字段（他人功能授权清单），仅管理员可见；
+      // 教练/销售排课与签单只需要 id+name（+role），无需知道彼此的自定义权限。
+      if (isAdmin) out.permissions = resolvePerms(linked || { role: 'coach' });
       // 该教练未来排课数量（详情展示）
       out.scheduleCount = scheduleCountByTeacher[t.id] || 0;
       return out;

@@ -533,6 +533,11 @@ router.post('/import', (req, res) => {
           return;
         }
         const amount = amountParsed.value;
+        // 与建单同一上限：导入此前只挡负数，可灌入 1e13 级流水污染月度汇总
+        if (amount > 1e8) {
+          failed.push({ row: fileRowOf(r, idx), reason: '金额超出单笔上限（1 亿元），请拆单后导入' });
+          return;
+        }
 
         // 仅对导入文件显式提供了 orderNo 的行查重：orderNo 为空时走下方随机生成逻辑，
         // 生成的订单号天然唯一，无法也无需查重。命中即跳过该行，不影响其余行与本批事务。
@@ -606,6 +611,14 @@ router.post('/import', (req, res) => {
           }
           paidTs = ms;
         }
+        // 入账时间必须是合理历史区间：允许导入历史台账，但拒绝未来日期（会篡改未来月份报表）
+        // 与过早日期（1900 年会让摊销/月报出现极端值）。此前接受 1900–2999 任意日期。
+        const _minPaid = new Date('2000-01-01T00:00:00').getTime();
+        const _maxPaid = Date.now() + 86400000;
+        if (paidTs < _minPaid || paidTs > _maxPaid) {
+          failed.push({ row: fileRowOf(r, idx), reason: '购买日期需在 2000-01-01 至今天之间' });
+          return;
+        }
         const orderNo = finalOrderNo || `ORD${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
         // 按项目名反查卡种：导入的 items 此前缺 itemId，grantOrderBenefits 两个循环都在
         // `if (!item.itemId) continue` 处整体跳过 → 发卡与积分静默不发，而订单入账、接口仍返回成功
@@ -622,7 +635,9 @@ router.post('/import', (req, res) => {
         if (!cardType) {
           warnings.push({ row: fileRowOf(r, idx), reason: `项目「${itemName}」在产品库中不存在，订单已入账但未开通会员卡，请手工补发` });
         }
-        insertOrder.run(id, orderNo, student.id, student.name, JSON.stringify(items), amount, amount, String(r.salesperson || '').trim(), String(r.remark || '').trim(), t, t);
+        // 业绩归属与建单同口径：非管理员强制本人（此前直接采信文件内容，销售可冒名他人业绩）
+        const importSalesperson = isAdminReq(req) ? String(r.salesperson || '').trim() : myStaffName(req);
+        insertOrder.run(id, orderNo, student.id, student.name, JSON.stringify(items), amount, amount, importSalesperson, String(r.remark || '').trim(), t, t);
         const order = {
           id,
           order_no: orderNo,
@@ -1033,6 +1048,8 @@ router.put('/:id', (req, res) => {
     if (payableAmount !== undefined) {
       const amount = Number(payableAmount);
       if (!isFinite(amount) || amount < 0) return res.json(fail('金额不合法'));
+      // 改价同样受单笔上限约束（此前只挡负数，100 元卡可改成 5,000 万，污染营收/退款上限/提成基数）
+      if (amount > 1e8) return res.json(fail('金额超出单笔上限（1 亿元），请拆单'));
       // Never below what was already refunded
       const refundedSoFar = Number(order.refunded_amount) || 0;
       if (amount < refundedSoFar) return res.json(fail(`金额不能低于已退款金额 ¥${refundedSoFar}`));
@@ -1043,7 +1060,8 @@ router.put('/:id', (req, res) => {
     if (salesperson !== undefined) { fields.push('salesperson = ?'); params.push(String(salesperson).trim()); }
     if (remark !== undefined) { fields.push('remark = ?'); params.push(String(remark)); }
     // 核销/赠卡类订单不计入营收统计（财务各口径统一排除）
-    if (revenueExcluded !== undefined) { fields.push('revenue_excluded = ?'); params.push(revenueExcluded ? 1 : 0); }
+    // 布尔必须真值归一：字符串 "0" 在 JS 中为真值，直接写入会把订单踢出全部营收统计
+    if (revenueExcluded !== undefined) { fields.push('revenue_excluded = ?'); params.push(flag01(revenueExcluded)); }
     if (fields.length === 0) return res.json(fail('没有需要修改的内容'));
 
     const prevPayable = Number(order.payable_amount) || 0;
@@ -1248,27 +1266,29 @@ router.get('/stats', (req, res) => {
     const today = formatDate(now());
     const month = today.slice(0, 7);
     const year = today.slice(0, 4);
-    const q = (sql, ...p) => db.prepare(sql).get(...p).t;
-    // 'localtime' 口径不可省略：today/month/year 由 formatDate() 按本机时区生成。
-    // E3：谓词由 date(paid_at/1000,'unixepoch','localtime') = ? 改为 paid_at 毫秒区间（半开），
-    // 前者是表达式谓词、用不上 idx_orders_paid_at，每次 /stats 全表扫三遍。
-    const todayAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?`, dayStartMs(today), dayEndMs(today));
-    const monthAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?`, monthStartMs(month), nextMonthStartMs(month));
-    const yearAmount = q(`SELECT COALESCE(SUM(payable_amount - COALESCE(refunded_amount,0)),0) as t FROM orders WHERE status='paid' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at < ?`, yearStartMs(year), nextYearStartMs(year));
-    // M6：退卡产生的退款落在 order_type='refund_standalone' 的载体单上（payable=0、
-    // status='refunded'），上面的 status='paid' 谓词会把它整条排除 —— 净营收完全不减，
-    // 与管理财务页（finance/summary 会把退款单列冲减）同屏两个数字矛盾。
-    // 按退款发生时间在同一区间内冲减，与财务口径对齐。
-    const refundSum = (from, to) => q(
-      `SELECT COALESCE(SUM(COALESCE(refunded_amount,0)),0) as t FROM orders
-        WHERE order_type = 'refund_standalone' AND status = 'refunded'
-          AND paid_at >= ? AND paid_at < ?`,
-      from, to
-    );
+    // 与 finance/summary 同一口径：收入按支付时间(paid_at)、退款按退款发生时间(last_refunded_at)，
+    // 两段各自落在区间内再相减。此前用 status='paid' + SUM(payable-refunded) 且按 paid_at 过滤，
+    // 导致「跨月/跨年退款」在订单页完全不扣（看板/财务扣了），同一笔业务两套账。
+    // 同时补销售作用域：销售只能看本人业绩（此前 /stats 返回全机构，与列表隔离自相矛盾）。
+    const admin = isAdminReq(req);
+    const myName = admin ? '' : myStaffName(req);
+    const scope = admin ? '' : " AND COALESCE(TRIM(salesperson), '') = ?";
+    const scopeParams = admin ? [] : [myName];
+    const REFUND_TS = 'COALESCE(NULLIF(last_refunded_at, 0), updated_at)';
+    const netFor = (from, to) => {
+      const inc = db.prepare(`SELECT COALESCE(SUM(payable_amount),0) AS t FROM orders
+        WHERE status IN ('paid','refunded') AND order_type != 'refund' AND revenue_excluded = 0
+          AND paid_at >= ? AND paid_at < ?${scope}`).get(from, to, ...scopeParams).t;
+      const ref = db.prepare(`SELECT COALESCE(SUM(COALESCE(refunded_amount,0)),0) AS t FROM orders
+        WHERE status IN ('paid','refunded') AND order_type != 'refund' AND revenue_excluded = 0
+          AND COALESCE(refunded_amount,0) > 0
+          AND ${REFUND_TS} >= ? AND ${REFUND_TS} < ?${scope}`).get(from, to, ...scopeParams).t;
+      return inc - ref;
+    };
     res.json(success({
-      today: todayAmount - refundSum(dayStartMs(today), dayEndMs(today)),
-      month: monthAmount - refundSum(monthStartMs(month), nextMonthStartMs(month)),
-      year: yearAmount - refundSum(yearStartMs(year), nextYearStartMs(year)),
+      today: netFor(dayStartMs(today), dayEndMs(today)),
+      month: netFor(monthStartMs(month), nextMonthStartMs(month)),
+      year: netFor(yearStartMs(year), nextYearStartMs(year)),
     }));
   } catch (err) {
     console.error('[orders stats]', err);

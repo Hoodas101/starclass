@@ -5,7 +5,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { generateId, success, fail, safeFail, now, parsePagination, hasPerm, getReqUser, escapeLike, isAdminReq, recordAudit, getActor, getOpenId } = require('../utils');
+const { generateId, success, fail, safeFail, now, formatDate, parsePagination, hasPerm, getReqUser, escapeLike, isAdminReq, recordAudit, getActor, getOpenId } = require('../utils');
 const leadSuggestions = require('../utils/lead-suggestions');
 const { getChurnRules } = require('../utils/churn');
 // 建档查重（与 POST /api/students 同一判据）
@@ -117,12 +117,26 @@ router.get('/funnel', (req, res) => {
         AND (next_follow_at IS NULL OR next_follow_at <= ?)
     `).get(now()).count;
 
-    // 本月成交（orders）
+    // 本月成交（orders）—— 与 finance/看板同口径：收入按支付时间、退款按退款时间，
+    // 补 revenue_excluded=0 与时间上界。此前缺上界、不排除 revenue_excluded、不减退款，
+    // 实测漏斗「本月成交额」比看板本月多 1,925（含一条 777 的 revenue_excluded 单）。
     const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
-    const monthOrder = db.prepare(`
+    const monthEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 1);
+    const _msFrom = monthStart.getTime();
+    const _msTo = monthEnd.getTime();
+    const _refTs = 'COALESCE(NULLIF(last_refunded_at, 0), updated_at)';
+    const _inc = db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(payable_amount), 0) as amount FROM orders
-      WHERE status = 'paid' AND paid_at >= ?
-    `).get(monthStart.getTime());
+      WHERE status IN ('paid','refunded') AND order_type != 'refund' AND revenue_excluded = 0
+        AND paid_at >= ? AND paid_at < ?
+    `).get(_msFrom, _msTo);
+    const _ref = db.prepare(`
+      SELECT COALESCE(SUM(COALESCE(refunded_amount,0)),0) as t FROM orders
+      WHERE status IN ('paid','refunded') AND order_type != 'refund' AND revenue_excluded = 0
+        AND COALESCE(refunded_amount,0) > 0
+        AND ${_refTs} >= ? AND ${_refTs} < ?
+    `).get(_msFrom, _msTo).t;
+    const monthOrder = { count: _inc.count, amount: _inc.amount - _ref };
 
     // 本月新增线索
     const monthLeads = db.prepare('SELECT COUNT(*) as count FROM leads WHERE created_at >= ?').get(monthStart.getTime()).count;
@@ -384,7 +398,7 @@ router.post('/leads/:id/convert', (req, res) => {
           db.prepare(`
             INSERT INTO students (id, name, gender, birthday, school, grade, hobby, level, height, weight, bmi, remark, status, join_date, member_no, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
-          `).run(studentId, name, '', '', '', '', '', '', 0, 0, 0, '', String(t), nextMemberNo(), t, t);
+          `).run(studentId, name, '', '', '', '', '', '', 0, 0, 0, '', formatDate(t), nextMemberNo(), t, t);
 
           // 家长账号与绑定：与 students.js 创建成员保持一致，保证手机号登录后可见该成员
           const parentNameVal = `${name}家长`;
@@ -650,7 +664,7 @@ router.get('/renewal', (req, res) => {
     const backMs = expiredWithin * 86400000;
     const rows = db.prepare(`
       SELECT c.id, c.student_id, c.card_type_name, c.expires_at, c.status, s.name as student_name,
-        (SELECT COUNT(*) FROM attendances a WHERE a.student_id = c.student_id AND a.date >= date('now', 'localtime', '-30 days')) as recent_count
+        (SELECT COUNT(*) FROM attendances a WHERE a.student_id = c.student_id AND a.date >= date('now', '+8 hours', '-30 days')) as recent_count
       FROM member_cards c
       JOIN students s ON s.id = c.student_id
       WHERE c.status IN ('active','paused','expired')
@@ -706,7 +720,7 @@ router.get('/low-classes', (req, res) => {
     const rows = db.prepare(`
       SELECT mc.id, mc.student_id, mc.card_type_name, mc.billing_mode, mc.remaining_classes, mc.expires_at, mc.status,
         s.name as student_name,
-        (SELECT COUNT(*) FROM attendances a WHERE a.student_id = mc.student_id AND a.date >= date('now', 'localtime', '-30 days')) as recent_count
+        (SELECT COUNT(*) FROM attendances a WHERE a.student_id = mc.student_id AND a.date >= date('now', '+8 hours', '-30 days')) as recent_count
       FROM member_cards mc
       JOIN students s ON s.id = mc.student_id
       WHERE mc.status = 'active' AND mc.billing_mode = 'count' AND mc.remaining_classes <= ? AND mc.remaining_classes > 0

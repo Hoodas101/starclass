@@ -145,7 +145,7 @@
               </p>
               <span class="activity-time">{{ item.time }}</span>
             </div>
-            <StatusDot :tone="item.status === 'success' ? 'success' : item.status === 'warning' ? 'warning' : 'neutral'" :label="item.statusText" subtle />
+            <StatusDot :tone="item.status === 'success' ? 'success' : item.status === 'warning' ? 'warning' : (item.status === 'danger' || item.status === 'error') ? 'error' : 'neutral'" :label="item.statusText" subtle />
           </div>
         </div>
       </div>

@@ -191,7 +191,7 @@
         </el-form-item>
         <div v-if="!editingId" class="staff-add-hint">
           <el-icon :size="14"><InfoFilled /></el-icon>
-          <span>员工创建后将自动开通小程序登录账号，初始密码为 123456，可在「个人资料」中修改。</span>
+          <span>员工创建后将自动开通登录账号；提交后会弹出一次性初始口令（仅显示一次），请复制后转交员工，员工首次登录需修改密码。</span>
         </div>
       </el-form>
 
@@ -394,12 +394,27 @@ const submitAdd = async () => {
       })
       ElMessage.success('员工信息已更新')
     } else {
-      await addTeacher({
+      const created = await addTeacher({
         ...addForm,
         role: addForm.role,
         permissions: addForm.role === 'admin' ? [] : addForm.permissions,
       })
       ElMessage.success('员工添加成功')
+      // P0：后端已生成一次性临时口令（随机，非 123456），必须展示给管理员，否则新员工无法登录。
+      // 关闭后无法再次查看（哈希存储），只能走重置。
+      if (created && created.tempPassword) {
+        ElMessageBox.alert(
+          `初始口令：<b style="font-size:18px;letter-spacing:1px">${created.tempPassword}</b><br><span style="color:#999;font-size:12px">请立即复制转交员工，关闭后无法再次查看；员工首次登录需修改密码。</span>`,
+          '一次性初始口令',
+          {
+            confirmButtonText: '我已复制',
+            dangerouslyUseHTMLString: true,
+            showClose: false,
+            closeOnClickModal: false,
+            closeOnPressEscape: false,
+          }
+        )
+      }
     }
     addDialogVisible.value = false
     loadStaff()
