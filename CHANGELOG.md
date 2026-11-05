@@ -5,6 +5,65 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased] — 2026-11-05 提交作者版报告修复 + Web/小程序联合排查
+
+来源：`StarClass_v1.0.10_问题汇总与修复方案_提交作者版.md`（基线 `b2bf07b`，15 项：9 项作者已修待 patch、6 项待处理）。作者本地已验证但未提交，本轮逐条核实后落地，并做两端联合排查。
+
+### 一、报告 9 项修复（5 个源文件）
+
+- **A1/A3 跨角色 over-fetch**：`students/index.vue` 概览条与 `loadStats()` 加 `dashboard` 权限守卫、`getCardTypes()` 加 `sales` 守卫；教练不再看到「恒为 0 的概览」或多一个 `card-types` 403。
+- **A2**：`dashboard/index.vue` 近期签到动态按 `checkin`、待审批请假按 `leave` 守卫。
+- **A4/A5 CSP**：`server.js` 拆分 `style-src`（放行 `fonts.googleapis.com`）与 `script-src`（放行内联主题脚本哈希）。
+  - 字体实际来源是 `src/styles/index.scss:1313` 的 `@import`（构建并入 dist CSS），非报告所述 index.html `<link>`。
+  - 报告给的**两个 sha256 只有一个有效**：`EFh1V6ln…` 精确匹配脚本原文；`ZlzOtXrn…` 不匹配任何口径，已剔除并修正注释。
+- **B1/B2 权限契约**：`students/index.vue` 定义 `canCreateStudent / canImportStudent / canEditStudent / canManageCard / canWriteComment`，模板守卫 + 9 处行内编辑降为只读 + `startEdit/saveComment/submitAdd` 函数级兜底 + 详情点评请求按权限跳过。严格对齐后端 5 套守卫，未放宽任何后端权限。
+- **B3**：`ColumnSettingsDialog.vue` 内容区独立滚动、浮层限高 `min(45vh,400px)`，5 个共用页面的保存/取消/恢复默认恒在视口内。
+- **B4**：订单页营收文案按角色区分「全部订单 / 本人业绩」。
+
+### 二、报告待办 6 项
+
+| 项 | 处理 |
+|---|---|
+| B5 | 5 个 Hub 的 `onMounted` 在 URL 带了不可见 tab 时回退内容并 `router.replace` 同步 URL |
+| B6 | 新建成员性别默认置空 + 新建必填（编辑允许空）；同时去掉 `editStudent` 对未知性别兜底写「男」 |
+| C1 | **核实为误报**：后端 `pct(cur,prev)` 在 `prev<=0` 时返回 `null`，前端显示「今年暂无对比」。实测 `deltas=[35,43.8,-53.7,null]`，未做无效改动 |
+| C2 | 看板文案改「持有效卡学员数」 |
+| D1 | 周期排课幂等检查并入 `immediate` 事务，重复时以 `rollbackReason` 抛出，保持原 fail 文案并回滚 |
+| D2 | `getUserInfo` 对服务端显式空权限 `[]` 改为采信（此前沿用本地旧值）；`main.js` 启动非阻塞拉 profile 校正本地角色 |
+
+### 三、对抗式审查追加（报告未指出）
+
+- **A2 契约偏差**：后端 `/api/leave/` 是「`isCoachReq`（角色）+ `requireStaffPerm('leave')`」双层守卫，仅按 `permHas('leave')` 会让被自定义授权的销售发起必 403 的请求 → 补角色条件。
+- **`getUserInfo` 权限合并缺陷**（见 D2）：注释称 getProfile 不返回 permissions，与后端 `resolvePerms(user)` 实际返回相矛盾。
+- **CSP 哈希防回归门禁**：`tests/static-checks.test.mjs` 新增 2 条，校验 `server.js` 的 sha256 与源 `index.html` 及 `dist/index.html` 内联脚本原文一致。
+
+### 四、Web + 小程序联合排查（小程序 4 项）
+
+- `app.js` `hasPerm` 默认权限表补齐 `coachstats`，与后端 `DEFAULT_PERMS` 逐项一致。
+- `utils/workbench.js` 角色缺失时不再回退 `'admin'`（最小权限，避免显示管理员专属「财务报表」）。
+- `app.js` 新增 `refreshProfile()`：启动以服务端档案校正被篡改的本地 `userInfo`（Web D2 同源）。
+- `admin-students` 对非管理员暴露 `adminOnly` 的班级归属接口与「编入班级」写入口、对销售暴露 `admin|coach` 的班组/暂停卡入口 → 按角色加模板守卫 + 函数兜底 + 跳过必 403 的请求（Web B1 同源）。
+- 新增 `tools/role-guard-probe.cjs`（模拟运行时，23 项）。
+
+### 验证
+
+| 层 | 结果 |
+|---|---|
+| 后端全量门禁 | **367 PASS / 0 FAIL / 0 WARN，46/46 套件** |
+| 前端 build / 静态守卫 | 通过 / **21 PASS 0 FAIL**（含 2 条 CSP 门禁） |
+| 浏览器三角色加载 | 3×11=**33 次，consoleErr/pageErr/4xx/failed/CSP 全 0** |
+| 浏览器交互探针 | 首轮 41 项（8 项探针假阴性已归因）→ 补充 15/15；Web 补充 9/9 |
+| D1 幂等专项 | 6/6（重复返回可诊断 fail、并发 3 次仅落 1 条规则） |
+| 小程序门禁 | 53 JS 语法、42 页四件套、audit-pages/mp-audit none、42 WXML 平衡、**73 API 调用全命中** |
+| 小程序角色探针 | **23/23**（四角色入口收敛、工作台回退、profile 校正） |
+
+### 仍待处理（需真机 / 产品决策）
+
+- 小程序原生渲染（WXML/WXSS 视觉、picker/switch 交互）仍需微信开发者工具或真机验收。
+- 报告长期方案：权限契约单一事实源（`/api/auth/capabilities`）、CSP nonce 化、字体本地化、浮层 `size` middleware 自适应高度。
+
+---
+
 ## [Unreleased] — 2026-10-28 第三轮深度测试修复（时区 / 跨期退款口径 / 导入闸门 / join_date）
 
 来源：`starclass-web端深度测试报告-20261028`（67 条）+ `-第二轮-`（45 条）+

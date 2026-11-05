@@ -12,6 +12,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src')
 
@@ -164,6 +165,29 @@ console.log('\n[6] 样式层叠与组件样式完整性')
   const main = read(path.join(SRC, 'main.js'))
   rec('★ 已显式引入 el-form-item 样式', main.includes('form-item/style/css'),
     main.includes('form-item/style/css') ? '' : 'main.js 缺 form-item/style/css → 表单无行间距、错误提示错位')
+}
+
+// [7] CSP 与首屏内联主题脚本的 sha256 必须一致
+// index.html 的内联脚本在首帧设置 data-theme，CSP 只能用哈希放行。哈希与脚本**原文**
+//（含首尾空白）强绑定：改脚本、换构建工具或重建产物后忘记重算，暗色首帧会白闪，
+// 而编译期完全不报错。此处同时校验源与构建产物，避免只改一边的漂移。
+{
+  const server = fs.readFileSync(path.resolve(SRC, '../../backend/server.js'), 'utf8')
+  const csp = (server.match(/Content-Security-Policy',\s*"([^"]+)"/) || [])[1] || ''
+  const declared = [...csp.matchAll(/'sha256-([^']+)'/g)].map((m) => m[1])
+  const inlineHash = (file) => {
+    const m = fs.readFileSync(file, 'utf8').match(/<script>([\s\S]*?)<\/script>/)
+    return m ? createHash('sha256').update(m[1], 'utf8').digest('base64') : ''
+  }
+  const srcHash = inlineHash(path.resolve(SRC, '../index.html'))
+  rec('★ CSP 声明了源 index.html 内联脚本的 sha256', !!srcHash && declared.includes(srcHash),
+    `src=${srcHash || 'missing'} declared=[${declared.join(', ') || 'none'}]`)
+  const distPath = path.resolve(SRC, '../dist/index.html')
+  if (fs.existsSync(distPath)) {
+    const distHash = inlineHash(distPath)
+    rec('★ CSP 声明了构建产物内联脚本的 sha256', !!distHash && declared.includes(distHash),
+      `dist=${distHash || 'missing'}；若与源不同请重建 dist 或重算哈希`)
+  }
 }
 
 console.log(`\n结果汇总：PASS ${pass}  FAIL ${fail}`)

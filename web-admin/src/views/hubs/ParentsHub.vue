@@ -37,8 +37,15 @@ const syncUrl = () => {
 
 onMounted(() => {
   const tab = route.query.tab
-  if (tab && visibleTabs.value.some((t) => t.key === tab)) activeTab.value = tab
-  else if (visibleTabs.value.length && !visibleTabs.value.some((t) => t.key === activeTab.value)) {
+  if (tab && visibleTabs.value.some((t) => t.key === tab)) { activeTab.value = tab; return }
+  // B5：强开不可见页签时内容已回退，但 URL 未同步会导致「地址显示 A、内容是 B」。
+  // 仅在 URL 带了不可见 tab 时修正，无 tab 参数的正常进入不受影响
+  if (tab && visibleTabs.value.length) {
+    activeTab.value = visibleTabs.value[0].key
+    router.replace({ query: { ...route.query, tab: activeTab.value } })
+    return
+  }
+  if (visibleTabs.value.length && !visibleTabs.value.some((t) => t.key === activeTab.value)) {
     activeTab.value = visibleTabs.value[0].key
   }
 })

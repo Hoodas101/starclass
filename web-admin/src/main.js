@@ -16,6 +16,7 @@ import '@/styles/index.scss'
 import App from './App.vue'
 import router from './router'
 import { useSettingsStore } from './store/settings'
+import { useUserStore } from './store/user'
 import { initTheme } from './utils/theme'
 
 // 主题引擎：跟随系统 / 强制浅色 / 强制深色（持久化 edu_theme，旧脏值自动归一）
@@ -33,5 +34,11 @@ const settingsStore = useSettingsStore()
 settingsStore.loadSettings()
 app.config.globalProperties.$t = (key) => settingsStore.t(key)
 app.config.globalProperties.$roleLabel = (role) => settingsStore.roleLabel(role)
+
+// D2：以服务端 /auth/getProfile 校正本地角色与权限。后端始终按 token 真实角色判定，
+// 篡改 localStorage 只能得到错误的页面外壳；启动拉取让侧栏/菜单收敛到真实角色。
+// 非阻塞且失败静默：离线或 token 失效不拖慢首屏，登录态仍由路由守卫处理。
+const userStore = useUserStore()
+if (userStore.isLoggedIn) userStore.getUserInfo().catch(() => {})
 
 app.mount('#app')

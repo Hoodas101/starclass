@@ -39,16 +39,17 @@
               <el-dropdown-item @click="doExportTemplate">
                 <el-icon><Download /></el-icon>导出为导入模板
               </el-dropdown-item>
-              <el-dropdown-item @click="openImport">
+              <el-dropdown-item v-if="canImportStudent" @click="openImport">
                 <el-icon><Upload /></el-icon>导入
               </el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
-        <el-button :type="selectMode ? 'primary' : 'default'" :icon="Finished" @click="toggleSelectMode">
+        <!-- 多选的唯一用途是批量归档/恢复（PUT /:id，员工端仅 admin 放行） -->
+        <el-button v-if="canEditStudent" :type="selectMode ? 'primary' : 'default'" :icon="Finished" @click="toggleSelectMode">
           {{ selectMode ? '退出多选' : '多选' }}
         </el-button>
-        <el-button type="primary" :icon="Plus" @click="openAddDialog">
+        <el-button v-if="canCreateStudent" type="primary" :icon="Plus" @click="openAddDialog">
           新建成员
         </el-button>
       </div>
@@ -64,8 +65,9 @@
       @remove="removeView"
     />
 
-    <!-- 数据概览 -->
-    <div class="overview-strip">
+    <!-- 数据概览：仅具备 dashboard 权限的角色可见。教练无全局看板权限，隐藏以免
+         403 后静默兜底出「恒为 0 的概览」与下方真实列表矛盾 -->
+    <div class="overview-strip" v-if="permHas('dashboard')">
       <div class="overview-item">
         <span class="overview-value num-display is-md">{{ stats.totalStudents }}</span>
         <span class="overview-label">在册成员</span>
@@ -244,7 +246,7 @@
                   <template v-if="editingField === 'name'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('name')" @blur="saveEdit('name')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('name', selectedStudent.name)" @keydown.enter="startEdit('name', selectedStudent.name)" @keydown.space.prevent="startEdit('name', selectedStudent.name)">{{ selectedStudent.name || '-' }}</span>
+                  <span v-else :class="['prop-value', canEditStudent ? 'prop-editable' : 'prop-static']" :role="canEditStudent ? 'button' : undefined" :tabindex="canEditStudent ? 0 : -1" @click="startEdit('name', selectedStudent.name)" @keydown.enter="startEdit('name', selectedStudent.name)" @keydown.space.prevent="startEdit('name', selectedStudent.name)">{{ selectedStudent.name || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">性别</span>
@@ -254,14 +256,14 @@
                       <el-option label="女" value="女" />
                     </el-select>
                   </template>
-                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('gender', selectedStudent.gender)" @keydown.enter="startEdit('gender', selectedStudent.gender)" @keydown.space.prevent="startEdit('gender', selectedStudent.gender)">{{ selectedStudent.gender || '-' }}</span>
+                  <span v-else :class="['prop-value', canEditStudent ? 'prop-editable' : 'prop-static']" :role="canEditStudent ? 'button' : undefined" :tabindex="canEditStudent ? 0 : -1" @click="startEdit('gender', selectedStudent.gender)" @keydown.enter="startEdit('gender', selectedStudent.gender)" @keydown.space.prevent="startEdit('gender', selectedStudent.gender)">{{ selectedStudent.gender || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">出生日期</span>
                   <template v-if="editingField === 'birthday'">
                     <el-date-picker v-model="editValue" type="date" size="small" value-format="YYYY-MM-DD" class="prop-input" @change="saveEdit('birthday')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('birthday', selectedStudent.birthday)" @keydown.enter="startEdit('birthday', selectedStudent.birthday)" @keydown.space.prevent="startEdit('birthday', selectedStudent.birthday)">{{ selectedStudent.birthday || '-' }}</span>
+                  <span v-else :class="['prop-value', canEditStudent ? 'prop-editable' : 'prop-static']" :role="canEditStudent ? 'button' : undefined" :tabindex="canEditStudent ? 0 : -1" @click="startEdit('birthday', selectedStudent.birthday)" @keydown.enter="startEdit('birthday', selectedStudent.birthday)" @keydown.space.prevent="startEdit('birthday', selectedStudent.birthday)">{{ selectedStudent.birthday || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">年龄</span>
@@ -272,35 +274,35 @@
                   <template v-if="editingField === 'level'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('level')" @blur="saveEdit('level')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('level', selectedStudent.level)" @keydown.enter="startEdit('level', selectedStudent.level)" @keydown.space.prevent="startEdit('level', selectedStudent.level)">{{ selectedStudent.level || '未设置' }}</span>
+                  <span v-else :class="['prop-value', canEditStudent ? 'prop-editable' : 'prop-static']" :role="canEditStudent ? 'button' : undefined" :tabindex="canEditStudent ? 0 : -1" @click="startEdit('level', selectedStudent.level)" @keydown.enter="startEdit('level', selectedStudent.level)" @keydown.space.prevent="startEdit('level', selectedStudent.level)">{{ selectedStudent.level || '未设置' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">{{ $t('guardian') }}姓名</span>
                   <template v-if="editingField === 'parentName'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('parentName')" @blur="saveEdit('parentName')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('parentName', selectedStudent.parent_name)" @keydown.enter="startEdit('parentName', selectedStudent.parent_name)" @keydown.space.prevent="startEdit('parentName', selectedStudent.parent_name)">{{ selectedStudent.parent_name || '-' }}</span>
+                  <span v-else :class="['prop-value', canEditStudent ? 'prop-editable' : 'prop-static']" :role="canEditStudent ? 'button' : undefined" :tabindex="canEditStudent ? 0 : -1" @click="startEdit('parentName', selectedStudent.parent_name)" @keydown.enter="startEdit('parentName', selectedStudent.parent_name)" @keydown.space.prevent="startEdit('parentName', selectedStudent.parent_name)">{{ selectedStudent.parent_name || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">手机号</span>
                   <template v-if="editingField === 'parent_phone'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('parent_phone')" @blur="saveEdit('parent_phone')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('parent_phone', selectedStudent.parent_phone)" @keydown.enter="startEdit('parent_phone', selectedStudent.parent_phone)" @keydown.space.prevent="startEdit('parent_phone', selectedStudent.parent_phone)">{{ selectedStudent.parent_phone || '-' }}</span>
+                  <span v-else :class="['prop-value', canEditStudent ? 'prop-editable' : 'prop-static']" :role="canEditStudent ? 'button' : undefined" :tabindex="canEditStudent ? 0 : -1" @click="startEdit('parent_phone', selectedStudent.parent_phone)" @keydown.enter="startEdit('parent_phone', selectedStudent.parent_phone)" @keydown.space.prevent="startEdit('parent_phone', selectedStudent.parent_phone)">{{ selectedStudent.parent_phone || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">就读学校</span>
                   <template v-if="editingField === 'school'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('school')" @blur="saveEdit('school')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('school', selectedStudent.school)" @keydown.enter="startEdit('school', selectedStudent.school)" @keydown.space.prevent="startEdit('school', selectedStudent.school)">{{ selectedStudent.school || '-' }}</span>
+                  <span v-else :class="['prop-value', canEditStudent ? 'prop-editable' : 'prop-static']" :role="canEditStudent ? 'button' : undefined" :tabindex="canEditStudent ? 0 : -1" @click="startEdit('school', selectedStudent.school)" @keydown.enter="startEdit('school', selectedStudent.school)" @keydown.space.prevent="startEdit('school', selectedStudent.school)">{{ selectedStudent.school || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">年级</span>
                   <template v-if="editingField === 'grade'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('grade')" @blur="saveEdit('grade')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('grade', selectedStudent.grade)" @keydown.enter="startEdit('grade', selectedStudent.grade)" @keydown.space.prevent="startEdit('grade', selectedStudent.grade)">{{ selectedStudent.grade || '-' }}</span>
+                  <span v-else :class="['prop-value', canEditStudent ? 'prop-editable' : 'prop-static']" :role="canEditStudent ? 'button' : undefined" :tabindex="canEditStudent ? 0 : -1" @click="startEdit('grade', selectedStudent.grade)" @keydown.enter="startEdit('grade', selectedStudent.grade)" @keydown.space.prevent="startEdit('grade', selectedStudent.grade)">{{ selectedStudent.grade || '-' }}</span>
                 </div>
                 <div class="prop-row">
                   <span class="prop-label">加入时间</span>
@@ -328,7 +330,7 @@
                   <template v-if="editingField === 'remark'">
                     <el-input v-model="editValue" size="small" class="prop-input" autofocus @keyup.enter="saveEdit('remark')" @blur="saveEdit('remark')" />
                   </template>
-                  <span v-else class="prop-value prop-editable" role="button" tabindex="0" @click="startEdit('remark', selectedStudent.remark)" @keydown.enter="startEdit('remark', selectedStudent.remark)" @keydown.space.prevent="startEdit('remark', selectedStudent.remark)">{{ selectedStudent.remark || '点击添加备注' }}</span>
+                  <span v-else :class="['prop-value', canEditStudent ? 'prop-editable' : 'prop-static']" :role="canEditStudent ? 'button' : undefined" :tabindex="canEditStudent ? 0 : -1" @click="startEdit('remark', selectedStudent.remark)" @keydown.enter="startEdit('remark', selectedStudent.remark)" @keydown.space.prevent="startEdit('remark', selectedStudent.remark)">{{ selectedStudent.remark || '点击添加备注' }}</span>
                 </div>
               </div>
             </div>
@@ -366,7 +368,7 @@
                       暂停原因：{{ card.pause_reason }}
                     </span>
                   </div>
-                  <div class="card-actions">
+                  <div class="card-actions" v-if="canManageCard">
                     <!-- 顺延卡：状态位显示「待生效」、日期行显示生效日，这里只给操作入口 -->
                     <el-button
                       v-if="isCardPending(card)"
@@ -438,7 +440,8 @@
 
           <!-- 互动时间线（借鉴 trycompai/crm 的 Activity feed） -->
           <el-tab-pane label="互动" name="activity">
-            <div class="detail-section">
+            <!-- 点评 GET/POST 均为管理员/教练（comments.js:31/70），销售不展示该区块 -->
+            <div class="detail-section" v-if="canWriteComment">
               <h4>训练点评</h4>
               <div v-if="detailComments.length" class="comment-list">
                 <div v-for="c in detailComments" :key="c.id" class="comment-item">
@@ -483,7 +486,7 @@
           </el-tab-pane>
         </el-tabs>
 
-        <div class="detail-footer">
+        <div class="detail-footer" v-if="canEditStudent">
           <el-button
             text
             type="primary"
@@ -679,9 +682,24 @@ import { exportXlsx } from '@/utils/xlsx'
 import { fetchAllPages } from '@/utils/fetchAll'
 import { relativeTime, formatDate as formatDateStd, formatMoney } from '@/utils/format'
 import { useSettingsStore } from '@/store/settings'
+import { usePerm } from '@/composables/usePerm'
 
 const settingsStore = useSettingsStore()
 const t = settingsStore.t
+// A1/A3 按真实权限调用跨角色接口；B1 操作入口显隐严格对齐后端写接口权限，
+// 避免「按钮可见、填完表单提交必 403」。后端口径逐条核对，未放宽任何后端权限：
+//   students.js:118  POST /        admin 或 sales（教练建档不在业务范围内）
+//   students.js:328  POST /import  仅 admin
+//   students.js:1045 PUT /:id      admin 或该成员绑定家长（员工端仅 admin）
+//   membership.js:73 canManageCard admin / coach
+//   comments.js:31/70 点评读写      admin / coach（isCoachReq）
+const { role: userRole, has: permHas } = usePerm()
+const isAdmin = computed(() => userRole.value === 'admin')
+const canCreateStudent = computed(() => isAdmin.value || permHas('sales'))
+const canImportStudent = computed(() => isAdmin.value)
+const canEditStudent = computed(() => isAdmin.value)
+const canManageCard = computed(() => userRole.value === 'admin' || userRole.value === 'coach')
+const canWriteComment = computed(() => userRole.value === 'admin' || userRole.value === 'coach')
 
 const route = useRoute()
 const router = useRouter()
@@ -726,6 +744,8 @@ const toggleSelectMode = () => {
 
 // 页面顶部数据概览（复用看板数据，已带缓存）
 const loadStats = async () => {
+  // A1：教练无 dashboard 权限，跳过请求以免 403 后静默兜底出全 0 概览
+  if (!permHas('dashboard')) return
   try {
     const res = await getDashboard()
     stats.value = {
@@ -1219,6 +1239,8 @@ const EDIT_FIELDS = {
 }
 
 const startEdit = (field, value) => {
+  // B1 兜底：入口即使被绕过，也不让无编辑权限的角色进入「保存必 403」的编辑态
+  if (!canEditStudent.value) return
   editingField.value = field
   editValue.value = value ?? ''
 }
@@ -1257,17 +1279,24 @@ const loadStudentDetail = async (id) => {
     }).catch(() => {
       detailTimeline.value = []
     })
-    getComments({ studentId: id }).then((r) => {
-      detailComments.value = r?.list || []
-    }).catch(() => {
+    // B2：GET /api/comments 仅管理员/教练，无权限角色跳过以免多一个 403 与误导性空态
+    if (canWriteComment.value) {
+      getComments({ studentId: id }).then((r) => {
+        detailComments.value = r?.list || []
+      }).catch(() => {
+        detailComments.value = []
+      })
+    } else {
       detailComments.value = []
-    })
+    }
   } catch (e) {
     // 错误已由拦截器提示
   }
 }
 
 const saveComment = async () => {
+  // 函数级兜底：与详情区守卫同源，避免绕过入口触发 403
+  if (!canWriteComment.value) return
   if (!commentDraft.value.trim()) {
     ElMessage.warning('请填写点评内容')
     return
@@ -1406,7 +1435,8 @@ const editingId = ref('')
 
 const addForm = reactive({
   name: '',
-  gender: '男',
+  // B6：不预选性别，避免批量建档时未留意就静默写入「男」
+  gender: '',
   birthday: '',
   school: '',
   grade: '',
@@ -1419,21 +1449,24 @@ const addForm = reactive({
   remark: ''
 })
 
-const addRules = {
+// B6：新建时性别必须显式选择；编辑历史资料允许保留空值——
+// 既不强写「男」，也不让性别缺失的历史档案卡在必填校验上无法保存
+const addRules = computed(() => ({
   name: [{ required: true, message: '请输入成员姓名', trigger: 'blur' }],
+  gender: editingId.value ? [] : [{ required: true, message: '请选择性别', trigger: 'change' }],
   phone: [
     { required: true, message: '请输入手机号', trigger: 'blur' },
     { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确', trigger: 'blur' }
   ],
   parentName: [{ required: true, message: `请输入${t('guardian')}姓名`, trigger: 'blur' }]
-}
+}))
 
 const openAddDialog = () => {
   editingId.value = ''
   showMoreFields.value = false
   Object.assign(addForm, {
     name: '',
-    gender: '男',
+    gender: '',
     birthday: '',
     school: '',
     grade: '',
@@ -1457,6 +1490,12 @@ const submitAdd = async () => {
 
   const valid = await addFormRef.value.validate().catch(() => false)
   if (!valid) return
+  // B1 兜底：编辑走 PUT /:id（仅 admin），新建走 POST /（admin/sales），权限不同。
+  // 模板入口已隐藏，此处再拦一层，避免绕过入口后填完表单才吃 403
+  if (editingId.value ? !canEditStudent.value : !canCreateStudent.value) {
+    ElMessage.warning('无操作权限')
+    return
+  }
 
   addSubmitting.value = true
   try {
@@ -1529,7 +1568,7 @@ const editStudent = (student) => {
   showMoreFields.value = false
   Object.assign(addForm, {
     name: student.name || '',
-    gender: student.gender === 'male' || student.gender === '男' ? '男' : student.gender === 'female' || student.gender === '女' ? '女' : '男',
+    gender: student.gender === 'male' || student.gender === '男' ? '男' : student.gender === 'female' || student.gender === '女' ? '女' : '',
     birthday: student.birthday || '',
     school: student.school || '',
     grade: student.grade || '',
@@ -1720,9 +1759,12 @@ onMounted(() => {
   })
   loadStats()
   loadColumnSettings()
-  getCardTypes().then((res) => {
-    cardTypeOptions.value = (res.list || []).filter((c) => c.is_active !== 0)
-  }).catch(() => {})
+  // A3：卡种含定价，仅管理员/销售可读；教练跳过以免触发 403
+  if (permHas('sales')) {
+    getCardTypes().then((res) => {
+      cardTypeOptions.value = (res.list || []).filter((c) => c.is_active !== 0)
+    }).catch(() => {})
+  }
 })
 </script>
 

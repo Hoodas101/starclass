@@ -460,22 +460,6 @@ router.post('/recursive', (req, res) => {
     if (!finalName) return res.json(fail('活动名称不能为空'));
     const effectiveCourseId = courseId || ensureTempCourse();
 
-    // 幂等闸门：同一「规则签名 + 日期区间」只允许存在一条规则。
-    // 此前本接口必然 500 而事务已提交，用户重试就再生成一整套排期（课表重复）。
-    // 修好 500 后仍需此闸门，抵御双击 / 网络重试 / 前端重发。
-    const dupRule = db.prepare(`
-      SELECT id FROM schedule_rules
-      WHERE course_id = ? AND COALESCE(teacher_id,'') = ? AND COALESCE(classroom_id,'') = ?
-        AND start_time = ? AND end_time = ? AND start_date = ? AND end_date = ?
-        AND COALESCE(repeat_type,'') = ? AND COALESCE(interval_days,0) = ?
-        AND COALESCE(group_course_id,'') = ? AND COALESCE(group_name,'') = ?
-      LIMIT 1
-    `).get(effectiveCourseId, teacherId || '', classroomId || '', startTime, endTime, startDate, endDate,
-      repeatType || '', intervalDays || 0, groupCourseId || '', groupName || '');
-    if (dupRule) {
-      return res.json(fail(`相同周期的排课规则已存在（${dupRule.id}），请勿重复创建；如需重建请先删除原规则`));
-    }
-
     const ruleId = generateId('rule_');
     const createdSchedules = [];
     // F3：冲突被跳过的日期必须留痕。声明必须在事务回调之外 —— 事务结束后成功响应要回传
@@ -486,6 +470,25 @@ router.post('/recursive', (req, res) => {
     //「规则已建、排期只建一半」的中间态，且无法从数据判断哪些已生成。
     // 冲突检测在事务内逐日重做，不依赖事务外预检。
     db.transaction(() => {
+      // D1 幂等闸门：同一「规则签名 + 日期区间」只允许存在一条规则，抵御双击 / 网络重试。
+      // 检查必须落在 immediate 事务内：多实例部署下两个进程可能同时通过事务外预检；
+      // immediate 一开始就持写锁，后到事务必然读到先插入的规则。重复时抛带
+      // rollbackReason 的错误，由外层 catch 转成与原先一致的 fail 响应并回滚。
+      const dupRule = db.prepare(`
+        SELECT id FROM schedule_rules
+        WHERE course_id = ? AND COALESCE(teacher_id,'') = ? AND COALESCE(classroom_id,'') = ?
+          AND start_time = ? AND end_time = ? AND start_date = ? AND end_date = ?
+          AND COALESCE(repeat_type,'') = ? AND COALESCE(interval_days,0) = ?
+          AND COALESCE(group_course_id,'') = ? AND COALESCE(group_name,'') = ?
+        LIMIT 1
+      `).get(effectiveCourseId, teacherId || '', classroomId || '', startTime, endTime, startDate, endDate,
+        repeatType || '', intervalDays || 0, groupCourseId || '', groupName || '');
+      if (dupRule) {
+        const err = new Error('duplicate schedule rule');
+        err.rollbackReason = `相同周期的排课规则已存在（${dupRule.id}），请勿重复创建；如需重建请先删除原规则`;
+        throw err;
+      }
+
       // 创建规则
       db.prepare(`
         INSERT INTO schedule_rules (id, course_id, teacher_id, classroom_id, week_day, start_time, end_time, start_date, end_date, max_students, repeat_type, interval_days, group_course_id, group_name, created_at)

@@ -84,8 +84,13 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  // CSP：本应用无内联脚本/外链脚本，self 足够；style 放开 unsafe-inline 是 Element Plus 运行时注入所需
-  res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data: https:; connect-src 'self'");
+  // CSP：
+  //  - style-src 放行 fonts.googleapis.com：src/styles/index.scss 以 @import 引入 Inter / Space
+  //    Grotesk，构建后并入 dist CSS；不放行会全站回退系统字体并持续产生 CSP 违规。
+  //  - script-src 放行 index.html 首屏内联主题引导脚本（暗色无闪烁）。哈希是该脚本**原文**
+  //    （含首尾空白）的 sha256 实测值；脚本内容一旦修改必须重算，否则暗色首帧白闪。
+  //    实测：仅 EFh1… 与浏览器执行口径匹配，勿再并列未经实测的哈希。
+  res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https:; script-src 'self' 'sha256-EFh1V6lnDX0WdcT7ooX5AbWpD7rPQpTouXIhdk85eFs='; connect-src 'self'");
   // HSTS 仅在明确走 HTTPS 的部署上开启，避免本地/内网 http 被浏览器强制升级
   if (process.env.ENABLE_HSTS === '1') {
     res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');

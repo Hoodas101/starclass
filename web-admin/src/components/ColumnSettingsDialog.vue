@@ -22,6 +22,8 @@
       <span class="cs-sub">拖拽或箭头调整顺序 · 点击眼睛显示/隐藏</span>
     </div>
 
+    <!-- B3：内容区独立滚动，标题与底部操作栏常驻。沿用原缩进以缩小 diff -->
+    <div class="cs-body">
     <div class="cs-layout">
       <!-- 显示字段 -->
       <div class="cs-pane">
@@ -127,6 +129,7 @@
         </div>
       </div>
     </div>
+    </div><!-- /cs-body -->
 
     <div class="cs-footer">
       <el-button text @click="resetDefaults">恢复默认</el-button>
@@ -283,13 +286,28 @@ defineExpose({
   border: 1px solid var(--t-line) !important;
   box-shadow: var(--t-elevation-float) !important;
   transform-origin: top right;
+  /* B3：浮层为 bottom-end 锚定，原始内容高 752px（bottom=1044 / 视口 900），
+     高度超过「按钮下方到视口底」时 floating-ui 的 flip 在上下都不够会放弃翻转，
+     保存/取消/恢复默认被推出视口。取 min(45vh,400px) 后 5 个共用页面操作栏恒可见。 */
+  max-height: min(45vh, 400px) !important;
+  display: flex;
+  flex-direction: column;
 }
 
 .cs-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: baseline;
   gap: 10px;
   margin-bottom: 12px;
+}
+
+/* B3：只有中间内容滚动，底部操作栏不被字段与列宽列表挤出视口 */
+.cs-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 .cs-title {
   font-size: var(--t-fs-base);
@@ -413,12 +431,15 @@ defineExpose({
 }
 
 .cs-footer {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-top: 14px;
   padding-top: 12px;
   border-top: 1px solid var(--t-line);
+  /* B3：滚动内容不从底部按钮背后透出 */
+  background: var(--t-bg-elev);
 }
 .cs-footer-right {
   display: flex;

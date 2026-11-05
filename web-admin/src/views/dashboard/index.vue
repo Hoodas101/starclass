@@ -372,10 +372,13 @@ import ListErrorState from '@/components/ListErrorState.vue'
 import { chartPalette } from '@/utils/theme-colors'
 import { useSettingsStore } from '@/store/settings'
 import { useUserStore } from '@/store/user'
+import { usePerm } from '@/composables/usePerm'
 
 const settingsStore = useSettingsStore()
 const t = settingsStore.t
 const userStore = useUserStore()
+// A2：按真实权限调用跨角色接口；销售无 checkin / leave 权限，跳过相关请求避免 403 与空白组件
+const { role: userRole, has: permHas } = usePerm()
 
 const router = useRouter()
 // 范围切换状态记忆（CRM OverviewScopeToggle 一致体验）。
@@ -500,7 +503,9 @@ const buildStats = (data) => {
     },
     {
       key: 'students',
-      label: '有效' + t('learner') + '数',
+      // C2：统计口径是「持有有效卡者」，不是「在册成员总数」；label 直述口径，
+      // 避免与在册总数并列时被误读为全部学员
+      label: '持有效卡' + t('learner') + '数',
       value: String(overview.validMembers ?? overview.totalStudents ?? 0),
       unit: '人',
       note: '持有有效' + t('membership'),
@@ -839,6 +844,11 @@ const statusMap = {
 const recentActivities = ref([])
 
 const loadRecentActivities = async () => {
+  // A2：近期签到动态仅管理员/教练（有 checkin 权限）可见；销售跳过以免 403 + 空白组件
+  if (!permHas('checkin')) {
+    recentActivities.value = []
+    return
+  }
   try {
     const res = await getCheckinRecords({ page: 1, pageSize: 6 })
     recentActivities.value = (res.list || []).map((r) => {
@@ -926,19 +936,24 @@ const loadPendingItems = async () => {
     }
   }
   // 待审批请假：对标班主任工作台的「关注雷达」——把需要老师当下处理的事
-  // 聚合到一屏，而不是让用户逐个模块翻找
-  try {
-    const lv = await getLeaves({ status: 'pending' })
-    items.push(...(lv?.list || []).map((r) => ({
-      id: 'leave-' + r.id,
-      kind: 'leave',
-      type: 'leave',
-      icon: Calendar,
-      title: '请假待审批',
-      desc: `${r.student_name || '成员'}：${r.course_name || ''} ${r.date || ''}`.trim()
-    })))
-  } catch (e) {
-    /* 忽略 */
+  // 聚合到一屏，而不是让用户逐个模块翻找。
+  // 后端 /api/leave/ 是「isCoachReq（角色 admin/coach）+ requireStaffPerm('leave')」双层守卫，
+  // 仅按 perm 判断会让被自定义授予 leave 的销售发起必 403 的请求，故两个条件都要满足。
+  const canApproveLeave = userRole.value === 'admin' || userRole.value === 'coach'
+  if (canApproveLeave && permHas('leave')) {
+    try {
+      const lv = await getLeaves({ status: 'pending' })
+      items.push(...(lv?.list || []).map((r) => ({
+        id: 'leave-' + r.id,
+        kind: 'leave',
+        type: 'leave',
+        icon: Calendar,
+        title: '请假待审批',
+        desc: `${r.student_name || '成员'}：${r.course_name || ''} ${r.date || ''}`.trim()
+      })))
+    } catch (e) {
+      /* 忽略 */
+    }
   }
   // 连续缺勤学员：数据来自 loadDashboard 的 alerts.attentionStudents
   // （后端聚合，默认口径：最近 30 天 ≥3 次考勤且全部缺席、请假不算、

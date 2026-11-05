@@ -83,8 +83,9 @@ try {
   const getUserInfo = async () => {
     try {
       const data = await request.get('/auth/getProfile')
-      // 合并而非覆盖：/auth/getProfile 不返回 permissions，
-      // 若整体替换会静默抹掉登录时下发的自定义权限（并写回 localStorage）。
+      // /auth/getProfile 会返回 role 与 resolvePerms(user) 计算的 permissions，是权威口径。
+      // 展示字段做合并；permissions 只要服务端给了数组（含显式空数组「无任何权限」）
+      // 就必须采信，若沿用 localStorage 旧值，被篡改的本地权限将不会收敛。
       const prev = userInfo.value || {}
       userInfo.value = {
         ...prev,
@@ -94,8 +95,8 @@ try {
         // 同 login()：角色缺省时留空，不回退 'admin'
         role: data.role || '',
         phone: data.phone || prev.phone || '',
-        // 新响应未携带 permissions 时沿用旧值
-        permissions: Array.isArray(data.permissions) && data.permissions.length
+        // 服务端显式 [] 表示「已配置且无任何权限」，必须采信；仅在未返回该字段时沿用旧值
+        permissions: Array.isArray(data.permissions)
           ? data.permissions
           : (prev.permissions || []),
       }
