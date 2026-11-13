@@ -225,29 +225,43 @@ app.use((req, res, next) => {
   return res.status(401).json({ code: 401, data: null, message: '未登录或登录已过期' });
 });
 
-// 登录接口限流：默认 100 次/15 分钟/IP（可用 LOGIN_RATE_LIMIT 环境变量调整）
+// 登录接口限流：默认 100 次失败/15 分钟/IP（可用 LOGIN_RATE_LIMIT 环境变量调整）
+// R5：覆盖账号口令登录与两条微信登录路径。此前只挂在 /auth/login 且仅按 HTTP 4xx 统计，
+// 而微信登录失败是「HTTP 200 + code != 0」的业务失败，完全不计入，换 IP 即可无限重试。
 const loginAttempts = new Map();
 const LOGIN_RATE_LIMIT = parseInt(process.env.LOGIN_RATE_LIMIT) || 100;
 const LOGIN_RATE_WINDOW = 15 * 60 * 1000;
-app.use('/api/auth/login', (req, res, next) => {
+const LOGIN_RATE_PATHS = ['/api/auth/login', '/api/auth/wx-login', '/api/auth/phone-login'];
+const loginThrottle = (req, res, next) => {
   const ip = req.ip || req.connection.remoteAddress;
   const now = Date.now();
-  const attempts = loginAttempts.get(ip) || [];
-  const recent = attempts.filter(t => now - t < LOGIN_RATE_WINDOW);
+  const recent = (loginAttempts.get(ip) || []).filter(t => now - t < LOGIN_RATE_WINDOW);
   if (recent.length >= LOGIN_RATE_LIMIT) {
     return res.status(429).json({ code: 429, data: null, message: '登录尝试过于频繁，请15分钟后再试' });
   }
-  // 只把**失败**计入：此前每次尝试都无条件计数，办公室/学校共享出口（NAT 同 IP）下
-  // 正常成功登录会相互累积，第 100 个从未输错的用户即被 429 封锁 15 分钟。
-  // 阈值与窗口不变 —— 纯失败 100 次仍会触发封锁，防暴破能力不降级。
-  res.on('finish', () => {
-    if (res.statusCode < 400) return;
-    const list = (loginAttempts.get(ip) || []).filter((t) => Date.now() - t < LOGIN_RATE_WINDOW);
-    list.push(now);
-    loginAttempts.set(ip, list);
-  });
+  // 只把**失败**计入：办公室/学校共享出口（NAT 同 IP）下正常成功登录不应相互累积，
+  // 第 100 个从未输错的用户也不该被 429 封锁 15 分钟。阈值与窗口不变，防暴破能力不降级。
+  // 失败判据同时覆盖 HTTP 4xx/5xx 与「HTTP 200 但业务码非 0」两种形态。
+  const origJson = res.json.bind(res);
+  res.json = (body) => {
+    // [必须修复] 只有 POST 登录请求才计入失败。
+    // app.use(前缀) 会让 GET /api/auth/login 的 404（body.code=404）等响应也走这里，
+    // 旧实现把「任意方法」+「任意非 0 code」都计数，攻击者用 100 次 GET 即可
+    // 让共享出口 IP 的全部用户被锁 15 分钟（DoS 放大）。
+    // 业务码失败只在 2xx 响应下判定，4xx/5xx 由 HTTP 状态单独覆盖，避免重复计数。
+    const isLoginPost = req.method === 'POST';
+    const businessFailed = res.statusCode < 400 && body && typeof body === 'object'
+      && body.code !== undefined && body.code !== 0;
+    if (isLoginPost && (res.statusCode >= 400 || businessFailed)) {
+      const list = (loginAttempts.get(ip) || []).filter((t) => Date.now() - t < LOGIN_RATE_WINDOW);
+      list.push(now);
+      loginAttempts.set(ip, list);
+    }
+    return origJson(body);
+  };
   next();
-});
+};
+app.use(LOGIN_RATE_PATHS, loginThrottle);
 
 // 静态文件（管理端构建产物）
 app.use(express.static(path.join(__dirname, '../web-admin/dist')));
@@ -339,7 +353,14 @@ const server = app.listen(PORT, () => {
   // 安全基线检查：关键安全配置仍为代码内默认值时给出明确告警（测试环境跳过）
   if (process.env.NODE_ENV !== 'test') {
     if (!process.env.STAFF_DEFAULT_PASSWORD) {
-      console.warn('[安全] 未设置 STAFF_DEFAULT_PASSWORD：员工初始/重置密码将使用默认 123456。生产环境请尽快在 .env 中设置强随机值（如 openssl rand -hex 16）。');
+      // 与 utils/security.js 的真实行为对齐：生产模式不回落硬编码口令，
+      // 而是生成一次性随机临时口令。旧文案恒定宣称「使用默认 123456」，
+      // 会让管理员按日志去试 123456 却始终登录失败。
+      if (process.env.NODE_ENV === 'production') {
+        console.warn('[安全] 未设置 STAFF_DEFAULT_PASSWORD：新建/重置员工密码将生成 10 位随机临时口令，仅当次响应弹窗展示一次。如需统一初始口令请显式设置 STAFF_DEFAULT_PASSWORD。');
+      } else {
+        console.warn('[安全] 未设置 STAFF_DEFAULT_PASSWORD：本地/测试环境的员工初始/重置密码仍为 123456。正式部署请设置强随机值（如 openssl rand -hex 16）。');
+      }
     }
     if (!process.env.JWT_SECRET) {
       console.warn('[安全] 未显式设置 JWT_SECRET：已使用自动生成的随机密钥（backend/db/.jwt-secret）。多实例部署请显式设置共享值，否则各实例 token 互不兼容。');

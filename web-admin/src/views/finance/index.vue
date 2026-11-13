@@ -16,7 +16,9 @@
           <el-radio-button value="custom">自定义</el-radio-button>
         </el-radio-group>
         <el-date-picker v-if="period === 'custom'" v-model="dateRange" type="daterange" range-separator="至" start-placeholder="开始" end-placeholder="结束" value-format="YYYY-MM-DD" style="width: 260px" @change="loadAll" />
-        <el-select v-if="activeMode === 'monthly'" v-model="reportYear" style="width: 100px" @change="loadMonthly">
+        <!-- 年份变化必须走 loadAll：直接绑 loadMonthly 会把年份数值当作 seq 形参，
+             导致 seq !== viewSeq 丢弃响应且 loadingMonthly 永不复位（加载卡死）。 -->
+        <el-select v-if="activeMode === 'monthly'" v-model="reportYear" style="width: 100px" @change="loadAll">
           <el-option v-for="y in yearOptions" :key="y" :label="y + '年'" :value="y" />
         </el-select>
       </div>
@@ -302,69 +304,82 @@ function onPeriodChange() {
   if (period.value !== 'custom') loadAll()
 }
 
-async function loadSummary() {
+// 视图请求序号：切换统计周期/年份会同时发起 4 个请求，慢网下旧响应可能后到，
+// 把上一周期的汇总与明细混在同一屏（「汇总本年、明细本月」），直接误导财务判断。
+// loadAll 共享同一个 seq，任一次重新加载都会让上一批全部失效。
+let viewSeq = 0
+
+async function loadSummary(seq = ++viewSeq) {
   loadingSummary.value = true
   try {
     const res = await getFinanceSummary(getDateRange())
+    if (seq !== viewSeq) return
     summary.value = res || {}
   } catch (e) {
     // 拦截器已提示业务/网络错误
   } finally {
-    loadingSummary.value = false
+    if (seq === viewSeq) loadingSummary.value = false
   }
 }
 
 const errorMonthly = ref('')
 
-async function loadMonthly() {
+async function loadMonthly(seq = ++viewSeq) {
   errorMonthly.value = ''
   loadingMonthly.value = true
   try {
     const res = await getFinanceMonthly({ year: reportYear.value })
+    if (seq !== viewSeq) return
     monthlyData.value = res.months || []
     monthlyTotals.value = res.totals || null
   } catch (e) {
+    if (seq !== viewSeq) return
     errorMonthly.value = e?.message || '数据加载失败，请稍后重试'
   } finally {
-    loadingMonthly.value = false
+    if (seq === viewSeq) loadingMonthly.value = false
   }
 }
 
 const errorProduct = ref('')
 
-async function loadProduct() {
+async function loadProduct(seq = ++viewSeq) {
   errorProduct.value = ''
   loadingProduct.value = true
   try {
     const res = await getFinanceByProduct(getDateRange())
+    if (seq !== viewSeq) return
     productList.value = res.list || []
   } catch (e) {
+    if (seq !== viewSeq) return
     errorProduct.value = e?.message || '数据加载失败，请稍后重试'
   } finally {
-    loadingProduct.value = false
+    if (seq === viewSeq) loadingProduct.value = false
   }
 }
 
 const errorSales = ref('')
 
-async function loadSales() {
+async function loadSales(seq = ++viewSeq) {
   errorSales.value = ''
   loadingSales.value = true
   try {
     const res = await getFinanceBySales(getDateRange())
+    if (seq !== viewSeq) return
     salesList.value = res.list || []
   } catch (e) {
+    if (seq !== viewSeq) return
     errorSales.value = e?.message || '数据加载失败，请稍后重试'
   } finally {
-    loadingSales.value = false
+    if (seq === viewSeq) loadingSales.value = false
   }
 }
 
 function loadAll() {
-  loadSummary()
-  loadMonthly()
-  loadProduct()
-  loadSales()
+  const seq = ++viewSeq
+  loadSummary(seq)
+  loadMonthly(seq)
+  loadProduct(seq)
+  loadSales(seq)
 }
 
 onMounted(() => {

@@ -206,34 +206,68 @@ router.put('/', (req, res) => {
       card_rules: '订阅卡规则',
     };
 
-    const actor = getActor(req);
-    for (const key of KEYS) {
-      if (body[key] !== undefined) {
-        let payload = body[key];
-        // card_rules 必须**按组浅合并**：设置页可能只提交「顺延」这一组，
-        // 直接整体覆盖会把「周期」「退费」冲成空对象 —— 这是设置页的历史通病。
-        if (key === 'card_rules') {
-          const prevRow = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
-          let prevCfg = {};
-          try { prevCfg = prevRow && prevRow.value ? JSON.parse(prevRow.value) : {}; } catch (e) { prevCfg = {}; }
-          payload = mergeGroup(prevCfg, payload);
+    // R5：PUT /settings 此前对 payload 零校验，任意类型与超大 JSON 都能落库；
+    // 规则一旦写成畸形值，积分发放/退费/推送等下游会静默走兜底或直接算错。
+    // 这里只做通用类型与积分规则数值范围校验，不改合法配置的存储形态。
+    const validatePayload = (key, payload) => {
+      const t = typeof payload;
+      if (payload === null || t === 'boolean' || t === 'function' || t === 'undefined') {
+        return `${labels[key] || key} 格式不正确`;
+      }
+      if (t === 'number' && !Number.isFinite(payload)) return `${labels[key] || key} 必须是有效数字`;
+      if (key === 'points_rules') {
+        if (!Array.isArray(payload)) return '积分规则必须是数组';
+        for (const r of payload) {
+          if (!r || typeof r !== 'object') return '积分规则条目格式不正确';
+          const p = Number(r.points);
+          if (!Number.isInteger(p) || p < 0 || p > 100000) return '积分规则的单次积分需为 0 ~ 100000 的整数';
         }
-        const value = typeof payload === 'string' ? payload : JSON.stringify(payload);
-        const prev = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
-        upsert.run(key, labels[key] || key, value, '', currentTime);
+      }
+      return null;
+    };
+    const SETTINGS_VALUE_MAX = 200000;
+
+    const actor = getActor(req);
+    // [必须修复] 先全量校验、再事务批量写。
+    // 旧实现逐键 upsert 且校验中途 return：合法键已落库却返回 fail（部分保存），
+    // 两个管理员并发 PUT 还会把不同键的值交错成谁都没提交过的混合配置。
+    const pending = [];
+    for (const key of KEYS) {
+      if (body[key] === undefined) continue;
+      let payload = body[key];
+      const payloadErr = validatePayload(key, payload);
+      if (payloadErr) return res.json(fail(payloadErr));
+      // card_rules 必须**按组浅合并**：设置页可能只提交「顺延」这一组，
+      // 直接整体覆盖会把「周期」「退费」冲成空对象 —— 这是设置页的历史通病。
+      if (key === 'card_rules') {
+        const prevRow = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+        let prevCfg = {};
+        try { prevCfg = prevRow && prevRow.value ? JSON.parse(prevRow.value) : {}; } catch (e) { prevCfg = {}; }
+        payload = mergeGroup(prevCfg, payload);
+      }
+      const value = typeof payload === 'string' ? payload : JSON.stringify(payload);
+      if (!value || value.length > SETTINGS_VALUE_MAX) {
+        return res.json(fail(`${labels[key] || key} 内容过大或为空，请精简后保存`));
+      }
+      pending.push({ key, label: labels[key] || key, value });
+    }
+    db.transaction(() => {
+      for (const item of pending) {
+        const prev = db.prepare('SELECT value FROM settings WHERE key = ?').get(item.key);
+        upsert.run(item.key, item.label, item.value, '', currentTime);
         // 系统设置变更（退费/积分/推送/称呼等规则）直接改变经营口径，属高危写操作。
-        // 此前 PUT /settings 全无留痕，改规则、改称呼方案事后无从追责，此处逐键记录前后值。
+        // 审计与写入同事务，避免出现「配置改了但没有留痕」的中间态。
         recordAudit(db, {
           entity: 'settings',
-          entityId: key,
+          entityId: item.key,
           action: 'update_setting',
           actorId: actor.id,
           actorRole: actor.role,
-          before: { [key]: prev ? prev.value : null },
-          after: { [key]: value },
+          before: { [item.key]: prev ? prev.value : null },
+          after: { [item.key]: item.value },
         });
       }
-    }
+    }).immediate();
     res.json(success({ saved: true }));
   } catch (err) {
     console.error('[settings save]', err && err.stack ? err.stack : err);
@@ -402,7 +436,9 @@ router.post('/db-restore', rawUpload, async (req, res) => {
       await db.backup(path.join(BACKUP_DIR, safetyName));
     } catch (e) {
       try { fs.unlinkSync(tmp); } catch (_) {} /* 清理临时文件，避免泄漏 */
-      return res.status(500).json(safeFail('恢复前自动备份失败：' + e.message));
+      // R5：e.message 可能携带数据库路径、磁盘或文件系统细节，不回显给客户端
+      console.error('[db-restore backup]', e && e.stack ? e.stack : e);
+      return res.status(500).json(safeFail('恢复前自动备份失败，请查看服务端日志'));
     }
     // 4) ATTACH 源库并复制数据（FK 关闭，事务包裹）
     const esc = tmp.replace(/'/g, "''");
@@ -503,7 +539,10 @@ router.post('/backups/create', async (req, res) => {
     if (result.success) {
       res.json(success(result));
     } else {
-      res.json(fail(result.error || '备份失败'));
+      // 底层 createBackup 的 error 可能含磁盘路径、SQLITE 错误码等环境细节；
+      // 只写服务端日志，对外统一固定文案（与 db-restore 同口径）。
+      console.error('[backup create]', result.error || 'unknown');
+      res.json(fail('备份失败，请查看服务端日志'));
     }
   } catch (err) {
     console.error('[backup create]', err && err.stack ? err.stack : err);

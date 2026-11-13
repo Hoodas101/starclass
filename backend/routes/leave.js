@@ -209,40 +209,58 @@ router.post('/apply', (req, res) => {
 
     // 每月请假次数上限（0 = 不限）
     const rules = getLeaveRules();
-    if (rules.monthlyLimit > 0) {
-      const monthPrefix = schedule.date ? schedule.date.slice(0, 7) : new Date().toISOString().slice(0, 7);
-      const count = db.prepare(`
-        SELECT COUNT(*) c FROM leave_requests
-        WHERE student_id = ? AND status IN ('pending','approved') AND date LIKE ?
-      `).get(bind.student_id, monthPrefix + '%').c;
-      if (count >= rules.monthlyLimit) {
-        return res.json(fail(`本月请假次数已达上限（${rules.monthlyLimit} 次）`));
-      }
-    }
-
-    // 同一成员同一排期已有请假/已签到则拒绝
-    const dup = db.prepare(`
-      SELECT 1 FROM leave_requests WHERE student_id = ? AND schedule_id = ? AND status != 'rejected'
-    `).get(bind.student_id, scheduleId);
-    if (dup) return res.json(fail('该活动已有请假申请，请勿重复提交'));
-
-    const attendance = db.prepare(`
-      SELECT status FROM attendances WHERE schedule_id = ? AND student_id = ?
-    `).get(scheduleId, bind.student_id);
-    // 已签到/迟到/已请假 不可再请假；已自动标记缺席的可补请假（审批后转为请假）
-    if (attendance && ['present', 'late', 'leave'].includes(attendance.status)) {
-      return res.json(fail('该活动已签到，无法请假'));
-    }
+    const monthPrefix = schedule.date ? schedule.date.slice(0, 7) : new Date().toISOString().slice(0, 7);
 
     const id = generateId('lv_');
     const currentTime = now();
-    db.prepare(`
-      INSERT INTO leave_requests (id, student_id, student_name, schedule_id, course_name, date, start_time,
-        reason, status, parent_openid, parent_phone, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-    `).run(id, bind.student_id, bind.student_name || schedule.course_name, scheduleId,
-      schedule.course_name, schedule.date, schedule.start_time,
-      reason.trim(), bind.parent_openid || openid, bind.parent_phone || '', currentTime, currentTime);
+    // R5：次数上限、同一排期查重、签到状态与插入必须落在同一 immediate 事务内。
+    // 此前查重与 INSERT 分离，并发双击 / 家长端重试会同时通过查重并插入两条 pending 请假，
+    // 审批时重复扣课，也会绕过每月次数上限。
+    // 不加唯一约束：历史库可能已存在重复行，直接建索引会让启动迁移失败，故用事务串行化。
+    const applyTx = db.transaction(() => {
+      const reject = (code, message) => {
+        const err = new Error(code);
+        err.code = code;
+        err.clientMessage = message;
+        throw err;
+      };
+      if (rules.monthlyLimit > 0) {
+        const count = db.prepare(`
+          SELECT COUNT(*) c FROM leave_requests
+          WHERE student_id = ? AND status IN ('pending','approved') AND date LIKE ?
+        `).get(bind.student_id, monthPrefix + '%').c;
+        if (count >= rules.monthlyLimit) {
+          reject('LEAVE_LIMIT', `本月请假次数已达上限（${rules.monthlyLimit} 次）`);
+        }
+      }
+      const dup = db.prepare(`
+        SELECT 1 FROM leave_requests WHERE student_id = ? AND schedule_id = ? AND status != 'rejected'
+      `).get(bind.student_id, scheduleId);
+      if (dup) reject('DUPLICATE_LEAVE', '该活动已有请假申请，请勿重复提交');
+
+      const attendance = db.prepare(`
+        SELECT status FROM attendances WHERE schedule_id = ? AND student_id = ?
+      `).get(scheduleId, bind.student_id);
+      // 已签到/迟到/已请假 不可再请假；已自动标记缺席的可补请假（审批后转为请假）
+      if (attendance && ['present', 'late', 'leave'].includes(attendance.status)) {
+        reject('ALREADY_CHECKED_IN', '该活动已签到，无法请假');
+      }
+
+      db.prepare(`
+        INSERT INTO leave_requests (id, student_id, student_name, schedule_id, course_name, date, start_time,
+          reason, status, parent_openid, parent_phone, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+      `).run(id, bind.student_id, bind.student_name || schedule.course_name, scheduleId,
+        schedule.course_name, schedule.date, schedule.start_time,
+        reason.trim(), bind.parent_openid || openid, bind.parent_phone || '', currentTime, currentTime);
+      return id;
+    });
+    try {
+      applyTx.immediate();
+    } catch (err) {
+      if (err && err.clientMessage) return res.json(fail(err.clientMessage));
+      throw err;
+    }
 
     // 员工代录请假属敏感操作（影响课时/退费口径），留痕以便追溯「谁代谁登记了请假」
     if (isStaffActor) {

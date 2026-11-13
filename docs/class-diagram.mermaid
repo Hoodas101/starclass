@@ -1,0 +1,185 @@
+classDiagram
+    %% ===== 角色 / 权限 =====
+    class Staff {
+      +string id
+      +string name
+      +enum role : admin|coach|sales
+      +string phone
+      +string specialty
+      +jsonb permissions
+    }
+    class Parent {
+      +string id
+      +string name
+      +string phone
+      +enum relation
+    }
+
+    %% ===== 学员 / 家庭 =====
+    class Student {
+      +string id
+      +string name
+      +enum gender
+      +date birthday
+      +string school
+      +string grade
+      +string hobby
+      +int height
+      +int weight
+      +float bmi
+      +enum status
+      +date join_date
+    }
+    class FamilyLink {
+      +string student_id
+      +string parent_id
+      +bool is_primary
+    }
+
+    %% ===== 活动类型 / 课程 =====
+    class Course {
+      +string id
+      +string name
+      +enum category : 体育
+      +string description
+      +int duration_min
+      +int consume_classes
+      +string color
+      +int min_age
+      +int max_age
+      +int max_students
+      +int price_per_class
+      +bool is_active
+    }
+    class ActivityTypePreset {
+      +string course_id
+      +string default_room_id
+      +jsonb default_schedule
+      +jsonb age_band
+    }
+
+    %% ===== 场地 =====
+    class Classroom {
+      +string id
+      +string name
+      +int capacity
+      +int area
+      +string equipment
+      +string location
+      +string color
+    }
+
+    %% ===== 排期 / 报名 / 签到 =====
+    class Schedule {
+      +string id
+      +string course_id
+      +string classroom_id
+      +date class_date
+      +time start_time
+      +time end_time
+      +enum recurrence
+      +int capacity
+      +int enrolled_count
+      +bool is_public
+    }
+    class Enrollment {
+      +string id
+      +string schedule_id
+      +string student_id
+      +enum status : enrolled|waitlist|cancelled
+      +bool paid
+    }
+    class Attendance {
+      +string id
+      +string schedule_id
+      +string student_id
+      +enum status : present|absent|late
+      +datetime checkin_at
+      +bool auto_absent
+    }
+
+    %% ===== 会员卡 =====
+    class MembershipCard {
+      +string id
+      +string name
+      +int total_classes
+      +int valid_days
+      +enum billing_mode
+      +int points_reward
+      +decimal price
+      +string course_scope
+      +bool transferable
+      +bool refundable
+      +bool is_active
+    }
+    class CardInstance {
+      +string id
+      +string card_id
+      +string student_id
+      +int remaining_classes
+      +date activated_at
+      +date expire_at
+      +enum status : active|paused|expired
+    }
+
+    %% ===== 订单 / 线索 =====
+    class Order {
+      +string id
+      +string student_id
+      +string card_id
+      +decimal amount
+      +enum channel : cash|wxpay|offline
+      +enum status
+      +string idempotency_key
+    }
+    class Lead {
+      +string id
+      +string name
+      +string phone
+      +enum stage : trial|converted|churned
+      +string owner_id
+    }
+
+    %% ===== 体测 / 薪资 =====
+    class PhysicalTest {
+      +string id
+      +string student_id
+      +date test_date
+      +jsonb metrics
+    }
+    class TestMetricPreset {
+      +string key
+      +string label
+      +string unit
+    }
+    class Payroll {
+      +string id
+      +string staff_id
+      +string period
+      +decimal base
+      +decimal bonus
+    }
+    class Setting {
+      +string key
+      +jsonb value
+    }
+
+    %% ===== 关系 =====
+    Staff "1" --> "0..*" Schedule : 任教
+    Course "1" --> "0..*" Schedule
+    Classroom "1" --> "0..*" Schedule
+    Schedule "1" --> "0..*" Enrollment
+    Schedule "1" --> "0..*" Attendance
+    Student "1" --> "0..*" Enrollment
+    Student "1" --> "0..*" Attendance
+    Student "1" --> "0..*" PhysicalTest
+    Parent "1" --> "0..*" FamilyLink
+    Student "1" --> "0..*" FamilyLink
+    Student "1" --> "0..*" CardInstance
+    MembershipCard "1" --> "0..*" CardInstance
+    Student "1" --> "0..*" Order
+    MembershipCard "1" --> "0..*" Order
+    Course "1" --> "0..1" ActivityTypePreset
+    PhysicalTest "0..*" --> "1" TestMetricPreset
+    Staff "1" --> "0..*" Lead : 跟进
+    Setting ".." Student : 字段/阈值配置

@@ -102,7 +102,14 @@ const zipStore = (files) => {
 }
 
 // ---------- XLSX 内容 ----------
+// XML 1.0 只允许 #x9 / #xA / #xD 及 #x20 以上的字符。学员姓名、备注、课程名等
+// 自由文本可能带控制字符（从 Excel 粘贴、从旧系统同步最常见）；若原样写入
+// sheet*.xml，生成的是**非法 XML**，Excel / WPS 打开会直接报「文件已损坏」，
+// 而且整份导出不可用。先在转义前剔除非法码位，保留制表/换行/回车。
+const XML_ILLEGAL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g
+
 const esc = (v) => String(v ?? '')
+  .replace(XML_ILLEGAL, '')
   .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
   .replace(/>/g, '&gt;')
@@ -130,26 +137,35 @@ const displayLen = (v) => {
 }
 
 const buildSheetXml = (headers, rows) => {
-  const headerRow = headers.map((h, i) =>
-    `<c r="${colName(i)}1" t="inlineStr" s="1"><is><t>${esc(h)}</t></is></c>`
+  // 表头/数据行必须在这里一次性规范化：分页拼接、字段映射或后端稀疏数组都可能
+  // 产生 null / undefined 行或非数组行。此前 bodyRows 用 (row || []) 做了保护，
+  // 但下方列宽估算直接写 row[i]，遇到空行即抛 TypeError，整份导出中断且无提示。
+  const head = Array.isArray(headers) ? headers : []
+  const normRows = (Array.isArray(rows) ? rows : []).map((r) => Array.isArray(r) ? r : [])
+
+  const headerRow = head.map((h, i) =>
+    `<c r="${colName(i)}1" t="inlineStr" s="1"><is><t xml:space="preserve">${esc(h)}</t></is></c>`
   ).join('')
 
-  const bodyRows = rows.map((row, rIdx) => {
+  const bodyRows = normRows.map((row, rIdx) => {
     const rowNum = rIdx + 2
-    const cells = (row || []).map((cell, cIdx) => {
+    const cells = row.map((cell, cIdx) => {
       const ref = `${colName(cIdx)}${rowNum}`
       if (typeof cell === 'number' && Number.isFinite(cell)) {
-        return `<c r="${ref}"><v>${cell}</v></c>`
+        // -0 在 OOXML 数值单元格里会写成 "-0"，Excel 显示为 -0；统一归零。
+        return `<c r="${ref}"><v>${cell === 0 ? 0 : cell}</v></c>`
       }
-      return `<c r="${ref}" t="inlineStr"><is><t>${esc(cell)}</t></is></c>`
+      // xml:space="preserve"：不加时 Excel 会裁掉单元格文本首尾空格，
+      // 导出再导入会静默改掉原始备注/姓名。
+      return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${esc(cell)}</t></is></c>`
     }).join('')
     return `<row r="${rowNum}">${cells}</row>`
   }).join('')
 
   // 列宽：根据表头与数据内容估算
-  const widths = headers.map((h, i) => {
+  const widths = head.map((h, i) => {
     let max = displayLen(h)
-    for (const row of rows) {
+    for (const row of normRows) {
       const len = displayLen(row[i])
       if (len > max) max = len
     }
@@ -236,18 +252,52 @@ const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
  * @param {Array<Array<string|number>>} rows 数据行
  * @param {{ sheetName?: string }} [opts]
  */
-const sanitizeSheetName = (name) => (name || 'Sheet1').slice(0, 31).replace(/[\\/?*[\]:]/g, ' ')
+const sanitizeSheetName = (name) => {
+  // Excel 禁止 : \ / ? * [ ]，且工作表名不能以单引号开头或结尾；超过 31 字符会被拒绝。
+  // 名称可能来自数据（如按教练分表），需同时清掉控制字符，否则 workbook.xml 非法。
+  const s = String(name || 'Sheet1')
+    .replace(XML_ILLEGAL, '')
+    .slice(0, 31)
+    .replace(/[\\/?*[\]:]/g, ' ')
+    .replace(/^'+|'+$/g, '')
+    .trim()
+  return s || 'Sheet1'
+}
 
-const normalizeSheets = (headers, rows, opts) => {
+const normalizeSheets = (headers, rows, opts = {}) => {
   // 多表模式：sheets = [{ name, headers, rows }]
-  if (Array.isArray(headers) && headers.length && typeof headers[0] === 'object' && 'headers' in headers[0] && 'rows' in headers[0]) {
-    return headers.map((s, i) => ({
-      name: sanitizeSheetName(s.name || s.sheetName || `Sheet${i + 1}`),
-      headers: s.headers || [],
-      rows: s.rows || []
-    }))
+  // typeof null === 'object'，原判定直接对 headers[0] 用 `in` 会在首元素为 null 时抛 TypeError。
+  // 只看首元素会在多表数组以 null 开头时误判为单表：整份 sheets 被当成表头，
+  // 静默生成一张错表而不是抛错。改为「任一元素是 sheet 描述对象」即进入多表模式。
+  const isSheetDesc = (x) => !!x && typeof x === 'object' && !Array.isArray(x)
+    && ('headers' in x || 'rows' in x)
+  const isMulti = Array.isArray(headers) && headers.some(isSheetDesc)
+  if (isMulti) {
+    const used = new Set()
+    return headers.map((s, i) => {
+      const sh = (s && typeof s === 'object' && !Array.isArray(s)) ? s : {}
+      let name = sanitizeSheetName(sh.name || sh.sheetName || `Sheet${i + 1}`)
+      // Excel 保留名（History，大小写不敏感）与多表重名都会让 workbook 被判为损坏。
+      if (/^history$/i.test(name)) name = `${name}_${i + 1}`.slice(0, 31)
+      let unique = name
+      let n = 2
+      while (used.has(unique.toLowerCase())) {
+        const suffix = `_${n++}`
+        unique = `${name.slice(0, 31 - suffix.length)}${suffix}`
+      }
+      used.add(unique.toLowerCase())
+      return {
+        name: unique,
+        headers: Array.isArray(sh.headers) ? sh.headers : [],
+        rows: Array.isArray(sh.rows) ? sh.rows : []
+      }
+    })
   }
-  return [{ name: sanitizeSheetName(opts.sheetName), headers: headers || [], rows: rows || [] }]
+  return [{
+    name: sanitizeSheetName(opts.sheetName),
+    headers: Array.isArray(headers) ? headers : [],
+    rows: Array.isArray(rows) ? rows : []
+  }]
 }
 
 export const buildXlsxBytes = (headers = [], rows = [], opts = {}) => {
@@ -273,7 +323,13 @@ export const buildXlsxBytes = (headers = [], rows = [], opts = {}) => {
  * @param {{ sheetName?: string }} [opts]
  */
 export const exportXlsx = (filename, headers = [], rows = [], opts = {}) => {
-  const safeFilename = (filename || '导出数据').replace(/[\\/:*?"<>|]/g, '_')
+  // 文件名可能由数据拼接（如「积分明细_${成员姓名}」）：除 Windows 非法字符外，
+  // 还要清掉换行/制表与控制字符，并限长，避免下载名被截断或含不可见字符。
+  const safeFilename = (String(filename || '导出数据')
+    .replace(XML_ILLEGAL, '')
+    .replace(/[\\/:*?"<>|\r\n\t]/g, '_')
+    .trim()
+    .slice(0, 120)) || '导出数据'
   const blob = new Blob([buildXlsxBytes(headers, rows, opts)], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   })

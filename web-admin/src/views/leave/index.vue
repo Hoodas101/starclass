@@ -237,23 +237,29 @@ const onSizeChange = () => {
   loadList()
 }
 
+// 请求序号：筛选/翻页快速连点时，丢弃迟到的旧响应，避免旧列表覆盖新结果
+let loadSeq = 0
+
 const loadList = async () => {
   error.value = ''
   loading.value = true
+  const seq = ++loadSeq
   try {
     const res = await getLeaves({
       status: filterStatus.value || undefined,
       page: currentPage.value,
       pageSize: pageSize.value
     })
+    if (seq !== loadSeq) return
     list.value = res.list || []
     total.value = res.total || 0
   } catch (e) {
+    if (seq !== loadSeq) return
     error.value = e?.message || '数据加载失败，请稍后重试'
     list.value = []
     total.value = 0
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 

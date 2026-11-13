@@ -53,9 +53,16 @@ onMounted(() => {
     activeTab.value = visibleTabs.value[0].key
   }
 })
+// R5：运行时 URL 被改成不可见页签时，onMounted 的 B5 回退不会触发，
+// 会出现「地址显示 A、内容是 B」。此处与初始化保持同一判据并同步 URL。
 watch(route, (r) => {
   const tab = r.query.tab
-  if (tab && visibleTabs.value.some((t) => t.key === tab)) activeTab.value = tab
+  if (!tab) return
+  if (visibleTabs.value.some((t) => t.key === tab)) { activeTab.value = tab; return }
+  if (visibleTabs.value.length) {
+    activeTab.value = visibleTabs.value[0].key
+    router.replace({ query: { ...r.query, tab: activeTab.value } })
+  }
 })
 </script>
 

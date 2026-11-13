@@ -109,7 +109,19 @@ EOF
   MINGW*|MSYS*|CYGWIN*)
     FILE="${DESKTOP}/${APP_NAME}.url"
     printf '[InternetShortcut]\r\nURL=%s\r\n' "$URL" > "$FILE"
-    echo "✅ 桌面入口已创建：${FILE}（Windows 请先运行 deploy.sh 启动服务）"
+    # 纯 .url 只是一条链接，服务退出后双击只会得到连接拒绝。
+    # 另生成一个 ASCII 名的启动器：先 ensure 拉起后端，再打开浏览器。
+    # 脚本内容与路径全部为 ASCII，避免中文路径在非 UTF-8 代码页下被写坏。
+    BASH_WIN="$(cygpath -w "$(command -v bash)" 2>/dev/null || printf 'bash.exe')"
+    LAUNCHER="${DESKTOP}/StarClass-Launcher.cmd"
+    cat > "$LAUNCHER" <<EOF
+@echo off
+rem StarClass launcher - ensure backend is up, then open the console.
+"${BASH_WIN}" -lc "cd '${PROJ_DIR}' && bash tools/service.sh ensure"
+start "" "${URL}"
+EOF
+    echo "桌面入口已创建：${FILE}"
+    echo "自启启动器已创建：${LAUNCHER}（服务未运行时双击此项）"
     ;;
 
   *)

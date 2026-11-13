@@ -104,16 +104,38 @@ router.get('/summary', (req, res) => {
         AND ${REFUND_TS_SQL} >= ? AND ${REFUND_TS_SQL} <= ?
     `).get(start, end);
 
-    // 按订单类型分组
-    const byType = db.prepare(`
-      SELECT order_type,
-             COUNT(*) as count,
-             COALESCE(SUM(payable_amount), 0) as revenue,
-             COALESCE(SUM(refunded_amount), 0) as refunded
-      FROM orders
-      WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0 AND paid_at >= ? AND paid_at <= ?
+    // 按订单类型分组 —— 与上方 revenue.net 必须同为「两段式」：
+    // 收入按 paid_at 归属、退款按 REFUND_TS_SQL 归属，各自分组后再按类型合并。
+    // 旧实现一条 SQL 里同时 SUM(payable_amount) 与 SUM(refunded_amount) 且只按 paid_at
+    // 过滤，跨期退款被回溯挂在支付日：实测同区间 byType 的 Σrefunded 与
+    // revenue.refunded 差 600 元、Σnet 与 revenue.net 差 600 元，三张报表对不平。
+    const TYPE_BASE = "status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0";
+    const typeInc = db.prepare(`
+      SELECT order_type, COUNT(*) as count, COALESCE(SUM(payable_amount), 0) as revenue
+      FROM orders WHERE ${TYPE_BASE} AND paid_at >= ? AND paid_at <= ?
       GROUP BY order_type
     `).all(start, end);
+    const typeRef = db.prepare(`
+      SELECT order_type, COALESCE(SUM(refunded_amount), 0) as refunded
+      FROM orders WHERE ${TYPE_BASE} AND COALESCE(refunded_amount, 0) > 0
+        AND ${REFUND_TS_SQL} >= ? AND ${REFUND_TS_SQL} <= ?
+      GROUP BY order_type
+    `).all(start, end);
+    const refByType = new Map(typeRef.map((r) => [r.order_type || 'other', r.refunded]));
+    // 退款可能只落在某个类型上（该类型本期无新成交），需并入结果，否则净退款类型整行消失。
+    const typeKeys = new Set([
+      ...typeInc.map((r) => r.order_type || 'other'),
+      ...typeRef.map((r) => r.order_type || 'other'),
+    ]);
+    const byType = [...typeKeys].map((t) => {
+      const inc = typeInc.find((r) => (r.order_type || 'other') === t);
+      return {
+        order_type: t,
+        count: inc ? inc.count : 0,
+        revenue: inc ? inc.revenue : 0,
+        refunded: refByType.get(t) || 0,
+      };
+    });
 
     // 教师课时费支出：仅统计已结算记录，按「薪资所属月份」归属（与 monthly 口径一致），
     // 避免次月结算上月工资时落在查询区间之外。
@@ -163,7 +185,7 @@ router.get('/summary', (req, res) => {
       ).get().v || 0;
       // 与 revenue.gross 同一行集合（含已全额退款订单，其退款在同口径内冲减），保证两者可比
       const collectedAllTime = db.prepare(`
-        SELECT COALESCE(SUM(payable_amount - refunded_amount), 0) AS v
+        SELECT COALESCE(SUM(COALESCE(payable_amount, 0) - COALESCE(refunded_amount, 0)), 0) AS v
         FROM orders
         WHERE status IN ('paid', 'refunded') AND order_type != 'refund' AND revenue_excluded = 0
       `).get().v || 0;

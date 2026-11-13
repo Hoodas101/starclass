@@ -44,7 +44,7 @@ SQLite → 启动服务。勾选 **Automatic HTTPS** 并填真实域名时，管
 | API | `http://<host>/api`（健康检查 `/api/health`） |
 | 数据库 | SQLite 在 Docker 命名卷中（跨重新部署保留） |
 | 上传附件 | Docker 命名卷 `uploads` |
-| 备份 | `docker compose exec app ls /app/backend/backups`（非卷，重建镜像前先导走） |
+| 备份 | `docker compose exec app ls /data/backups`（在 data 卷内，随卷保留；建议配置 `BACKUP_OFFSITE_DIR` 做异地副本） |
 
 容器内强制 `NODE_ENV=production` + 随机 `JWT_SECRET`；数据库、上传、
 备份永远不离开你的服务器，除非你自己导出。

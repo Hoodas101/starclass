@@ -1,0 +1,40 @@
+sequenceDiagram
+    autonumber
+    participant Admin as 管理员(Web)
+    participant FE as 前端 api/modules
+    participant BE as 后端 Express
+    participant DB as SQLite
+    participant Job as 定时任务(每日23:30)
+    participant Parent as 家长(小程序/Web)
+
+    Note over Admin,Job: ① 排课（公开报名）
+    Admin->>FE: addSchedule({course_id, classroom_id, is_public:true, recurrence})
+    FE->>BE: POST /api/schedules
+    BE->>DB: INSERT schedules + 冲突检测(checkScheduleConflict)
+    BE-->>FE: {code:0, data:schedule}
+
+    Note over Parent,FE: ② 公开报名
+    Parent->>FE: enroll(scheduleId)
+    FE->>BE: POST /api/schedules/:id/enroll
+    BE->>DB: INSERT enrollments(status=enrolled) + enrolled_count++
+    BE-->>FE: {code:0, data:enrollment}
+
+    Note over Admin,Job: ③ 签到 + 23:30 自动缺席
+    Admin->>FE: checkinTeacher(scheduleId, studentId)
+    FE->>BE: POST /api/attendances/checkin
+    BE->>DB: UPSERT attendances(status=present, unique[schedule,student])
+    BE-->>FE: {code:0}
+    Job->>BE: runAutoAbsentDaily()
+    BE->>DB: UPDATE attendances SET status=absent WHERE ended AND unsigned(幂等)
+    BE-->>Job: done
+
+    Note over Parent,BE: ④ 会员卡激活
+    Parent->>FE: payOrder({student_id, card_id}) / 后台发卡
+    FE->>BE: POST /api/orders
+    BE->>DB: INSERT orders(幂等key) + INSERT card_instances(activated_at, remaining=total)
+    BE-->>FE: {code:0, data:cardInstance}
+
+    Note over BE,Parent: ⑤ 续费提醒
+    BE->>BE: scheduleReminder('renewal_reminder') 每日扫 card_instances 临近到期
+    BE->>DB: SELECT 临期且未提醒卡
+    BE-->>Parent: 推送续费提醒(站内 / 订阅消息)

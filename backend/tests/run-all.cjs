@@ -83,6 +83,8 @@ const SUITES = [
   ['leave-deduct-double-charge-regression.cjs', '手工扣课不得重复扣（两套账本交叉校验）'],
   ['batch7-security-guards.test.cjs', 'S3-S11 安全守卫（导入黑名单/课表可见性/广播已读/口令/jwt算法/绑卡频控）'],
   ['settings-columns-persistence.test.cjs', '设置列配置持久化（growth/trial/finance 入库 + 键级不互抹 + 白名单）'],
+  ['round5-hardening-regression.cjs', '第五轮加固（卡种数值/发卡幂等/积分幂等/设置校验/登录限流）'],
+  ['round6-fixes-regression.cjs', '第六轮加固（积分幂等绑定/设置原子性/0元单/空桶排名/负债COALESCE/限流方法）'],
   ['full-system.test.js', '全功能系统'],
 ];
 

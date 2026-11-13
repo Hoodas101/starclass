@@ -123,7 +123,10 @@ function resetJobs() { db.prepare('DELETE FROM jobs').run(); }
   const d = new Date(Date.now() + 3600000);
   const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const timeStr = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  db.prepare("INSERT INTO students (id, name, status, join_date, created_at, updated_at) VALUES (?,?,?,?,?,?)").run('stu_q', 'Q', 'active', Date.now(), Date.now(), Date.now());
+  // join_date 是 TEXT 列且全站按 'YYYY-MM-DD' 比较筛选，夹具也必须写日期串：
+  // 此前直接绑 Date.now() 会落成 '1794509019310.0'（REAL），既与生产写入路径不一致，
+  // 也会让 data-consistency-check 的 join_date 巡检误报存量脏数据。
+  db.prepare("INSERT INTO students (id, name, status, join_date, created_at, updated_at) VALUES (?,?,?,?,?,?)").run('stu_q', 'Q', 'active', dateStr, Date.now(), Date.now());
   db.prepare("INSERT INTO parent_bindings (student_id, parent_openid, is_main) VALUES (?,?,?)").run('stu_q', 'openid_q', 1);
   db.prepare("INSERT INTO schedules (id, course_id, course_name, status, date, start_time, end_time, classroom_name, teacher_name) VALUES (?,?,?,?,?,?,?,?,?)").run('sch_q', 'course_q', '篮球', 'scheduled', dateStr, timeStr, timeStr, '馆', '王');
   db.prepare("INSERT INTO enrollments (id, schedule_id, student_id, course_id, status) VALUES (?,?,?,?,?)").run('enr_q', 'sch_q', 'stu_q', 'course_q', 'active');

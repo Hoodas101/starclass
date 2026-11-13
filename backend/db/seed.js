@@ -21,6 +21,15 @@
  */
 const db = require('./index');
 
+// students.join_date 是 TEXT 日期串（'YYYY-MM-DD'），全站按字符串比较做区间筛选。
+// 此前写 String(Date.now()) 会落成 13 位毫秒串：字典序恒小于 '2...'，
+// 「入会日期 >= 起始日」永远筛不到、「<= 结束日」全部命中，且不报任何错。
+const formatDateSeed = (ms) => {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+
 function generateId(prefix = '') {
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).slice(2, 8);
@@ -144,8 +153,8 @@ function seed() {
     INSERT INTO students (id, name, gender, birthday, school, grade, hobby, remark, height, weight, bmi, status, join_date, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
   `);
-  // join_date 为 TEXT 列：绑字符串（绑数字会落成 '...0'，前端解析失败显示 `-`）
-  students.forEach(s => insertStudent.run(s.id, s.name, s.gender, s.birthday, s.school, s.grade, s.hobby, s.remark, s.height || 0, s.weight || 0, s.bmi || 0, String(NOW), NOW, NOW));
+  // join_date 为 TEXT 列：必须绑 'YYYY-MM-DD'，不能绑毫秒数字串（见文件头 formatDateSeed 注释）
+  students.forEach(s => insertStudent.run(s.id, s.name, s.gender, s.birthday, s.school, s.grade, s.hobby, s.remark, s.height || 0, s.weight || 0, s.bmi || 0, formatDateSeed(NOW), NOW, NOW));
 
   // ========= 3. 家长-成员绑定表 =========
   console.log('[Seed] 创建家长绑定...');
@@ -270,22 +279,148 @@ function seed() {
   `);
   cardTypes.forEach(ct => insertCardType.run(ct.id, ct.name, ct.total_classes, ct.valid_days, ct.billing_mode, ct.points_reward || 0, ct.price, ct.course_scope, ct.transferable, ct.refundable, NOW));
 
-  // ========= 8. 会员卡实例表 =========
-  console.log('[Seed] 创建会员卡实例...');
-  const memberCards = [
-    { id: 'mc_001', card_type_id: 'ct_002', card_type_name: '时效季卡', billing_mode: 'time', student_id: 'stu_001', student_name: '张小明', total_classes: 0, remaining_classes: 0, used_classes: 0, activated_at: NOW - 30 * 86400000, expires_at: NOW + 60 * 86400000, status: 'active' },
-    { id: 'mc_002', card_type_id: 'ct_001', card_type_name: '时效月卡', billing_mode: 'time', student_id: 'stu_002', student_name: '李小红', total_classes: 0, remaining_classes: 0, used_classes: 0, activated_at: NOW - 15 * 86400000, expires_at: NOW + 15 * 86400000, status: 'active' },
-    { id: 'mc_003', card_type_id: 'ct_002', card_type_name: '时效季卡', billing_mode: 'time', student_id: 'stu_003', student_name: '王刚', total_classes: 0, remaining_classes: 0, used_classes: 0, activated_at: NOW - 20 * 86400000, expires_at: NOW + 70 * 86400000, status: 'active' },
-    { id: 'mc_004', card_type_id: 'ct_001', card_type_name: '时效月卡', billing_mode: 'time', student_id: 'stu_004', student_name: '赵丽丽', total_classes: 0, remaining_classes: 0, used_classes: 0, activated_at: NOW - 5 * 86400000, expires_at: NOW + 25 * 86400000, status: 'active' },
-    { id: 'mc_005', card_type_id: 'ct_003', card_type_name: '时效年卡', billing_mode: 'time', student_id: 'stu_005', student_name: '刘华', total_classes: 0, remaining_classes: 0, used_classes: 0, activated_at: NOW - 60 * 86400000, expires_at: NOW + 305 * 86400000, status: 'active' },
-    { id: 'mc_006', card_type_id: 'ct_004', card_type_name: '1v1私教次卡', billing_mode: 'count', student_id: 'stu_006', student_name: '陈美丽', total_classes: 10, remaining_classes: 7, used_classes: 3, activated_at: NOW - 20 * 86400000, expires_at: NOW + 70 * 86400000, status: 'active' },
+  // ========= 8. 订单（先构造，供会员卡派生）+ 会员卡实例表 =========
+  // 会员卡不再手写：手写卡与订单各自独立，会造出「卡型/激活时间与订单对不上」且
+  // order_id 为 NULL 的卡。后果是链式的 ——
+  //   · 退款无法按订单回收卡内权益（订单侧根本找不到对应的卡）；
+  //   · deriveUnitPrice 只认 member_cards.order_id，收入结转推导不出单价，只能记 0；
+  //   · data-consistency-check 的「订单-会员卡关联」必然报高。
+  // 因此改为「一单一卡」：先构造订单数组（INSERT 仍在第 13 节），再由订单逐单派生卡。
+  // 覆盖近 90 天，让看板的「今日 / 本周 / 本月 / 本年收入」、环比与签单排名都有真实数字。
+  const CARD_INFO = {
+    ct_001: { name: '时效月卡', price: 699 },
+    ct_002: { name: '时效季卡', price: 1299 },
+    ct_003: { name: '时效年卡', price: 2999 },
+    ct_004: { name: '1v1私教次卡', price: 1500 },
+  };
+  const SALES_TEAM = ['王教练', '李教练', '张教练', '销售示例'];
+
+  // 学员序号（0-based）→ 家长 openid：stu_001~008 ↔ wx_parent_001~008，stu_009~024 ↔ wx_parent_013~028
+  const parentOpenidOf = (idx) => {
+    const n = idx + 1;
+    return n <= 8 ? `wx_parent_${String(n).padStart(3, '0')}` : `wx_parent_${String(n + 4).padStart(3, '0')}`;
+  };
+
+  // [天数前, 学员序号, 卡型, 已退款金额] —— 固定序列，保证每次 seed 结果一致
+  const ORDER_PLAN = [
+    // 今日
+    [0, 2, 'ct_001', 0], [0, 10, 'ct_002', 0], [0, 18, 'ct_001', 0],
+    // 本周（1~6 天前）
+    [1, 0, 'ct_001', 0], [1, 8, 'ct_002', 0], [2, 4, 'ct_004', 0], [2, 13, 'ct_001', 0],
+    [3, 6, 'ct_002', 0], [4, 16, 'ct_001', 0], [5, 20, 'ct_002', 0],
+    // stu_004 的月卡（对应固定卡号 mc_004，激活于 5 天前）
+    [5, 3, 'ct_001', 0],
+    // 本月（7~29 天前）
+    [8, 11, 'ct_003', 0], [10, 1, 'ct_001', 0], [12, 15, 'ct_002', 0], [14, 5, 'ct_001', 0],
+    [16, 19, 'ct_004', 0], [18, 3, 'ct_002', 0], [21, 14, 'ct_001', 0], [24, 9, 'ct_003', 0],
+    [27, 22, 'ct_002', 0], [29, 7, 'ct_001', 0],
+    // stu_006 的 1v1 次卡（对应固定卡号 mc_006，激活于 20 天前）
+    [20, 5, 'ct_004', 0],
+    // 上月（30~59 天前）
+    [32, 17, 'ct_001', 0], [36, 12, 'ct_002', 0], [40, 0, 'ct_002', 0], [45, 21, 'ct_001', 0],
+    [49, 4, 'ct_003', 0], [52, 18, 'ct_004', 0], [56, 10, 'ct_001', 0], [59, 2, 'ct_002', 0],
+    // 前两个月（60~89 天前）
+    [63, 6, 'ct_001', 0], [68, 13, 'ct_002', 0], [73, 23, 'ct_003', 0], [78, 20, 'ct_001', 0],
+    [84, 8, 'ct_002', 0], [89, 16, 'ct_001', 0],
+    // 退款单：演示「本月净收入 = 收入 − 退款」口径
+    [11, 5, 'ct_001', 400], [22, 19, 'ct_002', 600],
   ];
 
+  const orders = [
+    // 保留原有 3 条（id / 学员 / 金额不变，补签单人以让排名有数据）
+    { id: 'order_001', order_no: `ORD${Date.now()}`, user_id: 'wx_parent_001', student_id: 'stu_001', student_name: '张小明', order_type: 'membership', items: JSON.stringify([{ itemType: 'membershipCard', itemId: 'ct_002', itemName: '季卡', quantity: 1, unitPrice: 1299, totalPrice: 1299 }]), total_amount: 1299, discount_amount: 0, payable_amount: 1299, status: 'paid', salesperson: '王教练', refunded_amount: 0, last_refunded_at: null, paid_at: NOW - 30 * 86400000 },
+    { id: 'order_002', order_no: `ORD${Date.now() + 1}`, user_id: 'wx_parent_002', student_id: 'stu_002', student_name: '李小红', order_type: 'membership', items: JSON.stringify([{ itemType: 'membershipCard', itemId: 'ct_001', itemName: '月卡', quantity: 1, unitPrice: 699, totalPrice: 699 }]), total_amount: 699, discount_amount: 0, payable_amount: 699, status: 'paid', salesperson: '李教练', refunded_amount: 0, last_refunded_at: null, paid_at: NOW - 15 * 86400000 },
+    { id: 'order_003', order_no: `ORD${Date.now() + 2}`, user_id: 'wx_parent_005', student_id: 'stu_005', student_name: '刘华', order_type: 'membership', items: JSON.stringify([{ itemType: 'membershipCard', itemId: 'ct_003', itemName: '年卡', quantity: 1, unitPrice: 2999, totalPrice: 2999 }]), total_amount: 2999, discount_amount: 0, payable_amount: 2999, status: 'paid', salesperson: '张教练', refunded_amount: 0, last_refunded_at: null, paid_at: NOW - 60 * 86400000 },
+  ];
+
+  ORDER_PLAN.forEach(([daysAgo, si, ctId, refunded], i) => {
+    const info = CARD_INFO[ctId];
+    const stu = students[si];
+    const paidAt = NOW - daysAgo * 86400000;
+    orders.push({
+      id: `order_${String(i + 4).padStart(3, '0')}`,
+      order_no: `ORD${formatDate(paidAt).replace(/-/g, '')}${String(1000 + i)}`,
+      user_id: parentOpenidOf(si),
+      student_id: stu.id,
+      student_name: stu.name,
+      order_type: 'membership',
+      items: JSON.stringify([{ itemType: 'membershipCard', itemId: ctId, itemName: info.name, quantity: 1, unitPrice: info.price, totalPrice: info.price }]),
+      total_amount: info.price,
+      discount_amount: 0,
+      payable_amount: info.price,
+      // 只有「退满」才是终态 refunded。此前按 refunded>0 置终态，
+      // 400/699、600/1299 两笔部分退款被写死成 refunded，剩余额度再也退不掉。
+      status: refunded >= info.price - 0.005 ? 'refunded' : 'paid',
+      salesperson: SALES_TEAM[i % SALES_TEAM.length],
+      refunded_amount: refunded,
+      last_refunded_at: refunded > 0 ? paidAt + 5 * 86400000 : null,
+      paid_at: paidAt,
+    });
+  });
+
+  console.log('[Seed] 创建会员卡实例（按订单派生）...');
+  // 历史卡号固定位：测试与演示截图依赖 mc_006 = stu_006 的 1v1 次卡，其余卡号保持稳定。
+  const LEGACY_CARD_SLOTS = [
+    { id: 'mc_001', student_id: 'stu_001', card_type_id: 'ct_002' },
+    { id: 'mc_002', student_id: 'stu_002', card_type_id: 'ct_001' },
+    { id: 'mc_003', student_id: 'stu_003', card_type_id: 'ct_002' },
+    { id: 'mc_004', student_id: 'stu_004', card_type_id: 'ct_001' },
+    { id: 'mc_005', student_id: 'stu_005', card_type_id: 'ct_003' },
+    { id: 'mc_006', student_id: 'stu_006', card_type_id: 'ct_004' },
+  ];
+  // 有效期与计次属性取自卡型定义（与 membership_cards 表一致，避免两处各写一份）
+  const CARD_META = {
+    ct_001: { days: 30, count: false },
+    ct_002: { days: 90, count: false },
+    ct_003: { days: 365, count: false },
+    ct_004: { days: 90, count: true, classes: 10 },
+  };
+  const orderItemOf = (o) => {
+    try {
+      const arr = JSON.parse(o.items);
+      return Array.isArray(arr) && arr[0] ? arr[0] : {};
+    } catch (e) { return {}; }
+  };
+
+  const cardIdByOrder = new Map();
+  LEGACY_CARD_SLOTS.forEach((slot) => {
+    const hit = orders.find((o) => o.student_id === slot.student_id
+      && String(orderItemOf(o).itemId) === slot.card_type_id
+      && !cardIdByOrder.has(o.id));
+    if (hit) cardIdByOrder.set(hit.id, slot.id);
+  });
+  let cardSeq = LEGACY_CARD_SLOTS.length;
+  const memberCards = orders.map((o) => {
+    const item = orderItemOf(o);
+    const ctId = String(item.itemId || 'ct_001');
+    const meta = CARD_META[ctId] || CARD_META.ct_001;
+    const id = cardIdByOrder.get(o.id) || `mc_${String(++cardSeq).padStart(3, '0')}`;
+    const expiresAt = o.paid_at + meta.days * 86400000;
+    const fullyRefunded = Number(o.refunded_amount) >= Number(o.payable_amount) - 0.005;
+    return {
+      id,
+      order_id: o.id,
+      card_type_id: ctId,
+      card_type_name: CARD_INFO[ctId] ? CARD_INFO[ctId].name : (item.itemName || ''),
+      billing_mode: meta.count ? 'count' : 'time',
+      student_id: o.student_id,
+      student_name: o.student_name,
+      total_classes: meta.count ? meta.classes : 0,
+      // 计次卡的实际用量由签到记录回算（见第 11 节末），此处先置满额
+      remaining_classes: meta.count ? meta.classes : 0,
+      used_classes: 0,
+      activated_at: o.paid_at,
+      expires_at: expiresAt,
+      // 退满置 refunded；已过有效期置 expired —— 89 天前买的月卡本就不该还是 active
+      status: fullyRefunded ? 'refunded' : (expiresAt < NOW ? 'expired' : 'active'),
+    };
+  });
+
   const insertMemberCard = db.prepare(`
-    INSERT INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name, total_classes, remaining_classes, used_classes, activated_at, expires_at, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name, total_classes, remaining_classes, used_classes, activated_at, expires_at, status, order_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  memberCards.forEach(mc => insertMemberCard.run(mc.id, mc.card_type_id, mc.card_type_name, mc.billing_mode, mc.student_id, mc.student_name, mc.total_classes, mc.remaining_classes, mc.used_classes, mc.activated_at, mc.expires_at, mc.status, NOW, NOW));
+  memberCards.forEach(mc => insertMemberCard.run(mc.id, mc.card_type_id, mc.card_type_name, mc.billing_mode, mc.student_id, mc.student_name, mc.total_classes, mc.remaining_classes, mc.used_classes, mc.activated_at, mc.expires_at, mc.status, mc.order_id, NOW, NOW));
 
   // ========= 9. 排期（历史 27 天 + 未来 7 天）==========
   // 历史排期用于支撑看板的「到班趋势」「教练课时」与「报名分布」。
@@ -376,7 +511,16 @@ function seed() {
 
   // 成员 / 会员卡索引：报名与签到都要用，提前建好
   const studentById = new Map(students.map((s) => [s.id, s]));
-  const cardOfStudent = new Map(memberCards.map((mc) => [mc.student_id, mc.id]));
+  // 学员 → 班组课扣课用的卡：取「最新一张仍有效的非一对一卡」。
+  // 一对一次卡（ct_004，course_scope='一对一'）不能拿去扣集体课，否则演示数据里
+  // 会出现「1v1 私教卡被班组课扣光」这种一眼假的数据；多张卡时优先未过期的那张。
+  const GROUP_CARD_TYPES = new Set(['ct_001', 'ct_002', 'ct_003']);
+  const cardOfStudent = new Map();
+  memberCards
+    .filter((mc) => GROUP_CARD_TYPES.has(mc.card_type_id))
+    .sort((a, b) => (a.status === 'active' ? 1 : 0) - (b.status === 'active' ? 1 : 0)
+      || a.activated_at - b.activated_at)
+    .forEach((mc) => cardOfStudent.set(mc.student_id, mc.id));
 
   // 确定性哈希（FNV-1a 32bit）—— 替代 Math.random，保证每次 seed 结果逐字一致，
   // 截图与回归测试不抖动。此处必须用雪崩性好的哈希，不能用 h = h*31 + c：
@@ -489,6 +633,22 @@ function seed() {
       });
     });
 
+  // 计次卡用量由签到回算：卡上的 used_classes / remaining_classes 必须与考勤扣课一致，
+  // 否则演示库里「卡显示还剩 7 次、考勤却已扣 12 次」，退卡结算直接算错。
+  const usedByCard = new Map();
+  attendances.forEach((a) => {
+    if (a.consume_classes > 0 && a.member_card_id) {
+      usedByCard.set(a.member_card_id, (usedByCard.get(a.member_card_id) || 0) + a.consume_classes);
+    }
+  });
+  const updateCardUsage = db.prepare('UPDATE member_cards SET used_classes = ?, remaining_classes = ?, updated_at = ? WHERE id = ?');
+  memberCards.filter((mc) => mc.billing_mode === 'count').forEach((mc) => {
+    const used = usedByCard.get(mc.id) || 0;
+    mc.used_classes = used;
+    mc.remaining_classes = Math.max(0, mc.total_classes - used);
+    updateCardUsage.run(mc.used_classes, mc.remaining_classes, NOW, mc.id);
+  });
+
   const insertAttendance = db.prepare(`
     INSERT INTO attendances (id, schedule_id, student_id, student_name, course_id, course_name,
       status, checkin_method, checkin_time, checkin_by, consume_classes, member_card_id, points_earned, date, created_at, updated_at)
@@ -528,6 +688,12 @@ function seed() {
     { id: 'plog_008', student_id: 'stu_005', type: 'consume', amount: 50, balance: 150, reason: '兑换', reference_id: '', description: '兑换篮球护具' },
     { id: 'plog_009', student_id: 'stu_007', type: 'earn', amount: 90, balance: 90, reason: '充值', reference_id: '', description: '购买季卡获得积分' },
     { id: 'plog_010', student_id: 'stu_007', type: 'consume', amount: 10, balance: 80, reason: '兑换', reference_id: '', description: '兑换贴纸' },
+    // 补齐账户与流水的对应关系：此前 stu_002/004/006/008 只有账户余额、没有 earn 流水，
+    // 合计 250 分「凭空出现」。退款回收赠送积分要靠流水定位，缺流水就回收落空。
+    { id: 'plog_011', student_id: 'stu_002', type: 'earn', amount: 80, balance: 80, reason: '充值', reference_id: '', description: '购买月卡获得积分' },
+    { id: 'plog_012', student_id: 'stu_004', type: 'earn', amount: 60, balance: 60, reason: '充值', reference_id: '', description: '购买月卡获得积分' },
+    { id: 'plog_013', student_id: 'stu_006', type: 'earn', amount: 40, balance: 40, reason: '充值', reference_id: '', description: '购买私教次卡获得积分' },
+    { id: 'plog_014', student_id: 'stu_008', type: 'earn', amount: 70, balance: 70, reason: '充值', reference_id: '', description: '购买季卡获得积分' },
   ];
 
   const insertPointLog = db.prepare(`
@@ -540,76 +706,8 @@ function seed() {
     pl.type === 'earn' ? NOW + POINT_EXPIRY_MS : null
   ));
 
-  // ========= 13. 订单 + 支付 =========
-  // 覆盖近 90 天，让看板的「今日 / 本周 / 本月 / 本年收入」、环比与签单排名都有真实数字。
-  // 此前只有 3 单、且都在 30/15/60 天前 —— 新用户部署后看到「今日收入 0 元」，
-  // 会误以为系统是空的，这是演示数据最主要的劝退点。
+  // ========= 13. 订单 + 支付（数据已在第 8 节构造，此处落库）==========
   console.log('[Seed] 创建订单和支付...');
-
-  const CARD_INFO = {
-    ct_001: { name: '时效月卡', price: 699 },
-    ct_002: { name: '时效季卡', price: 1299 },
-    ct_003: { name: '时效年卡', price: 2999 },
-    ct_004: { name: '1v1私教次卡', price: 1500 },
-  };
-  const SALES_TEAM = ['王教练', '李教练', '张教练', '销售示例'];
-
-  // 学员序号（0-based）→ 家长 openid：stu_001~008 ↔ wx_parent_001~008，stu_009~024 ↔ wx_parent_013~028
-  const parentOpenidOf = (idx) => {
-    const n = idx + 1;
-    return n <= 8 ? `wx_parent_${String(n).padStart(3, '0')}` : `wx_parent_${String(n + 4).padStart(3, '0')}`;
-  };
-
-  // [天数前, 学员序号, 卡型, 已退款金额] —— 固定序列，保证每次 seed 结果一致
-  const ORDER_PLAN = [
-    // 今日
-    [0, 2, 'ct_001', 0], [0, 10, 'ct_002', 0], [0, 18, 'ct_001', 0],
-    // 本周（1~6 天前）
-    [1, 0, 'ct_001', 0], [1, 8, 'ct_002', 0], [2, 4, 'ct_004', 0], [2, 13, 'ct_001', 0],
-    [3, 6, 'ct_002', 0], [4, 16, 'ct_001', 0], [5, 20, 'ct_002', 0],
-    // 本月（7~29 天前）
-    [8, 11, 'ct_003', 0], [10, 1, 'ct_001', 0], [12, 15, 'ct_002', 0], [14, 5, 'ct_001', 0],
-    [16, 19, 'ct_004', 0], [18, 3, 'ct_002', 0], [21, 14, 'ct_001', 0], [24, 9, 'ct_003', 0],
-    [27, 22, 'ct_002', 0], [29, 7, 'ct_001', 0],
-    // 上月（30~59 天前）
-    [32, 17, 'ct_001', 0], [36, 12, 'ct_002', 0], [40, 0, 'ct_002', 0], [45, 21, 'ct_001', 0],
-    [49, 4, 'ct_003', 0], [52, 18, 'ct_004', 0], [56, 10, 'ct_001', 0], [59, 2, 'ct_002', 0],
-    // 前两个月（60~89 天前）
-    [63, 6, 'ct_001', 0], [68, 13, 'ct_002', 0], [73, 23, 'ct_003', 0], [78, 20, 'ct_001', 0],
-    [84, 8, 'ct_002', 0], [89, 16, 'ct_001', 0],
-    // 退款单：演示「本月净收入 = 收入 − 退款」口径
-    [11, 5, 'ct_001', 400], [22, 19, 'ct_002', 600],
-  ];
-
-  const orders = [
-    // 保留原有 3 条（id / 学员 / 金额不变，补签单人以让排名有数据）
-    { id: 'order_001', order_no: `ORD${Date.now()}`, user_id: 'wx_parent_001', student_id: 'stu_001', student_name: '张小明', order_type: 'membership', items: JSON.stringify([{ itemType: 'membershipCard', itemId: 'ct_002', itemName: '季卡', quantity: 1, unitPrice: 1299, totalPrice: 1299 }]), total_amount: 1299, discount_amount: 0, payable_amount: 1299, status: 'paid', salesperson: '王教练', refunded_amount: 0, last_refunded_at: null, paid_at: NOW - 30 * 86400000 },
-    { id: 'order_002', order_no: `ORD${Date.now() + 1}`, user_id: 'wx_parent_002', student_id: 'stu_002', student_name: '李小红', order_type: 'membership', items: JSON.stringify([{ itemType: 'membershipCard', itemId: 'ct_001', itemName: '月卡', quantity: 1, unitPrice: 699, totalPrice: 699 }]), total_amount: 699, discount_amount: 0, payable_amount: 699, status: 'paid', salesperson: '李教练', refunded_amount: 0, last_refunded_at: null, paid_at: NOW - 15 * 86400000 },
-    { id: 'order_003', order_no: `ORD${Date.now() + 2}`, user_id: 'wx_parent_005', student_id: 'stu_005', student_name: '刘华', order_type: 'membership', items: JSON.stringify([{ itemType: 'membershipCard', itemId: 'ct_003', itemName: '年卡', quantity: 1, unitPrice: 2999, totalPrice: 2999 }]), total_amount: 2999, discount_amount: 0, payable_amount: 2999, status: 'paid', salesperson: '张教练', refunded_amount: 0, last_refunded_at: null, paid_at: NOW - 60 * 86400000 },
-  ];
-
-  ORDER_PLAN.forEach(([daysAgo, si, ctId, refunded], i) => {
-    const info = CARD_INFO[ctId];
-    const stu = students[si];
-    const paidAt = NOW - daysAgo * 86400000;
-    orders.push({
-      id: `order_${String(i + 4).padStart(3, '0')}`,
-      order_no: `ORD${formatDate(paidAt).replace(/-/g, '')}${String(1000 + i)}`,
-      user_id: parentOpenidOf(si),
-      student_id: stu.id,
-      student_name: stu.name,
-      order_type: 'membership',
-      items: JSON.stringify([{ itemType: 'membershipCard', itemId: ctId, itemName: info.name, quantity: 1, unitPrice: info.price, totalPrice: info.price }]),
-      total_amount: info.price,
-      discount_amount: 0,
-      payable_amount: info.price,
-      status: refunded > 0 ? 'refunded' : 'paid',
-      salesperson: SALES_TEAM[i % SALES_TEAM.length],
-      refunded_amount: refunded,
-      last_refunded_at: refunded > 0 ? paidAt + 5 * 86400000 : null,
-      paid_at: paidAt,
-    });
-  });
 
   const insertOrder = db.prepare(`
     INSERT INTO orders (id, order_no, user_id, student_id, student_name, order_type, items, total_amount, discount_amount, payable_amount, status, salesperson, refunded_amount, last_refunded_at, paid_at, created_at, updated_at)
@@ -636,6 +734,21 @@ function seed() {
     INSERT INTO payments (id, order_id, order_no, user_id, amount, channel, transaction_id, status, paid_at, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+  // 退款流水：退款是资金流出，业务路径（orders.js）每笔退款都写一条 status='refunded' 的 REF 流水。
+  // seed 直接落库绕过了它，导致「订单显示已退 400 元、支付流水里查不到这笔钱」。
+  orders.filter((o) => Number(o.refunded_amount) > 0).forEach((o, i) => {
+    payments.push({
+      id: `REF${String(i + 1).padStart(6, '0')}`,
+      order_id: o.id,
+      order_no: o.order_no,
+      user_id: o.user_id,
+      amount: Number(o.refunded_amount),
+      channel: 'wechat',
+      transaction_id: `RF${Date.now() + i}`,
+      status: 'refunded',
+      paid_at: o.last_refunded_at || o.paid_at,
+    });
+  });
   payments.forEach(p => insertPayment.run(p.id, p.order_id, p.order_no, p.user_id, p.amount, p.channel, p.transaction_id, p.status, p.paid_at, NOW));
 
   // ========= 14. 消息通知 =========
@@ -675,21 +788,69 @@ function seed() {
   `);
   settings.forEach(s => insertSetting.run(s.key, s.label, s.value, s.description, NOW));
 
-  // ========= 16. 扣课记录 =========
-  console.log('[Seed] 创建扣课记录...');
-  const deductionLogs = [
-    { schedule_id: schedules[0]?.id || 'sch_default_1', student_id: 'stu_001', card_id: 'mc_001', deducted_at: NOW - 7 * 86400000 },
-    { schedule_id: schedules[1]?.id || 'sch_default_2', student_id: 'stu_002', card_id: 'mc_002', deducted_at: NOW - 5 * 86400000 },
-    { schedule_id: schedules[2]?.id || 'sch_default_3', student_id: 'stu_003', card_id: 'mc_003', deducted_at: NOW - 3 * 86400000 },
-    { schedule_id: schedules[3]?.id || 'sch_default_4', student_id: 'stu_001', card_id: 'mc_001', deducted_at: NOW - 2 * 86400000 },
-    { schedule_id: schedules[4]?.id || 'sch_default_5', student_id: 'stu_005', card_id: 'mc_005', deducted_at: NOW - 1 * 86400000 },
-  ];
+  // ========= 16. 扣课记录 + 收入结转 =========
+  // 扣课台账必须与考勤同源：此前只硬写 5 行，而考勤已消课 198 次，
+  // 巡检直接判「课时扣了、台账没记」。这里按签到记录逐条回放扣课，
+  // 并由卡的关联订单推导单价、写一条收入结转（与 checkin.js 同口径）。
+  console.log('[Seed] 创建扣课记录与收入结转...');
+  const deductionLogs = attendances
+    .filter((a) => a.consume_classes > 0 && a.member_card_id)
+    .map((a) => ({
+      schedule_id: a.schedule_id,
+      student_id: a.student_id,
+      card_id: a.member_card_id,
+      count: a.consume_classes,
+      deducted_at: a.checkin_time,
+    }));
 
   const insertDeduction = db.prepare(`
-    INSERT INTO deduction_logs (schedule_id, student_id, card_id, deducted_at)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO deduction_logs (schedule_id, student_id, card_id, count, deducted_at)
+    VALUES (?, ?, ?, ?, ?)
   `);
-  deductionLogs.forEach(d => insertDeduction.run(d.schedule_id, d.student_id, d.card_id, d.deducted_at));
+  deductionLogs.forEach(d => insertDeduction.run(d.schedule_id, d.student_id, d.card_id, d.count, d.deducted_at));
+
+  // 收入结转：只对「计次卡消课」写结转（时效卡走按天摊销，见 utils/revenue.js）。
+  // 单价推导复用业务同一实现 deriveOrderLine —— 种子若自己再写一份公式，口径必然漂移。
+  const { deriveOrderLine, recognizeTimeCardRevenue } = require('../utils/revenue');
+  const cardById = new Map(memberCards.map((mc) => [mc.id, mc]));
+  const scheduleById = new Map(schedules.map((s) => [s.id, s]));
+  const attIdOf = new Map(attendances.map((a) => [`${a.schedule_id}|${a.student_id}`, a.id]));
+  const insertRecognition = db.prepare(`
+    INSERT INTO revenue_recognitions (id, order_id, student_id, schedule_id, attendance_id,
+      course_id, course_name, classes, amount, recognized_at, basis, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  let rrSeq = 0;
+  deductionLogs.forEach((d) => {
+    const card = cardById.get(d.card_id);
+    if (!card || card.billing_mode !== 'count') return;
+    const derived = deriveOrderLine(card);
+    if (!derived || !derived.totalClasses) return;
+    const unit = Math.round(derived.lineTotal / derived.totalClasses);
+    const amount = Math.round((derived.lineTotal / derived.totalClasses) * d.count);
+    const sch = scheduleById.get(d.schedule_id);
+    insertRecognition.run(
+      `rr_${String(++rrSeq).padStart(4, '0')}`,
+      derived.orderId,
+      d.student_id,
+      d.schedule_id,
+      attIdOf.get(`${d.schedule_id}|${d.student_id}`) || null,
+      sch ? sch.course_id : null,
+      sch ? sch.course_name : null,
+      d.count,
+      amount,
+      d.deducted_at,
+      `unit=${unit}元/课时(行小计${derived.lineTotal}/总课时${derived.totalClasses}); order=${derived.orderId}; classes=${d.count}`,
+      d.deducted_at
+    );
+  });
+
+  // 时效卡按天摊销：直接复用日任务 recognizeTimeCardRevenue（幂等，只写增量行）。
+  // 分多个结算点各跑一次，是为了让结转流水按月分布 —— 若只在「今天」跑一次，
+  // 全部历史摊销都会落在本月，财务页的「本月确认收入」会异常高于本月收款。
+  [60, 30, 7, 0].forEach((daysAgo) => {
+    recognizeTimeCardRevenue(NOW - daysAgo * 86400000);
+  });
 
   // ========= 17. 请假申请 =========
   // 挂到未来课次上，三种审批状态齐备 —— 让「请假审批」页与看板「待处理事项 · 请假待审批」

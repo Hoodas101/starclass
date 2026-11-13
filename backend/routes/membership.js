@@ -36,6 +36,34 @@ function normalizeScopeCourseIds(v) {
   return [...new Set(arr.map((s) => String(s).trim()).filter(Boolean))].join(',');
 }
 
+/**
+ * 卡类型数值字段校验：创建与更新共用同一判据，避免两条写入链路各自漂移。
+ * 未传（undefined/null/空串）一律跳过 —— 更新的部分语义由 COALESCE 沿用库中原值。
+ * 返回 null 表示通过，返回字符串为可直接回给前端的错误提示。
+ */
+const CARD_NUM_RULES = {
+  price: { label: '价格', min: 0, max: 1e8, integer: false },
+  pointsReward: { label: '赠送积分', min: 0, max: 100000, integer: true },
+  totalClasses: { label: '总次数', min: 1, max: 10000, integer: true },
+  validDays: { label: '有效天数', min: 1, max: 3650, integer: true },
+  visitLimitPerWeek: { label: '每周到店上限', min: 0, max: 999, integer: true },
+  visitLimitPerMonth: { label: '每月到店上限', min: 0, max: 999, integer: true },
+};
+function validateCardNumbers(body, fields) {
+  for (const k of fields) {
+    const rule = CARD_NUM_RULES[k];
+    if (!rule) continue;
+    const raw = body[k];
+    if (raw === undefined || raw === null || raw === '') continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < rule.min || n > rule.max) {
+      return `${rule.label}需为 ${rule.min} ~ ${rule.max} 之间的数字`;
+    }
+    if (rule.integer && !Number.isInteger(n)) return `${rule.label}必须是整数`;
+  }
+  return null;
+}
+
 // schema 列（paused_at/billing_mode/points_reward/product_type 等）已收编至 migrations/011；
 // 此处仅保留数据回填。
 // 按卡类型名称回填默认赠送积分（体验10 / 月20 / 季50 / 年120）
@@ -195,20 +223,15 @@ router.post('/card-type', (req, res) => {
     if (!isAdminReq(req)) return res.status(403).json(safeFail('仅管理员可管理产品'));
     const { name, totalClasses, validDays, billingMode = 'time', price, pointsReward = 0, courseScope, scopeCourseIds, transferable, refundable, productType = 'membership', unit = '', description = '', visitLimitPerWeek, visitLimitPerMonth, deferEnabled, periodAnchor, refundFormula } = req.body;
     if (!name) return res.json(fail('名称为必填'));
-    // P1-10：价格必须是 ≥0 的有限数。此前 `price:-1` / `price:"免费"` 都能创建成功，
-    // 负价卡种下单会算出负总额（被折扣校验误报成「折扣金额不能超过订单总额」），
-    // 非数字则让后续所有金额聚合变 NaN。
-    if (price !== undefined && price !== null && price !== '') {
-      const p = Number(price);
-      if (!Number.isFinite(p) || p < 0 || p > 1e8) return res.json(fail('价格需为 0 ~ 1 亿之间的数字'));
-    }
-    // 赠送积分同样只接受非负整数，小数会让「流水合计 = 余额」恒等式破裂
-    if (pointsReward !== undefined && pointsReward !== null && pointsReward !== '') {
-      const pr = Number(pointsReward);
-      if (!Number.isInteger(pr) || pr < 0 || pr > 100000) return res.json(fail('赠送积分需为 0 ~ 100000 的整数'));
-    }
     const type = productType === 'goods' ? 'goods' : 'membership';
-    // 到店限次（0/NULL = 不限次）；负数与非法值一律归 0
+    const mode = billingMode === 'count' ? 'count' : 'time';
+    // R5：数值字段与更新接口共用 validateCardNumbers 判据。此前创建侧对
+    // 总次数/有效天数只判 > 0，1.5 次课时、999999 天有效期、负到店限次都能落库。
+    const numFields = ['price', 'pointsReward', 'visitLimitPerWeek', 'visitLimitPerMonth'];
+    if (type !== 'goods') numFields.push(mode === 'count' ? 'totalClasses' : 'validDays');
+    const numErr = validateCardNumbers(req.body, numFields);
+    if (numErr) return res.json(fail(numErr));
+    // 到店限次（0/NULL = 不限次）；已过范围与整数校验，此处仅归一化
     const vw = Math.max(0, Number(visitLimitPerWeek) || 0);
     const vm = Math.max(0, Number(visitLimitPerMonth) || 0);
 
@@ -231,12 +254,9 @@ router.post('/card-type', (req, res) => {
       return res.json(success({ id, productType: 'goods' }));
     }
 
-    const mode = billingMode === 'count' ? 'count' : 'time';
-    if (mode === 'count') {
-      if (!totalClasses || totalClasses <= 0) return res.json(fail('次数制卡必须设置总次数'));
-    } else {
-      if (!validDays || validDays <= 0) return res.json(fail('时效制卡必须设置有效天数'));
-    }
+    // 必填项：公共校验只管「显式传入必须合法」，未传由这里按计费模式拦截
+    if (mode === 'count' && !totalClasses) return res.json(fail('次数制卡必须设置总次数'));
+    if (mode === 'time' && !validDays) return res.json(fail('时效制卡必须设置有效天数'));
 
     // 订阅卡三字段：留空 = 跟随全局；公式必须**先过求值器**再落库，
     // 否则一条写错的公式会让该卡种的所有退款静默回落默认规则（用户以为生效了）
@@ -371,6 +391,13 @@ router.put('/card-type/:id', (req, res) => {
     if (!existing) return res.json(fail('产品不存在'));
     const isGoods = productType === 'goods' || existing.product_type === 'goods';
 
+    // R5：与创建接口共用数值判据。此前更新侧 price / pointsReward / 到店限次
+    // 完全无校验，可写入负价、小数赠送积分或超大限次，直接污染销售与积分口径。
+    // totalClasses / validDays 保留下方按计费模式的部分更新校验，避免改变既有表单语义。
+    const numErr = validateCardNumbers(req.body,
+      ['price', 'pointsReward', 'visitLimitPerWeek', 'visitLimitPerMonth']);
+    if (numErr) return res.json(fail(numErr));
+
     // 参数校验（与创建接口同判据）：更新接口此前只有「存在性」校验，可把时效卡的有效天数清空
     // 写成 0/负数 → calcCardExpiresAt 返回激活时刻 → 「买来即过期」且永不被选卡命中（直接营收/口碑损失），
     // 且照界面正常编辑即可触发。注意「部分更新」语义：未传（undefined/null）沿用库中原值不校验，显式传入必须合法。
@@ -378,11 +405,11 @@ router.put('/card-type/:id', (req, res) => {
       const mode = billingMode || existing.billing_mode;
       if (mode === 'time' && validDays !== undefined && validDays !== null) {
         const vd = Number(validDays);
-        if (!Number.isInteger(vd) || vd <= 0) return res.json(fail('时效制卡的有效天数必须是正整数'));
+        if (!Number.isInteger(vd) || vd <= 0 || vd > 3650) return res.json(fail('时效制卡的有效天数必须是 1 ~ 3650 的整数'));
       }
       if (mode === 'count' && totalClasses !== undefined && totalClasses !== null) {
         const tc = Number(totalClasses);
-        if (!Number.isInteger(tc) || tc <= 0) return res.json(fail('次数制卡的总次数必须是正整数'));
+        if (!Number.isInteger(tc) || tc <= 0 || tc > 10000) return res.json(fail('次数制卡的总次数必须是 1 ~ 10000 的整数'));
       }
       // 切换计费模式时必须补齐新模式必填项（次数卡改时效制却不带有效天数 → 直接拒绝，最易漏的一处）
       if (billingMode !== undefined && billingMode !== existing.billing_mode) {
@@ -501,7 +528,6 @@ router.post('/activate', (req, res) => {
     const student = db.prepare('SELECT name FROM students WHERE id = ?').get(studentId);
     if (!student) return res.json(fail('成员不存在'));
 
-    const id = generateId('mc_');
     const activatedAt = now();
     const expiresAt = calcCardExpiresAt(activatedAt, cardType.valid_days, cardType.billing_mode || 'time');
 
@@ -510,36 +536,74 @@ router.post('/activate', (req, res) => {
     const visitLimitPerWeek = Number(cardType.visit_limit_per_week) || 0;
     const visitLimitPerMonth = Number(cardType.visit_limit_per_month) || 0;
 
-    db.prepare(`
-      INSERT INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name,
-        total_classes, remaining_classes, used_classes, activated_at, expires_at, status, order_id,
-        visit_limit_per_week, visit_limit_per_month, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active', ?, ?, ?, ?, ?)
-    `).run(id, cardTypeId, cardType.name, cardType.billing_mode || 'time', studentId, student.name,
-      cardType.total_classes, cardType.total_classes,
-      activatedAt, expiresAt, orderId || '', visitLimitPerWeek, visitLimitPerMonth, now(), now());
-
-    // 开卡即产生一项会员资产（课时/有效期），需留痕
-    const actor = getActor(req);
-    recordAudit(db, {
-      entity: 'membership_card',
-      entityId: id,
-      action: 'activate',
-      actorId: actor.id,
-      actorRole: actor.role,
-      after: {
-        card_type_id: cardTypeId,
-        student_id: studentId,
-        billing_mode: cardType.billing_mode || 'time',
-        total_classes: cardType.total_classes,
-        expires_at: expiresAt,
-        order_id: orderId || '',
-        visit_limit_per_week: visitLimitPerWeek,
-        visit_limit_per_month: visitLimitPerMonth,
-      },
+    // R5：订单驱动发卡必须幂等。支付回调重放、用户连点「激活」都会为同一订单同一学员
+    // 再插一张卡，课时资产凭空翻倍。判重与插入放进同一 immediate 事务，
+    // 单进程与多进程下都不会出现「两个请求同时查重为空」的窗口。
+    // 仅在 orderId 非空时判重：后台直接发卡（order_id=''）是独立合法业务，
+    // 不能拿空串当幂等键把不同次发卡误判为重复。此处不改表结构、不加唯一约束。
+    const activateTx = db.transaction(() => {
+      if (orderId) {
+        const existing = db.prepare(`
+          SELECT id, card_type_name, billing_mode, total_classes, expires_at
+          FROM member_cards
+          WHERE order_id = ? AND student_id = ? AND card_type_id = ?
+          ORDER BY created_at ASC LIMIT 1
+        `).get(orderId, studentId, cardTypeId);
+        if (existing) return { duplicated: true, card: existing };
+      }
+      const id = generateId('mc_');
+      db.prepare(`
+        INSERT INTO member_cards (id, card_type_id, card_type_name, billing_mode, student_id, student_name,
+          total_classes, remaining_classes, used_classes, activated_at, expires_at, status, order_id,
+          visit_limit_per_week, visit_limit_per_month, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active', ?, ?, ?, ?, ?)
+      `).run(id, cardTypeId, cardType.name, cardType.billing_mode || 'time', studentId, student.name,
+        cardType.total_classes, cardType.total_classes,
+        activatedAt, expiresAt, orderId || '', visitLimitPerWeek, visitLimitPerMonth, now(), now());
+      return {
+        duplicated: false,
+        card: {
+          id,
+          card_type_name: cardType.name,
+          billing_mode: cardType.billing_mode || 'time',
+          total_classes: cardType.total_classes,
+          expires_at: expiresAt,
+        },
+      };
     });
+    const result = activateTx.immediate();
+    const card = result.card;
 
-    res.json(success({ id, cardTypeName: cardType.name, billingMode: cardType.billing_mode || 'time', totalClasses: cardType.total_classes, expiresAt }));
+    if (!result.duplicated) {
+      // 开卡即产生一项会员资产（课时/有效期），需留痕
+      const actor = getActor(req);
+      recordAudit(db, {
+        entity: 'membership_card',
+        entityId: card.id,
+        action: 'activate',
+        actorId: actor.id,
+        actorRole: actor.role,
+        after: {
+          card_type_id: cardTypeId,
+          student_id: studentId,
+          billing_mode: card.billing_mode,
+          total_classes: card.total_classes,
+          expires_at: expiresAt,
+          order_id: orderId || '',
+          visit_limit_per_week: visitLimitPerWeek,
+          visit_limit_per_month: visitLimitPerMonth,
+        },
+      });
+    }
+
+    res.json(success({
+      id: card.id,
+      cardTypeName: card.card_type_name,
+      billingMode: card.billing_mode,
+      totalClasses: card.total_classes,
+      expiresAt: card.expires_at,
+      duplicated: result.duplicated,
+    }));
   } catch (err) {
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }

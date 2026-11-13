@@ -1308,10 +1308,13 @@ html[data-theme='dark'] .el-table th.el-table__cell {
 // 故删除死层，只保留实际在用的数字展示令牌。
 // ============================================
 
-// Space Grotesk / Inter 仅用于数字展示，按需加载
-@supports (font-variation-settings: normal) {
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
-}
+// 数字展示字族（Space Grotesk / Inter）此前由 Google Fonts 的 @import 远程加载。
+// 该域名在国内网络下不可达：每次首屏都会多一个必然失败的第三方请求（控制台报
+// ERR_CONNECTION_CLOSED），并且 @import 位于样式表中段，会阻塞后续 CSS 解析。
+// 字体栈本身已有 -apple-system / SF Pro / PingFang 兜底，且数字统一使用
+// tabular-nums（见 --font-display 与 .num 相关令牌），去掉远程字体后「数字不抖动」
+// 的排版目标仍成立，换来的是首屏少一次跨域阻塞 + 不再依赖境外服务。
+// 若日后确需这两个字族，应自托管 woff2 并放进 dist，而不是回退到远程 @import。
 
 :root {
   --font-display: #{inspect($font-display)};

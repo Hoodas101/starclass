@@ -43,10 +43,12 @@ frontend step is needed. `backend/uploads` is a volume so avatars survive
 container rebuilds.
 
 > **Backups** — the scheduled backup (if enabled via `backup_config` in the
-> admin settings) writes to `/app/backend/backups`, which is **not** a volume.
-> The live database lives on the `/data` volume and is safe; backup snapshots
-> are reset on container rebuild. Export a copy (`docker compose cp app:/app/backend/backups .`)
-> before rebuilding if you want to keep them.
+> admin settings) writes to `/data/backups`, i.e. **inside the `data` volume**,
+> so it survives container rebuilds together with the live database. Because
+> the database and its backups share the same disk, configure
+> `BACKUP_OFFSITE_DIR` (see `docker-compose.yml`) and mount a host/offsite
+> directory for real disaster recovery. To copy snapshots out manually:
+> `docker compose cp app:/data/backups .`
 
 ## Environment
 

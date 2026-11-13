@@ -248,6 +248,16 @@ const openSuppressionDialog = async () => {
 }
 
 const removeSuppression = async (s) => {
+  // R5：移除勿扰会立即恢复营销类通知发送，误点后无撤销入口，须二次确认
+  try {
+    await ElMessageBox.confirm(
+      `确认将「${s.name || '该家长'}」移出勿扰名单？移除后将重新接收营销类通知。`,
+      '移除勿扰',
+      { type: 'warning', confirmButtonText: '确认移除', cancelButtonText: '取消' }
+    )
+  } catch (e) {
+    return // 用户取消，不发起删除
+  }
   try {
     await deleteSuppression(s.id)
     ElMessage.success('已移除勿扰')

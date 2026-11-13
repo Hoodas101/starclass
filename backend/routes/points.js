@@ -76,7 +76,9 @@ router.post('/add', (req, res) => {
     // 读-改-写分离时并发发放会丢更新，referenceId 去重也存在检查后插入的竞态窗口。
     const result = db.transaction(() => {
       if (referenceId) {
-        const exist = db.prepare('SELECT id FROM point_logs WHERE reference_id = ?').get(referenceId);
+        // 必须限定 type='earn'：同一 referenceId 可能先被 /consume 使用，
+        // 只按 reference_id 判重会把 consume 流水误判为本接口的重复发放，导致积分漏发。
+        const exist = db.prepare("SELECT id FROM point_logs WHERE reference_id = ? AND type = 'earn'").get(referenceId);
         if (exist) {
           const acc = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
           return { duplicated: true, balance: acc ? acc.balance : 0 };
@@ -133,13 +135,46 @@ router.post('/consume', (req, res) => {
     if (!Number.isInteger(amount) || amount <= 0) return res.json(fail('积分必须为正整数'));
     if (amount > 100000) return res.json(fail('单次积分不能超过 100000'));
 
+    // R5：与 /points/add 同口径支持 referenceId 幂等。重复提交兑换/扣减请求
+    // 会二次扣减积分；必须放在余额预检查之前，否则上一条流水扣完后余额已不足，
+    // 重放请求会被误判为「余额不足」而不是幂等成功。
+    // 判重带 type='consume'：reference_id 会被发放、分享等业务复用，不带类型会误命中。
+    // 幂等键必须绑定学员与金额：否则同一 referenceId 换 studentId 再请求会命中别人的流水，
+    // 返回 duplicated 却一分不扣，兑换侧按成功发货即形成「免费兑换」。
+    const findDup = () => db.prepare(
+      "SELECT id, student_id, amount FROM point_logs WHERE reference_id = ? AND type = 'consume'"
+    ).get(referenceId);
+    if (referenceId) {
+      const dup = findDup();
+      if (dup) {
+        if (String(dup.student_id) !== String(studentId) || Number(dup.amount) !== amount) {
+          return res.json(fail('该幂等键已用于其它扣减，请更换 referenceId'));
+        }
+        const acc = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
+        return res.json(success({ balance: acc ? acc.balance : 0, consumed: 0, duplicated: true }));
+      }
+    }
+
     const points = db.prepare('SELECT * FROM points WHERE student_id = ?').get(studentId);
     if (!points || points.balance < amount) return res.json(fail('积分余额不足'));
 
     // 余额校验与扣减、流水写入在同一事务内原子完成：
     // better-sqlite3 单写连接下，事务持有写锁，避免并发扣减绕过余额检查。
     const currentTime = now();
-    db.transaction(() => {
+    // 事务内再判重一次，堵住「两个请求同时通过上面的只读检查」的竞态窗口。
+    const result = db.transaction(() => {
+      if (referenceId) {
+        const dup = findDup();
+        if (dup) {
+          if (String(dup.student_id) !== String(studentId) || Number(dup.amount) !== amount) {
+            const err = new Error('该幂等键已用于其它扣减，请更换 referenceId');
+            err.clientMessage = err.message;
+            throw err;
+          }
+          const acc = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
+          return { duplicated: true, balance: acc ? acc.balance : 0 };
+        }
+      }
       const current = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
       if (!current || current.balance < amount) {
         const err = new Error('积分余额不足');
@@ -162,13 +197,16 @@ router.post('/consume', (req, res) => {
         before: { points: current.balance },
         after: { points: updated.balance, delta: -amount },
       });
-      return updated.balance;
-    })();
+      return { duplicated: false, balance: updated.balance };
+    }).immediate();
 
-    const finalBalance = db.prepare('SELECT balance FROM points WHERE student_id = ?').get(studentId);
-    res.json(success({ balance: finalBalance.balance, consumed: amount }));
+    if (result.duplicated) {
+      return res.json(success({ balance: result.balance, consumed: 0, duplicated: true }));
+    }
+    res.json(success({ balance: result.balance, consumed: amount }));
   } catch (err) {
     if (err && err.code === 'INSUFFICIENT') return res.json(fail('积分余额不足'));
+    if (err && err.clientMessage) return res.json(fail(err.clientMessage));
     res.status(500).json(safeFail("操作失败，请稍后重试"));
   }
 });

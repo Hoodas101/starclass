@@ -175,19 +175,88 @@ console.log('\n[6] 样式层叠与组件样式完整性')
   const server = fs.readFileSync(path.resolve(SRC, '../../backend/server.js'), 'utf8')
   const csp = (server.match(/Content-Security-Policy',\s*"([^"]+)"/) || [])[1] || ''
   const declared = [...csp.matchAll(/'sha256-([^']+)'/g)].map((m) => m[1])
+  // HTML 解析器按规范把源码里的 CRLF 规范化为 LF 后再校验内联脚本哈希；
+  // Node 读到的是原始字节（本项目 index.html 为 CRLF），直接哈希得到 AF2W… 而非浏览器
+  // 实际校验的 EFh1…，会产生两条恒定 FAIL 的误报。此处与浏览器口径对齐。
   const inlineHash = (file) => {
     const m = fs.readFileSync(file, 'utf8').match(/<script>([\s\S]*?)<\/script>/)
-    return m ? createHash('sha256').update(m[1], 'utf8').digest('base64') : ''
+    if (!m) return ''
+    return createHash('sha256').update(m[1].replace(/\r\n/g, '\n'), 'utf8').digest('base64')
   }
   const srcHash = inlineHash(path.resolve(SRC, '../index.html'))
   rec('★ CSP 声明了源 index.html 内联脚本的 sha256', !!srcHash && declared.includes(srcHash),
     `src=${srcHash || 'missing'} declared=[${declared.join(', ') || 'none'}]`)
+  // dist 被 .gitignore 忽略，CI 全新 checkout 时不存在。不能判 FAIL（流程是先 test 后 build），
+  // 但也不能静默跳过：显式打印 SKIP，让运维知道产物哈希这一层本次没有覆盖。
   const distPath = path.resolve(SRC, '../dist/index.html')
   if (fs.existsSync(distPath)) {
     const distHash = inlineHash(distPath)
     rec('★ CSP 声明了构建产物内联脚本的 sha256', !!distHash && declared.includes(distHash),
       `dist=${distHash || 'missing'}；若与源不同请重建 dist 或重算哈希`)
+  } else {
+    console.log('  [SKIP] dist/index.html 未构建，跳过产物哈希校验（构建后重跑将自动覆盖）')
   }
+}
+
+// [8] 第五轮加固：破坏性操作二次确认、Hub 运行时 URL 回退
+// 两条都是「编译期不报错、运行时才体现」的交互缺陷，靠静态守卫防复发。
+console.log('[8] 第五轮加固静态守卫')
+{
+  const parents = read(path.join(SRC, 'views/parents/index.vue'))
+  const start = parents.indexOf('const removeSuppression')
+  const end = parents.indexOf('const error =', start)
+  const seg = start >= 0 ? parents.slice(start, end > start ? end : start + 900) : ''
+  // 只判断字符串存在会被「把 DELETE 挪到 confirm 之前」骗过：
+  // 必须校验控制流顺序 —— confirm 在前、删除请求在后、且取消分支 return。
+  const confirmAt = seg.indexOf('ElMessageBox.confirm')
+  const delAt = seg.indexOf('deleteSuppression(')
+  rec('★ 勿扰名单「移除」必须二次确认（U9）',
+    !!seg && confirmAt >= 0 && delAt > confirmAt && seg.includes('return'),
+    'removeSuppression 的确认框必须在删除请求之前，且取消分支 return；否则误点即生效')
+
+  const hubDir = path.join(SRC, 'views/hubs')
+  const hubs = fs.readdirSync(hubDir).filter((f) => f.endsWith('Hub.vue'))
+  const bad = []
+  for (const h of hubs) {
+    const src = read(path.join(hubDir, h))
+    const idx = src.indexOf('watch(route')
+    const w = idx >= 0 ? src.slice(idx, idx + 900) : ''
+    // 初始化阶段的 onMounted 回退（B5）不能覆盖运行时 URL 变更，故必须检查 watch 段
+    if (!w.includes('router.replace') || !w.includes('visibleTabs.value.some')) bad.push(h)
+  }
+  rec('★ 5 个 Hub 运行时不可见页签回退 URL（U11）',
+    hubs.length === 5 && bad.length === 0,
+    `Hub 数 ${hubs.length}；缺运行时回退：[${bad.join(', ') || '无'}]`)
+}
+
+// [9] 第六轮修复防复发守卫
+// 四条都曾被「补丁自身」或「旧实现」引入，且编译期完全不报错。
+console.log('\n[9] 第六轮修复防复发守卫')
+{
+  const finance = read(path.join(SRC, 'views/finance/index.vue'))
+  rec('★ 财务年份下拉不得直绑带 seq 形参的加载函数',
+    /@change="loadAll"/.test(finance) && !/@change="loadMonthly"/.test(finance),
+    'el-select 的 @change 首参是年份数值，直绑 loadMonthly 会顶替 seq 导致响应被丢弃、loading 卡死')
+
+  const router = read(path.join(SRC, 'router/index.js'))
+  // 只看实际 return 行，避免注释里描述旧写法的字面量造成误报
+  const tokenReturn = (router.match(/return\s+Number\.isFinite\(payload\.exp\)[^\n]*/) || [])[0] || ''
+  rec('★ JWT 可用性必须校验 exp 为有限正数（不接受 !payload.exp）',
+    router.includes('Number.isFinite(payload.exp)')
+      && !/return\s+!payload\.exp/.test(router)
+      && tokenReturn.includes('payload.exp > 0')
+      && tokenReturn.includes('Date.now()'),
+    '旧写法 !payload.exp 会把 exp=0 / 缺失 / 字符串全部放行，伪造三段式 token 可进页面壳')
+
+  const attendance = read(path.join(SRC, 'views/attendance-records/index.vue'))
+  rec('★ CSV 公式注入守卫须剔除零宽/双向/软连字符',
+    attendance.includes('CSV_INVISIBLE') && /\\u200B/.test(attendance),
+    '仅靠 [\\s\\uFEFF]* 会被 \\u200B=1+1 之类的前缀绕过')
+
+  const xlsx = read(path.join(SRC, 'utils/xlsx.js'))
+  rec('★ 多表模式判定须扫描全部表描述（不能只看首元素）',
+    xlsx.includes('headers.some(isSheetDesc)') && /used\.has/.test(xlsx),
+    '首元素为 null 时只判 headers[0] 会把整份 sheets 当成单表表头；同名/History 会让 Excel 报损坏')
 }
 
 console.log(`\n结果汇总：PASS ${pass}  FAIL ${fail}`)

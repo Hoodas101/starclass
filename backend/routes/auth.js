@@ -309,7 +309,10 @@ router.post('/wx-login', async (req, res) => {
     }
 
     if (!session || !session.openid) {
-      return res.json(fail(session && session.errmsg ? `微信登录失败：${session.errmsg}` : '微信登录失败，请重试'));
+      // R5：微信侧 errmsg 会回显 appid/secret 状态、接口配额等内部细节，
+      // 只进服务端日志，对外统一固定文案。
+      console.warn('[wx-login] 微信侧返回错误', session && session.errmsg);
+      return res.json(fail('微信登录失败，请重试'));
     }
 
     const openid = session.openid;
@@ -432,8 +435,9 @@ router.post('/phone-login', async (req, res) => {
     }
 
     if (!phoneResp || phoneResp.errcode) {
-      const errmsg = phoneResp && phoneResp.errmsg ? `： ${phoneResp.errmsg}` : '';
-      return res.json(fail(`微信手机号获取失败${errmsg}`));
+      // R5：同上，不把微信 errmsg / errcode 回显给调用方
+      console.warn('[phone-login] 微信侧返回错误', phoneResp && phoneResp.errcode, phoneResp && phoneResp.errmsg);
+      return res.json(fail('微信手机号获取失败，请重试'));
     }
 
     const phone = phoneResp.phone_info && phoneResp.phone_info.phoneNumber;

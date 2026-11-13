@@ -131,6 +131,27 @@ function resolveFallback(role, perms) {
   return '/no-access'
 }
 
+// 纵深防御：只做本地 JWT 结构/过期校验，不发网络请求、不拖慢首屏。
+// 后端始终以 JWT 为唯一身份源（401 由 request.js 统一拦截），这里仅避免
+// 「伪造一个非空字符串当 token」或「拿着过期 token」进入受限页面外壳、
+// 触发一串必然失败的请求与误导性提示。角色/权限仍是服务端权威判定。
+const isTokenUsable = (t) => {
+  if (!t || typeof t !== 'string') return false
+  const parts = t.split('.')
+  if (parts.length !== 3) return false
+  try {
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const payload = JSON.parse(atob(b64 + '='.repeat((4 - b64.length % 4) % 4)))
+    // 必须要求 exp 是有限数字且未过期。后端签发的 token 恒带 exp，
+    // 旧写法 `!payload.exp` 会把 exp=0 / 缺失 / 字符串 / 非对象 payload 全部放行，
+    // 等于任意三段式伪造串都能进入受保护页面外壳。签名仍由后端校验（纵深防御）。
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
+    return Number.isFinite(payload.exp) && payload.exp > 0 && payload.exp * 1000 > Date.now()
+  } catch (e) {
+    return false
+  }
+}
+
 // 路由守卫 - 检查登录态
 router.beforeEach((to, from, next) => {
   const token = localStorage.getItem('edu_token')
@@ -144,7 +165,7 @@ router.beforeEach((to, from, next) => {
   if (to.meta.public) {
     // 公开路由直接放行
     next()
-  } else if (token && (role === 'admin' || role === 'coach' || role === 'sales')) {
+  } else if (isTokenUsable(token) && (role === 'admin' || role === 'coach' || role === 'sales')) {
     // 已登录用户：与侧栏菜单共用 hasPageAccess 判定（角色或自定义功能权限）
     // 注意：不再对 parent 无条件放行——家长端走微信小程序，管理后台面向机构员工；
     // 此前 parent 兜底可直达 /settings 等所有页面壳（URL 直达绕过菜单隐藏）
@@ -166,6 +187,11 @@ router.beforeEach((to, from, next) => {
       next(fallback)
     }
   } else {
+    // 过期/伪造 token 视为未登录：清掉本地缓存，避免下次刷新又走进来
+    if (token && !isTokenUsable(token)) {
+      localStorage.removeItem('edu_token')
+      localStorage.removeItem('edu_user_info')
+    }
     // 未登录（或家长/未知角色会话）跳转登录页
     next('/login')
   }

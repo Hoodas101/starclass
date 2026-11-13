@@ -25,6 +25,13 @@ const { findDuplicateStudents, normalizePhone, PHONE_RE } = require('../utils/du
 // 已删除 / 已归档学员的排除条件（学员下拉与 growth 预警共用同一判据）
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 
+/**
+ * 成员财务字段（累计消费 / 购买次数 / 最近购买日）的可见性，与 /api/finance/* 模块级权限对齐。
+ * 教练默认无 finance 权限、被财务模块 403，却曾能通过成员列表拿到全员累计消费金额；
+ * 销售按 R1 裁决同样不显示。管理员（'*'）或显式授予 finance 权限者可见。
+ */
+const canSeeStudentFinance = (req) => hasPerm(getReqUser(req), 'finance');
+
 // member_no / archived / qr_exp 列已收编至 migrations/011。
 // 会员编号回填：只补空号（从现有最大编号继续），绝不重排已有编号——
 // 编号被 auth.js bindStudent 用于区分同名学员，整体重排会破坏对账与绑定。
@@ -402,6 +409,10 @@ router.post('/import', (req, res) => {
         // 会员表实测 115 个非空生日里 65 个是 M/D/YY（如 5/1/15）、50 个是 YYYY/M/D（如 2021/6/17），
         // 严格 YYYY-MM-DD 校验会把它们全部判失败（140 行只进 23 行）。归一后再用 isValidDateStr
         // 做真实性终验（挡掉 2 月 30 日这类「格式对但不存在」的日期）。
+        // 两段都 ≤12 的日期（如 5/12/25）无法从字面判断月/日顺序；解析器的 ambiguous
+        // 标记此前没有任何消费方，用户看到的是「静默按美式导入」。这里汇总成一条 warning，
+        // 经调用方映射后在导入结果里显示「第 N 行：…」，并给出切换口径的可执行路径。
+        const ambiguousDateNotes = [];
         const birthdayRaw = String(r.birthday || '').trim();
         let birthdayVal = '';
         if (birthdayRaw) {
@@ -411,6 +422,7 @@ router.post('/import', (req, res) => {
             return;
           }
           birthdayVal = bd.value;
+          if (bd.ambiguous) ambiguousDateNotes.push(`生日「${birthdayRaw}」→ ${bd.value}`);
         }
         const joinRaw = String(r.joinDate || r.join_date || '').trim();
         let joinNorm = '';
@@ -421,6 +433,14 @@ router.post('/import', (req, res) => {
             return;
           }
           joinNorm = jd.value;
+          if (jd.ambiguous) ambiguousDateNotes.push(`入会日期「${joinRaw}」→ ${jd.value}`);
+        }
+        if (ambiguousDateNotes.length) {
+          warnings.push({
+            row: fileRowOf(r, idx),
+            name,
+            reason: `日期存在月/日歧义，已按「月/日/年」解析：${ambiguousDateNotes.join('；')}；若原表为「日/月/年」，请配置 DATE_ORDER=DMY 后重新导入`,
+          });
         }
 
         const id = generateId('stu_');
@@ -535,8 +555,16 @@ router.post('/import', (req, res) => {
       actorId: actor.id,
       actorRole: actor.role,
       // 审计如实记录「未建家长绑定」的行数，否则事后无从判断这批学员的家长能否收到通知；
-      // skipped 同样入账，避免「导入 100 条只建了 60 条」在审计里看不出原因
-      after: { created: okCount.length, failed: failed.length, unlinked: warnings.length, skipped: skipped.length },
+      // skipped 同样入账，避免「导入 100 条只建了 60 条」在审计里看不出原因。
+      // unlinked 必须与下方响应的口径一致：warnings 还包含兄弟姐妹、状态回落、
+      // 日期歧义等非绑定提示，直接取 warnings.length 会把这些行也算成「家长未绑定」。
+      after: {
+        created: okCount.length,
+        failed: failed.length,
+        unlinked: okCount.filter((x) => !x.parentLinked).length,
+        warnings: warnings.length,
+        skipped: skipped.length,
+      },
     });
     // 保持 success / created / failed 结构不变（前端与既有调用方依赖），
     // 新增 unlinked + warnings 如实说明哪些学员没建上家长绑定，
@@ -682,21 +710,25 @@ router.get('/', (req, res) => {
     // 其次是归档；最后才用会员卡派生状态（暂停/已结束/已退费/流失），避免列表恒显「正常」。
     // 注意不能写成 `r.mem_status || r.status`：mem_status 的 CASE 带 ELSE 'none'，恒为真值，
     // 会把学员自身的 status（含已删除）永远吞掉 —— 已删学员因此显示成「在读」。
-    // R1（口径裁决）：销售可见 roster + 家长手机（跟进客户需要），
-    // 但**不可见生日与累计消费** —— 与 canViewStudentData 把销售排除在敏感字段外保持一致。
-    // 此前列表把这两类字段一并返回，等于同一份数据在列表与详情两条路径上口径不同。
-    const isSalesViewer = ((getReqUser(req) || {}).role === 'sales');
+    // R1（口径裁决）：销售可见 roster + 家长手机（跟进客户需要），但不可见生日。
+    // 财务字段改由 finance 权限统一控制 —— 教练被财务模块拒绝却能从列表拿到全员累计消费，
+    // 属模块级权限与字段级数据不一致；销售按 R1 同样不显示。
+    const viewer = getReqUser(req) || {};
+    const isSalesViewer = viewer.role === 'sales';
+    const showFinance = canSeeStudentFinance(req);
     const mapped = list.map((r) => {
       const row = {
         ...r,
         status: r.status === 'refunded' ? 'refunded' : (r.archived ? 'archived' : (r.mem_status || r.status)),
       };
-      if (isSalesViewer) {
-        row.birthday = null;
-        row.age = null;
+      if (!showFinance) {
         row.total_spent = null;
         row.purchase_count = null;
         row.latest_purchase_date = null;
+      }
+      if (isSalesViewer) {
+        row.birthday = null;
+        row.age = null;
       }
       return row;
     });
@@ -951,11 +983,14 @@ router.get('/:id', requireAuth, (req, res) => {
     // 消费记录
     const orders = db.prepare('SELECT id, order_no, order_type, payable_amount, status, paid_at FROM orders WHERE student_id = ? ORDER BY created_at DESC LIMIT 10').all(id);
 
-    // 与列表同一口径（R1）：销售不可见生日。列表已脱敏、详情不脱敏等于白做 ——
-    // 同一个人在两处看到两种数据，反而更容易被当成 bug。
+    // 与列表同一口径（R1）：销售不可见生日；财务权限之外不暴露订单金额。
+    // 列表已脱敏、详情不脱敏等于白做 —— 同一个人在两处看到两种数据，反而更容易被当成 bug。
     const detailView = { ...student };
     if (((getReqUser(req) || {}).role === 'sales')) detailView.birthday = null;
-    res.json(success({ ...detailView, parents, cards, points, enrollments, orders }));
+    const visibleOrders = canSeeStudentFinance(req)
+      ? orders
+      : orders.map(({ payable_amount, ...rest }) => rest);
+    res.json(success({ ...detailView, parents, cards, points, enrollments, orders: visibleOrders }));
   } catch (err) {
     console.error('[getStudent]', err);
     res.status(500).json(safeFail('获取成员信息失败'));

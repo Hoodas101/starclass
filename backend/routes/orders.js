@@ -26,6 +26,20 @@ const { normalizePhone } = require('../utils/duplicate');
 const { ACTIVE_STUDENT_SQL } = require('../utils/student-state');
 const { computeExpiry } = require('../utils/points-expiry');
 
+/**
+ * 是否真正「全额退款」——以金额为准，不以 status 为准。
+ * 存量库里存在部分退款却写成 status='refunded' 的脏行（如付 699 退 400 已被标记终态），
+ * 只用 status 前置判断会让剩余额度永远无法续退，且预览页与退款接口同时报「已全额退款」。
+ * 0.005 容差兼容 REAL 类型的浮点尾差。
+ */
+const isFullyRefunded = (order) => {
+  const payable = Number(order.payable_amount) || 0;
+  // 0 元单 / 空应付额不能判为「已全额退款」：0 >= 0 - 0.005 恒成立，
+  // 会让这类订单连预览页都进不去。只把有实付金额且退款额已达应付额视为全退。
+  if (payable <= 0) return false;
+  return (Number(order.refunded_amount) || 0) >= payable - 0.005;
+};
+
 // 销售权限：管理员或拥有「sales」权限的员工（销售）
 function canSales(req) {
   return isAdminReq(req) || hasPerm(getReqUser(req), 'sales');
@@ -48,6 +62,25 @@ function myStaffName(req) {
   if (!openid) return '';
   const u = db.prepare('SELECT nickname FROM users WHERE openid = ?').get(openid);
   return u && u.nickname ? String(u.nickname).trim() : '';
+}
+
+/**
+ * 「员工代收」身份判定 —— 以数据库中的角色为权威，不接受昵称/token 自述。
+ *
+ * 背景（第四轮 P0）：/orders/:id/pay 曾直接用 canOperateOrder(req, order) 判定
+ * 「员工代收」，而 canOperateOrder 的第一条就是 `order.user_id === openid`
+ * （订单归属本人即放行）—— 家长支付自己名下的待付订单因此被当成员工代收，
+ * 直接绕过 SIMULATED_PAY_DISABLED fail-closed 闸门，零成本把订单置 paid 并
+ * 自动发卡/发积分。另一条路径是家长把 nickname 改成销售姓名，命中
+ * `sp === myName` 分支同样冒充成功。
+ * 员工代收是「收了真实现金/转账后由员工录入」，必须由角色 + 归属双重约束。
+ */
+function isStaffCollector(req) {
+  if (isAdminReq(req)) return true;
+  const openid = getOpenId(req);
+  if (!openid) return false;
+  const u = db.prepare('SELECT role FROM users WHERE openid = ?').get(openid);
+  return !!u && (u.role === 'admin' || u.role === 'sales');
 }
 
 function canOperateOrder(req, order) {
@@ -370,9 +403,15 @@ router.post('/', (req, res) => {
     }
 
     let payableAmount = Math.max(0, totalAmount - discountVal);
-    // 支持管理端按实际成交价录入（覆盖项目标价）
-    if (overrideAmount !== undefined && isFinite(Number(overrideAmount)) && Number(overrideAmount) >= 0) {
-      payableAmount = Number(overrideAmount);
+    // 支持管理端按实际成交价录入（覆盖项目标价）。
+    // 必须与其它三条写入路径（建单总额 / PUT 改价 / 批量导入）同为 1 亿元上限：
+    // 此前这里只判 isFinite + >=0，传 1e308 会把 payable_amount 写成超大数，
+    // 营收 SUM、月度汇总、退款上限、提成基数全部失真，微信支付金额换算还会变 Infinity。
+    if (overrideAmount !== undefined && overrideAmount !== null && overrideAmount !== '') {
+      const ov = Number(overrideAmount);
+      if (!Number.isFinite(ov) || ov < 0) return res.json(fail('成交价不合法'));
+      if (ov > 1e8) return res.json(fail('成交价超出单笔上限（1 亿元），请拆单'));
+      payableAmount = ov;
     }
     // M1：0 元单强制标记「不计入销售」。此前只写审计标记，仍照常计入销售统计 →
     // 赠课/让价单会虚增业绩，若提成以销售看板为准就会多发。
@@ -610,6 +649,14 @@ router.post('/import', (req, res) => {
             return;
           }
           paidTs = ms;
+          // 与成员导入同一口径：把解析器的 ambiguous 标记变成用户可见的提示，
+          // 否则 5/12/25 这类日期会静默按美式落库，销售趋势按月错位且无人察觉。
+          if (pd.ambiguous) {
+            warnings.push({
+              row: fileRowOf(r, idx),
+              reason: `购买日期「${r.paidDate}」存在月/日歧义，已按「月/日/年」解析为 ${pd.value}；若原表为「日/月/年」，请配置 DATE_ORDER=DMY 后重新导入`,
+            });
+          }
         }
         // 入账时间必须是合理历史区间：允许导入历史台账，但拒绝未来日期（会篡改未来月份报表）
         // 与过早日期（1900 年会让摊销/月报出现极端值）。此前接受 1900–2999 任意日期。
@@ -720,7 +767,9 @@ router.post('/:id/pay', (req, res) => {
     // 不用 `canSales(req)` 一刀切 —— 那会让任一销售能给任意人的订单收款，
     // 把既有的 IDOR 防护（T7：非订单所有者支付被拒）打开一个口子。
     // 覆盖的真实场景是「销售建单 → 同一位销售收款」，这正是此前断掉的那一环。
-    const isStaffCollect = canOperateOrder(req, order);
+    // P0：必须叠加角色判定。canOperateOrder 把「订单归属本人」也算可操作，
+    // 单用它当员工代收判据，会让家长绕过下方模拟支付闸门（详见 isStaffCollector 注释）。
+    const isStaffCollect = isStaffCollector(req) && canOperateOrder(req, order);
 
     // 家长自助：仍须订单归属本人或其绑定学员
     if (!isStaffCollect) {
@@ -796,11 +845,13 @@ router.get('/:id/refund-preview', (req, res) => {
     const { id } = req.params;
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
     if (!order) return res.json(fail('订单不存在'));
-    if (order.status !== 'paid') {
-      // P2-23：已退款的单再点退款时，不能再笼统说「只有已支付订单可退款」——
-      // 用户看到的是「我这单明明付过钱」，会误以为系统丢了支付记录。
-      return res.json(fail(order.status === 'refunded' ? '该订单已全额退款，无需再次退款' : '只有已支付订单可退款'));
+    if (order.status !== 'paid' && order.status !== 'refunded') {
+      return res.json(fail('只有已支付订单可退款'));
     }
+    // P2-23：已退款的单再点退款时，不能再笼统说「只有已支付订单可退款」——
+    // 用户看到的是「我这单明明付过钱」，会误以为系统丢了支付记录。
+    // 但「是否全退」必须按金额判定：status='refunded' 且仍有余额的脏行要允许继续退。
+    if (isFullyRefunded(order)) return res.json(fail('该订单已全额退款，无需再次退款'));
 
     const s = computeRefundSuggestion(order);
     res.json(success({
@@ -841,9 +892,11 @@ router.post('/:id/refund', (req, res) => {
     const result = db.transaction(() => {
       const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
       if (!order) return { err: '订单不存在' };
-      if (order.status !== 'paid') {
-        return { err: order.status === 'refunded' ? '该订单已全额退款，无需再次退款' : '只有已支付订单可退款' };
+      if (order.status !== 'paid' && order.status !== 'refunded') {
+        return { err: '只有已支付订单可退款' };
       }
+      // 同 refund-preview：全退以金额判定，允许修复「部分退款却被写成终态」的存量行。
+      if (isFullyRefunded(order)) return { err: '该订单已全额退款，无需再次退款' };
 
       const paidAmount = Number(order.payable_amount) || 0;
       const refundedSoFar = Number(order.refunded_amount) || 0;
@@ -875,7 +928,11 @@ router.post('/:id/refund', (req, res) => {
       // Optimistic lock: fails if refunded_amount changed concurrently
       // last_refunded_at 记录「最后一次退款发生时间」：月报按它归集退款，改备注/取消订单都不得写它，
       // 否则一笔 3 月的退款会因 5 月改备注被搬到 5 月。部分退款与全额退款都要刷新。
-      const upd = db.prepare("UPDATE orders SET refunded_amount = ?, status = CASE WHEN ? >= ? THEN 'refunded' ELSE status END, last_refunded_at = ?, updated_at = ? WHERE id = ? AND refunded_amount = ?")
+      // ELSE 分支必须显式写回 'paid'：部分退款后订单仍可续退。
+      // 旧实现 ELSE status 会保留历史上误写的 'refunded'，导致下一笔退款再次被前置守卫拒绝。
+      // 乐观锁谓词用 COALESCE：历史行 refunded_amount 可能为 NULL，
+      // `NULL = 0` 在 SQL 中不成立，会让该订单的退款永远返回 conflict 且无法自愈。
+      const upd = db.prepare("UPDATE orders SET refunded_amount = ?, status = CASE WHEN ? >= ? THEN 'refunded' ELSE 'paid' END, last_refunded_at = ?, updated_at = ? WHERE id = ? AND COALESCE(refunded_amount, 0) = ?")
         .run(newRefunded, newRefunded, paidAmount, currentTime, currentTime, order.id, refundedSoFar);
       if (upd.changes === 0) return { conflict: true };
 
@@ -894,7 +951,15 @@ router.post('/:id/refund', (req, res) => {
             db.prepare('UPDATE member_cards SET status = ?, expires_at = ?, updated_at = ? WHERE id = ?').run('refunded', currentTime, currentTime, card.id);
           }
         }
-        if (cards.length > 0) clawback = '全额退款已同步回收卡内剩余权益';
+        if (cards.length > 0) {
+          clawback = '全额退款已同步回收卡内剩余权益';
+        } else if (order.order_type === 'membership') {
+          // 退款靠 order_id 回收卡权益。存量演示库曾出现购卡订单与会员卡未关联
+          // （order_id 全 NULL），此时静默结案就是「钱退了、卡还在」的倒置。
+          // 不能静默通过：明确提示管理员人工核对卡台账，并可用
+          // tools/data-consistency-check.js 做批量巡检。
+          clawback = '警告：该购卡订单未找到关联会员卡，卡内剩余权益未自动回收，请人工核对卡台账';
+        }
         // 全额退款必须冲销该订单已结转的收入：学员已消课部分此前已从合同负债结转为收入，
         // 退款后若不冲销，collected 归零而结转记录仍在 → 该订单对合同负债的贡献变成负数，
         // 量大时整体 liability 为负。口径与 utils/attendance-revert 的 revertRevenueRecognition 一致：

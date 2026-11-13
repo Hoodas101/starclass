@@ -244,14 +244,20 @@ function buildParams(extra = {}) {
   return p
 }
 
+// 请求序号：日期/状态/分页任一变化都会重新拉「列表 + 汇总」两个接口，
+// 快速切换时旧批次后到会让卡片数字与新列表不属于同一筛选条件。
+let loadSeq = 0
+
 async function loadData() {
   error.value = ''
   loading.value = true
+  const seq = ++loadSeq
   try {
     const [listRes, sumRes] = await Promise.all([
       getAttendances(buildParams()),
       getAttendanceSummary(buildParams({ pageSize: 500 })),
     ])
+    if (seq !== loadSeq) return
     records.value = listRes.list || []
     total.value = listRes.total || 0
     // 卡片与趋势图统一取 /attendances/summary 的全量口径结果：
@@ -261,10 +267,11 @@ async function loadData() {
     trend.value = sumRes.trend || []
     renderTrend()
   } catch (e) {
+    if (seq !== loadSeq) return
     // 列表加载失败：写 error 状态由 ListErrorState 呈现并提供重试，不再重复弹 toast（拦截器已提示业务/网络错误）
     error.value = e?.message || '加载上课记录失败'
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
@@ -294,10 +301,20 @@ function resetFilters() {
 // 导出 CSV（按当前筛选拉取全部记录）
 const exporting = ref(false)
 // 防 Excel/Numbers 公式注入：以 = + - @ 开头的单元格会被当作公式执行，
-// 前置单引号强制按文本处理（姓名/课程名等均为用户可录入字段）
+// 前置单引号强制按文本处理（姓名/课程名等均为用户可录入字段）。
+// 两点加固：① 前导空白后跟公式同样会被部分表格软件 trim 后执行；
+// ② 字段内换行/控制字符在低版本 CSV 解析器下会拆行或产生非法字符，
+//    引号字段虽理论上允许换行，但导出场景统一压成空格更确定。
+// 零宽/双向/软连字符/C1 格式字符既不属于 \s 也不属于 C0，
+// 旧守卫 `/^[\s\uFEFF]*[=+\-@]/` 会被 `\u200B=1+1` 之类前缀绕过（实测 7 种）。
+// 先在单元格内容里剔除这些不可见字符，再判公式首字符。
+const CSV_INVISIBLE = /[\u0080-\u009F\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g
 const csvCell = (v) => {
   const s = String(v ?? '')
-  const guarded = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(CSV_INVISIBLE, '')
+    .replace(/\r\n|\r|\n/g, ' ')
+  const guarded = /^\s*[=+\-@\t\r]/.test(s) ? `'${s}` : s
   return `"${guarded.replace(/"/g, '""')}"`
 }
 async function onExport() {

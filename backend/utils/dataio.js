@@ -94,6 +94,11 @@ const TABLE_DATE_COLUMNS = {
   point_logs: 'created_at',
   orders: 'created_at',
   payments: 'paid_at',
+  // 「订单与支付」模块导出三张表，此前 revenue_recognitions 未登记时间列，
+  // 导致按 10 月导出时该表整表落盘（含所有历史月份），与 orders/payments 口径分叉。
+  revenue_recognitions: 'recognized_at',
+  card_transfer_logs: 'created_at',
+  deduction_logs: 'deducted_at',
   notifications: 'created_at',
   notification_reads: 'created_at',
   subscribe_msg_logs: 'created_at',

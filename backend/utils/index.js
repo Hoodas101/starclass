@@ -383,17 +383,36 @@ function normalizeDateInput(input) {
   const ymd = raw.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
   if (ymd) return verify(Number(ymd[1]), Number(ymd[2]), Number(ymd[3]));
 
-  // ④ M/D/YY（美式）或 D/M/Y：首位 > 12 时必然是「日」，否则按美式 M/D/Y 判定。
-  //    两段都 ≤ 12（如 5/12/25）存在固有无歧义，此处按美式处理 —— 依据是本机构原表该列
-  //    全部为美式写法；若其他客户以 D/M/Y 为主，可改为可配置项。
+  // ④ M/D/YY（美式）或 D/M/Y：首位 > 12 时必然是「日」；两段都 ≤ 12（如 5/12/25）
+  //    存在固有歧义，默认按美式 M/D/Y 处理，可用 DATE_ORDER=DMY 显式切换为日优先。
+  //    两位年份不再无条件 +2000：固定 2000 会把 '1/5/99' 解成 2099，历史日期被静默写进未来。
+  //    auto 采用「今年 + N 年」滑动闸门，超出的两位年份回退到 19xx。
+  //    闸门不能只用 +1 年：2026 年时 '6/1/28'/'12/31/30' 会被判成 1928/1930，
+  //    而会员卡有效期、课程排期、预约日期里 2028/2030 是完全合理的近期未来日期。
+  //    默认 N=20（可 DATE_TWO_DIGIT_WINDOW 调整，1~50），仍能正确把 '99'→1999、'50'→1950。
+  //    口径不确定时用 DATE_TWO_DIGIT_CENTURY=1900|2000 固定世纪。
   const slash = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/);
   if (slash) {
     const a = Number(slash[1]);
     const b = Number(slash[2]);
     let c = Number(slash[3]);
-    if (c < 100) c += 2000;
-    if (a > 12 && b <= 12) return verify(c, b, a);
-    return verify(c, a, b);
+    const ambiguous = a <= 12 && b <= 12;
+    if (c < 100) {
+      const mode = (process.env.DATE_TWO_DIGIT_CENTURY || 'auto').toLowerCase();
+      const rawWindow = Number(process.env.DATE_TWO_DIGIT_WINDOW);
+      const windowYears = Number.isFinite(rawWindow) && rawWindow >= 1 && rawWindow <= 50
+        ? Math.floor(rawWindow) : 20;
+      const century2000 = 2000 + c;
+      const usePreviousCentury = mode === '1900'
+        || (mode !== '2000' && century2000 > new Date().getFullYear() + windowYears);
+      c = usePreviousCentury ? 1900 + c : century2000;
+    }
+    const dateOrder = (process.env.DATE_ORDER || 'MDY').toUpperCase();
+    const dayFirst = dateOrder === 'DMY' && ambiguous;
+    const result = ((a > 12 && b <= 12) || dayFirst) ? verify(c, b, a) : verify(c, a, b);
+    // 仅供导入预览提示：两段都 ≤12 且未显式指定顺序时，按美式解析可能与原表口径相反。
+    if (result.ok && ambiguous && dateOrder !== 'DMY') result.ambiguous = true;
+    return result;
   }
 
   // ⑤ 中文写法：2026年1月5日
