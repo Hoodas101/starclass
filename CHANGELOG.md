@@ -5,6 +5,37 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased] — 2026-11-20 双端一致性第二批（改密死局 + coachstats 入口分叉）
+
+- **小程序默认口令改密闭环**：后端 `FORCE_PASSWORD_CHANGE` 默认开启，员工初始口令登录后
+  所有业务接口返回 4031；Web 端有改密闭环，小程序端此前无任何改密入口 → 登录成功却全站 4031 卡死。
+  新增 `pages/change-password`（四件套）：登录响应 `mustChangePassword` 时引导改密，
+  `api.js` 对 4031 统一跳改密页（防冷启动后静默失败），改密成功后落盘后端返回的新 token
+  并清空缓存。新增 `tools/consistency-guard-test.cjs`（3 项，红绿判别性验证）。
+- **coachstats 入口口径对齐**：小程序工作台「我的课时」此前仅凭 `role==='coach'` 显示，
+  而后端 `/schedules/coach/stats` 与 Web staff 路由都要求 `coachstats` 权限 → 收回权限后
+  入口仍在、点击 403 空白页。改为 `role==='coach' && has('coachstats')`。
+- **配置提示修正**：`api.js` 未部署提示从"改 config.js"更正为"改 local-config.js 的
+  PROD_API_BASE（参考 local-config.example.js）"，与实际配置加载方式一致。
+- 端到端验证（隔离库真实 HTTP）：默认口令登录→4031→改密→新 token 可用→旧 token 401，全链路通过。
+- 验证：小程序 43 页四件套、54 JS、API 契约 74/74、权限探针 23/23、缓存 5/5、一致性守卫 3/3、
+  WXML 平衡、mp-audit none。
+
+## [Unreleased] — 2026-11-19 双端一致性（权限同步根因 + 小程序缓存失效）
+
+- **getProfile 权限保真（跨端权限不同步根因）**：`backend/routes/auth.js` 的 getProfile
+  用精简 SELECT 漏了 `permissions` 列，`resolvePerms` 因字段缺失永远回退角色默认权限。
+  Web `store/user.js` 与小程序 `app.js` 冷启动都采信该返回值，导致管理员配置的自定义权限
+  被覆盖：收紧权限的员工「看得见点不进」、放宽权限的员工看不到应有入口。SELECT 补列修复；
+  新增 `getprofile-perms-regression.cjs`（判别性：回退变红 / 恢复变绿，5 项）。
+- **小程序写后缓存失效**：`miniprogram/utils/api.js` 的 GET 缓存 TTL 30~120s 仅在失败时清除，
+  写操作成功后未失效，导致跨页/跨端读到写前旧值。新增 `clearCache()` 并在两个成功出口
+  （主请求 + FALLBACK 重试）写操作后全清；新增 `tools/cache-invalidation-test.cjs`（5 项判别性）。
+- **测试基建健壮性**：`tools/api-contract-test.mjs` 改为相对日期区间（避免硬编码历史日期空列表）、
+  兼容默认口令强制改密流程（seed 库与真实库均可跑通）、无场次时跳过而非崩溃。
+- 验证：后端 49/49 套件（367 PASS/0 FAIL/0 WARN）、小程序静态+权限 23/23+API 契约 73/73、
+  动态字段契约 37/37、缓存与权限保真回归各 5/5，均红绿判别性验证通过。
+
 ## [Unreleased] — 2026-11-13 第三轮 / 第四轮审计与第五轮加固（41 项）+ 六路审查补修
 
 来源：`StarClass_v1.0.10_第三轮问题与修复路径方案_20261110.md`（17 项）与

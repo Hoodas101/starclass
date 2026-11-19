@@ -505,7 +505,9 @@ router.get('/getProfile', (req, res) => {
     const openid = getOpenId(req);
     if (!openid) return res.status(401).json(safeFail('未登录'));
 
-    const user = db.prepare('SELECT id, openid, nickname, avatar, phone, role, alias FROM users WHERE openid = ?').get(openid);
+    // 必须带出 permissions：resolvePerms 依赖该列判断自定义权限，漏列会让冷启动
+    // 刷新（Web store/user.js、小程序 app.js refreshProfile）把真实权限覆盖为角色默认值。
+    const user = db.prepare('SELECT id, openid, nickname, avatar, phone, role, alias, permissions FROM users WHERE openid = ?').get(openid);
     if (!user) return res.status(404).json(safeFail('用户不存在'));
 
     const bindings = db.prepare(`

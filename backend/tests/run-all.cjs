@@ -85,6 +85,7 @@ const SUITES = [
   ['settings-columns-persistence.test.cjs', '设置列配置持久化（growth/trial/finance 入库 + 键级不互抹 + 白名单）'],
   ['round5-hardening-regression.cjs', '第五轮加固（卡种数值/发卡幂等/积分幂等/设置校验/登录限流）'],
   ['round6-fixes-regression.cjs', '第六轮加固（积分幂等绑定/设置原子性/0元单/空桶排名/负债COALESCE/限流方法）'],
+  ['getprofile-perms-regression.cjs', 'getProfile 自定义权限保真（双端冷启动权限同步根因）'],
   ['full-system.test.js', '全功能系统'],
 ];
 
